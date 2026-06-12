@@ -104,3 +104,52 @@ Describe 'Get-CliArguments' {
     }
 }
 
+Describe 'CLI output parsers' {
+    $Out = Join-Path $PSScriptRoot 'fixtures\outputs'
+
+    It 'parses a claude success result' {
+        $r = ConvertFrom-CliOutput -Cli claude -OutputText (Get-Content (Join-Path $Out 'claude-success.json') -Raw) -ExitCode 0
+        $r.Ok | Should Be $true
+        $r.IsLimit | Should Be $false
+        $r.Text | Should Match '\[\[TASK_COMPLETE\]\]'
+        $r.SessionId | Should Not BeNullOrEmpty
+    }
+    It 'detects a claude usage limit' {
+        $r = ConvertFrom-CliOutput -Cli claude -OutputText (Get-Content (Join-Path $Out 'claude-limit.json') -Raw) -ExitCode 1
+        $r.Ok | Should Be $false
+        $r.IsLimit | Should Be $true
+    }
+    It 'reports a claude non-limit error as an error, not a limit' {
+        $r = ConvertFrom-CliOutput -Cli claude -OutputText (Get-Content (Join-Path $Out 'claude-error.json') -Raw) -ExitCode 1
+        $r.Ok | Should Be $false
+        $r.IsLimit | Should Be $false
+        $r.ErrorText | Should Match '500'
+    }
+    It 'parses codex JSONL, extracting thread id and final message' {
+        $r = ConvertFrom-CliOutput -Cli codex -OutputText (Get-Content (Join-Path $Out 'codex-success.jsonl') -Raw) -ExitCode 0
+        $r.Ok | Should Be $true
+        $r.SessionId | Should Be '0199a213-81c0-7800-8aa1-1d4111ae8b9f'
+        $r.Text | Should Match '\[\[TASK_COMPLETE\]\]'
+    }
+    It 'detects a codex usage limit from an error event' {
+        $r = ConvertFrom-CliOutput -Cli codex -OutputText (Get-Content (Join-Path $Out 'codex-limit.jsonl') -Raw) -ExitCode 1
+        $r.IsLimit | Should Be $true
+        $r.SessionId | Should Be '0199a213-81c0-7800-8aa1-1d4111ae8b9f'
+    }
+    It 'parses a gemini success response despite leading warning noise, capturing session_id' {
+        $r = ConvertFrom-CliOutput -Cli gemini -OutputText (Get-Content (Join-Path $Out 'gemini-success.json') -Raw) -ExitCode 0
+        $r.Ok | Should Be $true
+        $r.Text | Should Match '\[\[TASK_COMPLETE\]\]'
+        $r.SessionId | Should Not BeNullOrEmpty
+    }
+    It 'detects a gemini quota error as a limit' {
+        $r = ConvertFrom-CliOutput -Cli gemini -OutputText (Get-Content (Join-Path $Out 'gemini-error.json') -Raw) -ExitCode 1
+        $r.Ok | Should Be $false
+        $r.IsLimit | Should Be $true
+    }
+    It 'survives non-JSON garbage output without throwing' {
+        $r = ConvertFrom-CliOutput -Cli claude -OutputText "node: command not found" -ExitCode 127
+        $r.Ok | Should Be $false
+        $r.ErrorText | Should Match 'command not found'
+    }
+}

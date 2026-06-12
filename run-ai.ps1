@@ -486,6 +486,94 @@ function Get-CliArguments {
     throw "No argument builder for cli '$($Task.Cli)'"
 }
 
+function New-CliResult {
+    param([bool]$Ok, [bool]$IsLimit, [string]$Text, [string]$SessionId, [string]$ErrorText)
+    return @{ Ok = $Ok; IsLimit = $IsLimit; Text = $Text; SessionId = $SessionId; ErrorText = $ErrorText }
+}
+
+function ConvertFrom-JsonTolerant {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    try { return ($Text | ConvertFrom-Json) } catch { }
+    $start = $Text.IndexOf('{')
+    $end = $Text.LastIndexOf('}')
+    if ($start -ge 0 -and $end -gt $start) {
+        try { return ($Text.Substring($start, $end - $start + 1) | ConvertFrom-Json) } catch { }
+    }
+    return $null
+}
+
+function ConvertFrom-CliOutput {
+    param(
+        [ValidateSet('claude','codex','gemini')] [string]$Cli,
+        [string]$OutputText,
+        [int]$ExitCode
+    )
+
+    $LimitPatterns = @{
+        claude = '(?i)(you''ve hit your .{0,40}limit|usage limit)'
+        codex  = '(?i)(usage limit|rate limit|too many requests|try again (at|in)|quota)'
+        gemini = '(?i)(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)'
+    }
+
+    $limitRegex = $LimitPatterns[$Cli]
+
+    switch ($Cli) {
+        'claude' {
+            $json = ConvertFrom-JsonTolerant -Text $OutputText
+            if ($null -eq $json) {
+                $isLimit = ($OutputText -match $limitRegex)
+                return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null -ErrorText $OutputText
+            }
+            $text = [string]$json.result
+            $isError = [bool]$json.is_error -or ($ExitCode -ne 0)
+            $isLimit = $isError -and ($text -match $limitRegex)
+            return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
+                -SessionId ([string]$json.session_id) -ErrorText $(if ($isError) { $text } else { $null })
+        }
+        'codex' {
+            $text = $null; $threadId = $null; $errorText = $null
+            foreach ($line in ($OutputText -split "`r?`n")) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $evt = $null
+                try { $evt = $line | ConvertFrom-Json } catch { continue }
+                if ($null -eq $evt -or $null -eq $evt.PSObject.Properties['type']) { continue }
+                switch ($evt.type) {
+                    'thread.started' { $threadId = [string]$evt.thread_id }
+                    'item.completed' {
+                        if ($evt.item.type -eq 'agent_message') { $text = [string]$evt.item.text }
+                    }
+                    'error'       { $errorText = [string]$evt.message }
+                    'turn.failed' { if ($evt.error.message) { $errorText = [string]$evt.error.message } }
+                }
+            }
+            $isError = ($null -ne $errorText) -or ($ExitCode -ne 0)
+            $isLimit = $isError -and (("$errorText $OutputText") -match $limitRegex)
+            return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
+                -SessionId $threadId -ErrorText $errorText
+        }
+        'gemini' {
+            $json = ConvertFrom-JsonTolerant -Text $OutputText
+            if ($null -eq $json) {
+                $isLimit = ($OutputText -match $limitRegex)
+                return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null -ErrorText $OutputText
+            }
+            $sessionId = $null
+            if ($json.PSObject.Properties['session_id']) { $sessionId = [string]$json.session_id }
+            $errorNode = $json.PSObject.Properties['error']
+            if ($null -ne $errorNode -and $null -ne $errorNode.Value) {
+                $msg = [string]$errorNode.Value.message
+                $isLimit = ($msg -match $limitRegex) -or ("$($errorNode.Value.code)" -eq '429')
+                return New-CliResult -Ok $false -IsLimit $isLimit -Text $msg -SessionId $sessionId -ErrorText $msg
+            }
+            $text = [string]$json.response
+            return New-CliResult -Ok ($ExitCode -eq 0) -IsLimit $false -Text $text -SessionId $sessionId `
+                -ErrorText $(if ($ExitCode -ne 0) { $OutputText } else { $null })
+        }
+    }
+}
+
 function Test-TaskCompletedFromOutput {
     param([string]$OutputText)
 

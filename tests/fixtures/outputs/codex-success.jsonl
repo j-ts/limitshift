@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-1d4111ae8b9f"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong\n\n[[TASK_COMPLETE]]"}}
+{"type":"turn.completed","usage":{"input_tokens":900,"output_tokens":20}}

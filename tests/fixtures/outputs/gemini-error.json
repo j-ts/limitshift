@@ -1,0 +1,1 @@
+{"error":{"type":"ApiError","message":"Quota exceeded for quota metric 'Gemini 2.5 Pro Requests' ... status: RESOURCE_EXHAUSTED","code":429}}
