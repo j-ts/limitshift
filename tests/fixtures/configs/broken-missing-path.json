@@ -1,0 +1,10 @@
+{
+  "tasks": [
+    {
+      "name": "minimal",
+      "cli": "claude",
+      "projectPath": "Z:\\definitely\\not\\real\\path-9f3a",
+      "prompt": "say hi"
+    }
+  ]
+}

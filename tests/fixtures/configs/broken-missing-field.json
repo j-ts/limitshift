@@ -1,0 +1,9 @@
+{
+  "tasks": [
+    {
+      "name": "minimal",
+      "cli": "claude",
+      "projectPath": "."
+    }
+  ]
+}

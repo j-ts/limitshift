@@ -1,0 +1,35 @@
+{
+  "$schema": "./ai-run-queue.schema.json",
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 20,
+    "maxRetriesOnError": 2,
+    "limitWaitMinutes": 30,
+    "resetBufferMinutes": 2
+  },
+  "tasks": [
+    {
+      "name": "Example: audit my project with Claude",
+      "cli": "claude",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
+      "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths."
+    },
+    {
+      "name": "Example: implement fixes with Codex",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5-codex",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Implement the fixes listed in docs/audit.md, run the tests, and summarize what changed."
+    },
+    {
+      "name": "Example: write release notes with Gemini",
+      "cli": "gemini",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "extraArgs": "--approval-mode yolo",
+      "prompt": "Read the git log since the last tag and write RELEASE_NOTES.md."
+    }
+  ]
+}

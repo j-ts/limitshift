@@ -1,0 +1,10 @@
+{
+  "tasks": [
+    {
+      "name": "minimal",
+      "cli": "copilot",
+      "projectPath": ".",
+      "prompt": "say hi"
+    }
+  ]
+}

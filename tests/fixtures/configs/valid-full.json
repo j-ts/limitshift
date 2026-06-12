@@ -1,0 +1,27 @@
+{
+  "settings": {
+    "stopOnError": false
+  },
+  "tasks": [
+    {
+      "name": "t1",
+      "cli": "claude",
+      "projectPath": ".",
+      "prompt": "p1",
+      "extraArgs": ["--arg1", "val1"]
+    },
+    {
+      "name": "t2",
+      "cli": "codex",
+      "projectPath": ".",
+      "prompt": "p2",
+      "extraArgs": "--arg2 val2"
+    },
+    {
+      "name": "t3",
+      "cli": "gemini",
+      "projectPath": ".",
+      "prompt": "p3"
+    }
+  ]
+}
