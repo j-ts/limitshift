@@ -79,7 +79,7 @@ task_field() {
 
 get_task_extra_args() {
   local idx="$1"
-  jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\")[] else empty end" "$QUEUE_PATH" | tr -d '\r'
+  jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
 read_queue_config() {
