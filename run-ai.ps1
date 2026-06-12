@@ -28,6 +28,7 @@ $FreshSessionThresholdPercent = 0
 $PollSecondsAfterResetPassed = 60
 
 $TaskCompleteMarker = "[[TASK_COMPLETE]]"
+$TaskBlockedMarker  = "[[TASK_BLOCKED]]"
 
 function Write-Step {
     param([string]$Message)
@@ -420,25 +421,69 @@ function Wait-UntilClaudeUsageReady {
 }
 
 function Get-TaskPromptWithCompletionMarker {
-    param([string]$Prompt)
+    param($Task)
 
     return @"
-$Prompt
+$($Task.Prompt)
 
-IMPORTANT AUTOMATION INSTRUCTION:
-When and only when this task is fully complete, end your final response with exactly:
+IMPORTANT AUTOMATION INSTRUCTIONS:
+1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
 $TaskCompleteMarker
+2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
+$TaskBlockedMarker <one-line reason>
 "@
 }
 
 function Get-ResumePrompt {
-    return @"
-/goal Continue the previous task in this same session from where you stopped. Do not restart from scratch.
+    param($Task)
 
-IMPORTANT AUTOMATION INSTRUCTION:
-When and only when this task is fully complete, end your final response with exactly:
+    if ($Task.Cli -eq 'gemini') {
+        return @"
+You were interrupted partway through the following task. Inspect the current state of the working directory to see what is already done. Do not redo completed work; continue from where things stand.
+
+Original task:
+$($Task.Prompt)
+
+IMPORTANT AUTOMATION INSTRUCTIONS:
+1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
 $TaskCompleteMarker
+2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
+$TaskBlockedMarker <one-line reason>
 "@
+    }
+
+    return @"
+Continue the previous task in this same session from where you stopped. Do not restart from scratch.
+
+IMPORTANT AUTOMATION INSTRUCTIONS:
+1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
+$TaskCompleteMarker
+2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
+$TaskBlockedMarker <one-line reason>
+"@
+}
+
+function Get-MarkerStatus {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @{ Status = 'None'; Reason = $null } }
+    $lines = @($Text -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($lines.Count -eq 0) { return @{ Status = 'None'; Reason = $null } }
+    $last = [string]$lines[-1]
+
+    if ($last -eq $TaskCompleteMarker) { return @{ Status = 'Done'; Reason = $null } }
+    if ($last.StartsWith($TaskBlockedMarker)) {
+        return @{ Status = 'Blocked'; Reason = $last.Substring($TaskBlockedMarker.Length).Trim() }
+    }
+    return @{ Status = 'None'; Reason = $null }
+}
+
+function Save-TaskFailedMarker {
+    param([int]$TaskIndex, [string]$Reason)
+
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    "$((Get-Date).ToString('s'))  $Reason" |
+        Set-Content -LiteralPath (Join-Path $StatusStatePath "$taskKey.failed") -Encoding UTF8
 }
 
 function Get-CliArguments {
@@ -574,117 +619,113 @@ function ConvertFrom-CliOutput {
     }
 }
 
-function Test-TaskCompletedFromOutput {
-    param([string]$OutputText)
-
-    if ([string]::IsNullOrWhiteSpace($OutputText)) {
-        return $false
-    }
-
-    return ($OutputText -match [regex]::Escape($TaskCompleteMarker))
-}
-
-function Test-ClaudeLimitOutput {
-    param([string]$OutputText)
-
-    if ([string]::IsNullOrWhiteSpace($OutputText)) {
-        return $false
-    }
-
-    return ($OutputText -match "(?i)you've hit your .+ limit")
-}
-
-function Invoke-ClaudeRaw {
-    param(
-        [string[]]$Arguments,
-        [string]$OutputFilePath
-    )
-
-    $outputLines = & claude @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    $outputText = $outputLines | Out-String
-
-    if (-not [string]::IsNullOrWhiteSpace($outputText)) {
-        $outputText | Tee-Object -FilePath $OutputFilePath -Append | Out-Host
-    }
-
-    return @{
-        ExitCode   = $exitCode
-        OutputText = $outputText
-    }
-}
-
-function Start-ClaudeTaskRun {
-    param(
-        [int]$TaskIndex,
-        $Task
-    )
-
-    $sessionId = New-TaskSessionId -TaskIndex $TaskIndex
-    $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex
-
-    if (Test-Path -LiteralPath $outputFilePath) {
-        Remove-Item -LiteralPath $outputFilePath -Force
-    }
-
-    Write-Step "Starting new Claude session for task $($TaskIndex + 1): $($Task.Name)"
-    Write-Host "Session ID: $sessionId"
-    Write-Host "Project path: $($Task.ProjectPath)"
-    Write-Host "Model: $($Task.Model)"
-    Write-Host "Effort: $($Task.Effort)"
-
-    Set-Location $Task.ProjectPath
-
-    $arguments = @(
-        "-p",
-        "--session-id", $sessionId,
-        "--output-format", "json",
-        "--model", $Task.Model,
-        "--effort", $Task.Effort,
-        (Get-TaskPromptWithCompletionMarker -Prompt $Task.Prompt)
-    )
-
-    $result = Invoke-ClaudeRaw -Arguments $arguments -OutputFilePath $outputFilePath
-
-    return @{
-        ExitCode   = $result.ExitCode
-        OutputText = $result.OutputText
-        SessionId  = $sessionId
-    }
-}
-
-function Resume-ClaudeTaskRun {
+function Invoke-CliTaskRun {
     param(
         [int]$TaskIndex,
         $Task,
+        [ValidateSet('New','Resume')] [string]$Mode,
         [string]$SessionId
     )
 
     $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex
+    if ($Mode -eq 'New' -and (Test-Path -LiteralPath $outputFilePath)) {
+        Remove-Item -LiteralPath $outputFilePath -Force
+    }
 
-    Write-Step "Resuming Claude session for task $($TaskIndex + 1): $($Task.Name)"
-    Write-Host "Session ID: $SessionId"
-    Write-Host "Project path: $($Task.ProjectPath)"
-    Write-Host "Model: $($Task.Model)"
-    Write-Host "Effort: $($Task.Effort)"
+    if ($Mode -eq 'New') {
+        $prompt = Get-TaskPromptWithCompletionMarker -Task $Task
+    }
+    else {
+        $prompt = Get-ResumePrompt -Task $Task
+    }
 
-    Set-Location $Task.ProjectPath
+    $arguments = Get-CliArguments -Task $Task -Mode $Mode -SessionId $SessionId -Prompt $prompt
 
-    $arguments = @(
-        "-p",
-        "--resume", $SessionId,
-        "--output-format", "json",
-        "--model", $Task.Model,
-        "--effort", $Task.Effort,
-        (Get-ResumePrompt)
-    )
+    Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
+    Write-Host "Command: $($Task.Cli) $($arguments -join ' ')"
 
-    $result = Invoke-ClaudeRaw -Arguments $arguments -OutputFilePath $outputFilePath
+    if ($DryRun) {
+        # Marker on its own line: completion detection requires it to be the LAST line.
+        return New-CliResult -Ok $true -IsLimit $false -Text "[dry-run]`n$TaskCompleteMarker" -SessionId $SessionId -ErrorText $null
+    }
 
-    return @{
-        ExitCode   = $result.ExitCode
-        OutputText = $result.OutputText
-        SessionId  = $SessionId
+    Push-Location $Task.ProjectPath
+    try {
+        $outputLines = & $Task.Cli @arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        Pop-Location
+    }
+
+    $outputText = $outputLines | Out-String
+    if (-not [string]::IsNullOrWhiteSpace($outputText)) {
+        $outputText | Tee-Object -FilePath $outputFilePath -Append | Out-Host
+    }
+
+    return ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode
+}
+
+function Get-ResetTimeFromErrorText {
+    param([string]$ErrorText)
+
+    if ([string]::IsNullOrWhiteSpace($ErrorText)) { return $null }
+
+    $m = [regex]::Match($ErrorText, '(?i)(?:try again at|resets? at|available (?:again )?at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)')
+    if ($m.Success) {
+        foreach ($format in @('h:mmtt','htt','HH:mm','H:mm')) {
+            try {
+                $t = [datetime]::ParseExact($m.Groups[1].Value.ToUpper() -replace '\s+', '', $format, [System.Globalization.CultureInfo]::InvariantCulture)
+                $candidate = (Get-Date).Date.Add($t.TimeOfDay)
+                if ($candidate -lt (Get-Date)) { $candidate = $candidate.AddDays(1) }
+                return $candidate
+            } catch { }
+        }
+    }
+
+    $m = [regex]::Match($ErrorText, '(?i)try again in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?\s*(?:(\d+)\s*s(?:ec(?:onds?)?)?)?')
+    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success -or $m.Groups[3].Success)) {
+        $h = if ($m.Groups[1].Success) { [int]$m.Groups[1].Value } else { 0 }
+        $min = if ($m.Groups[2].Success) { [int]$m.Groups[2].Value } else { 0 }
+        $s = if ($m.Groups[3].Success) { [int]$m.Groups[3].Value } else { 0 }
+        return (Get-Date).AddHours($h).AddMinutes($min).AddSeconds($s)
+    }
+
+    $m = [regex]::Match($ErrorText, '(?i)reset after\s+(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?')
+    if ($m.Success -and ($m.Groups[1].Success -or $m.Groups[2].Success -or $m.Groups[3].Success)) {
+        $h = if ($m.Groups[1].Success) { [int]$m.Groups[1].Value } else { 0 }
+        $min = if ($m.Groups[2].Success) { [int]$m.Groups[2].Value } else { 0 }
+        $s = if ($m.Groups[3].Success) { [int]$m.Groups[3].Value } else { 0 }
+        return (Get-Date).AddHours($h).AddMinutes($min).AddSeconds($s)
+    }
+
+    $m = [regex]::Match($ErrorText, '(?i)"retryDelay"\s*:\s*"(\d+)s"')
+    if ($m.Success) {
+        return (Get-Date).AddSeconds([int]$m.Groups[1].Value)
+    }
+
+    return $null
+}
+
+function Wait-ForLimitReset {
+    param($Task, $Result, $Settings)
+
+    if ($Task.Cli -eq 'claude') {
+        Wait-UntilClaudeUsageReady -RequireFreshSession
+        return
+    }
+
+    $resetTime = Get-ResetTimeFromErrorText -ErrorText $Result.ErrorText
+    if ($null -eq $resetTime) {
+        $resetTime = (Get-Date).AddMinutes($Settings.LimitWaitMinutes)
+        Write-Step "Limit hit on $($Task.Cli); no reset time found in the error"
+        Write-Host "Waiting the configured limitWaitMinutes: $($Settings.LimitWaitMinutes) minutes"
+    }
+    $wakeTime = $resetTime.AddMinutes($Settings.ResetBufferMinutes)
+    $sleepSeconds = [int]($wakeTime - (Get-Date)).TotalSeconds
+    if ($sleepSeconds -gt 0) {
+        Write-Host "Sleeping until: $wakeTime"
+        Start-Sleep -Seconds $sleepSeconds
     }
 }
 
@@ -706,7 +747,7 @@ $transcriptStarted = $false
 try {
     Initialize-RunnerState
     $config = Read-QueueConfig -Path $QueuePath
-    $ClaudeTasks = $config.Tasks
+    $Tasks = $config.Tasks
     $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
 
     Start-Transcript -Path $LogPath -Append
@@ -718,17 +759,17 @@ try {
     Write-Host "Runner state path: $RunnerStatePath"
     Write-Host "Log path: $LogPath"
     Write-Host "Usage path: $UsagePath"
-    Write-Host "Prompt count: $($ClaudeTasks.Count)"
+    Write-Host "Prompt count: $($Tasks.Count)"
 
     Write-Step "Current folder"
     Get-Location
 
-    for ($i = 0; $i -lt $ClaudeTasks.Count; $i++) {
-        $task = $ClaudeTasks[$i]
+    for ($i = 0; $i -lt $Tasks.Count; $i++) {
+        $task = $Tasks[$i]
         $taskNumber = $i + 1
 
         if (Test-TaskAlreadyDone -TaskIndex $i) {
-            Write-Step "Skipping task $taskNumber of $($ClaudeTasks.Count): $($task.Name)"
+            Write-Step "Skipping task $taskNumber of $($Tasks.Count): $($task.Name)"
             Write-Host "Task is already marked as done."
             continue
         }
@@ -739,91 +780,78 @@ try {
 
         while ($true) {
             $runCount++
-
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
-                throw "Task $taskNumber exceeded MaxRunsPerTask=$config.Settings.MaxRunsPerTask"
+                throw "Task $taskNumber exceeded maxRunsPerTask=$($config.Settings.MaxRunsPerTask)"
             }
 
-            if (-not (Test-Path -LiteralPath $task.ProjectPath)) {
-                throw "Project path does not exist for task $taskNumber`: $($task.ProjectPath)"
+            if ($task.Cli -eq 'claude' -and -not $DryRun) {
+                Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
             }
-
-            Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
 
             $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
 
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
-                $runResult = Start-ClaudeTaskRun -TaskIndex $i -Task $task
+                $sessionId = $null
+                if ($task.Cli -eq 'claude') { $sessionId = New-TaskSessionId -TaskIndex $i }
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId
             }
             else {
-                $runResult = Resume-ClaudeTaskRun -TaskIndex $i -Task $task -SessionId $savedSessionId
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId
             }
 
-            # Required: always check usage after Claude returns.
-            $usage = Get-ClaudeUsage
+            # Persist the session id the CLI reported (this is how codex thread ids get captured)
+            if (-not [string]::IsNullOrWhiteSpace($result.SessionId)) {
+                $result.SessionId | Set-Content -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Encoding UTF8
+            }
 
-            $taskCompleted = Test-TaskCompletedFromOutput -OutputText $runResult.OutputText
-            $usageExhausted = (Test-ClaudeWeekExhausted -Usage $usage) -or (Test-ClaudeSessionExhausted -Usage $usage)
-            $limitOutput = Test-ClaudeLimitOutput -OutputText $runResult.OutputText
-
-            if ($taskCompleted) {
+            $marker = Get-MarkerStatus -Text $result.Text
+            if ($marker.Status -eq 'Done') {
                 Save-TaskDoneMarker -TaskIndex $i
                 Write-Step "Task $taskNumber completed"
-                Write-Host "Completion marker detected. Proceeding to the next prompt."
+                break
+            }
+            if ($marker.Status -eq 'Blocked') {
+                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason
+                Write-Step "Task $taskNumber reported itself BLOCKED: $($marker.Reason)"
+                if ($config.Settings.StopOnError) {
+                    throw "Task $taskNumber is blocked: $($marker.Reason)"
+                }
+                Write-Host "stopOnError=false; moving to the next task."
                 break
             }
 
-            if ($runResult.ExitCode -ne 0) {
-                Write-Step "Claude returned a non-zero exit code for task $taskNumber"
-                Write-Host "Claude exit code: $($runResult.ExitCode)"
+            # Gemini-only: the installed CLI version rejected --resume — drop the session and retry without it.
+            if ($task.Cli -eq 'gemini' -and -not $result.Ok -and
+                $result.ErrorText -match '(?i)unknown option.*resume|not supported in non-interactive|unexpected argument|too many arguments|invalid.*resume') {
+                Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+                Write-Step "Task $taskNumber`: installed gemini rejects --resume; retrying with continuation prompt only"
+                continue
+            }
 
-                if ($limitOutput -and $usageExhausted) {
-                    $mustWaitForFreshSession = $true
-                    Write-Host "Claude was cut by usage limit."
-                    Write-Host "The same session will be resumed after reset."
+            if ($result.IsLimit) {
+                $mustWaitForFreshSession = $true
+                Write-Step "Task $taskNumber paused by a usage limit on $($task.Cli)"
+                Wait-ForLimitReset -Task $task -Result $result -Settings $config.Settings
+                continue
+            }
+
+            if (-not $result.Ok) {
+                $errorRetryCount++
+                Write-Step "Task $taskNumber errored: $($result.ErrorText)"
+                if ($errorRetryCount -le $config.Settings.MaxRetriesOnError) {
+                    Write-Host "Retry $errorRetryCount of $($config.Settings.MaxRetriesOnError); resuming the same session."
                     continue
                 }
-
                 if ($config.Settings.StopOnError) {
-                    $errorRetryCount++
-
-                    if ($errorRetryCount -le $config.Settings.MaxRetriesOnError) {
-                        $mustWaitForFreshSession = $false
-                        Write-Host "Transient error (attempt $errorRetryCount of $config.Settings.MaxRetriesOnError). Resuming same session."
-                        continue
-                    }
-
-                    throw "Claude failed on task $taskNumber with exit code $($runResult.ExitCode) after $config.Settings.MaxRetriesOnError retries."
+                    throw "Task $taskNumber failed after $($config.Settings.MaxRetriesOnError) retries: $($result.ErrorText)"
                 }
-
-                # Clear session to avoid resuming a broken session repeatedly.
-                $sessionFilePath = Get-TaskSessionFilePath -TaskIndex $i
-                if (Test-Path -LiteralPath $sessionFilePath) {
-                    Remove-Item -LiteralPath $sessionFilePath -Force
-                }
-
-                $mustWaitForFreshSession = $false
-                Write-Host "StopOnClaudeError is disabled. Starting a fresh session for next attempt."
-                continue
-            }
-
-            if ($usageExhausted -and $limitOutput) {
-                $mustWaitForFreshSession = $true
-                Write-Step "Task $taskNumber paused by Claude limit"
-                Write-Host "The same session will be resumed after reset."
-                continue
-            }
-
-            if ($usageExhausted -and -not $limitOutput) {
-                Save-TaskDoneMarker -TaskIndex $i
-                Write-Step "Task $taskNumber likely completed (no limit message, usage exhausted)"
-                Write-Host "No limit text in output. Treating as complete. Proceeding to next task."
+                Write-Host "stopOnError=false; abandoning this task and moving to the next one."
                 break
             }
 
+            # Ran fine, no marker: the agent stopped early. Resume to push it onward.
             $mustWaitForFreshSession = $false
-            Write-Step "Task $taskNumber is not complete yet"
-            Write-Host "Usage is still available. Resuming the same session immediately instead of moving to the next prompt."
+            Write-Step "Task $taskNumber is not complete yet; resuming the same session."
         }
     }
 
