@@ -1,0 +1,10 @@
+# Runner state (sessions, outputs, logs) — created next to the queue file
+.ai-runner-*/
+.claude-runner-*/
+
+# The user's real queue (contains private prompts and local paths)
+ai-run-queue.json
+
+# OS noise
+Thumbs.db
+.DS_Store
