@@ -1,5 +1,8 @@
 param(
-    [string]$QueuePath = "C:\Users\Admin\Desktop\ai-run-queue.json"
+    [string]$QueuePath = (Join-Path $PSScriptRoot 'ai-run-queue.json'),
+    [switch]$ValidateOnly,
+    [switch]$DryRun,
+    [switch]$LoadFunctionsOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +17,7 @@ $QueuePath = [System.IO.Path]::GetFullPath($QueuePath)
 $QueueRootPath = Split-Path -Parent $QueuePath
 $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
 $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
-$RunnerStatePath = Join-Path $QueueRootPath ".claude-runner-$RunnerName"
+$RunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
 $SessionStatePath = Join-Path $RunnerStatePath "sessions"
 $OutputStatePath = Join-Path $RunnerStatePath "outputs"
 $StatusStatePath = Join-Path $RunnerStatePath "status"
@@ -22,11 +25,7 @@ $LogPath = Join-Path $RunnerStatePath "ai-run-log.txt"
 $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
 
 $FreshSessionThresholdPercent = 0
-$ResetBufferMinutes = 2
 $PollSecondsAfterResetPassed = 60
-$MaxRunsPerTask = 20
-$MaxRetriesOnError = 2
-$StopOnClaudeError = $true
 
 $TaskCompleteMarker = "[[TASK_COMPLETE]]"
 
@@ -53,43 +52,125 @@ function Initialize-RunnerState {
     New-DirectoryIfMissing -Path $StatusStatePath
 }
 
-function Get-QueueTasks {
-    if (-not (Test-Path -LiteralPath $QueuePath)) {
-        throw "Queue file does not exist: $QueuePath"
+$AllowedClis = @('claude', 'codex', 'gemini')
+
+function Read-QueueConfig {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Config file not found: $Path`nCopy ai-run-queue.example.json to ai-run-queue.json and fill in your tasks."
     }
 
-    $queue = Get-Content -LiteralPath $QueuePath -Raw -Encoding UTF8 | ConvertFrom-Json
-
-    if ($queue.PSObject.Properties.Name -contains "tasks") {
-        $tasks = @($queue.tasks)
+    $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    try {
+        $parsed = $raw | ConvertFrom-Json
     }
-    else {
-        $tasks = @($queue)
-    }
-
-    if ($tasks.Count -eq 0) {
-        throw "Queue file contains no tasks: $QueuePath"
+    catch {
+        throw ("Config file is not valid JSON: $Path`n" +
+               "Parser said: $($_.Exception.Message)`n" +
+               "Common causes: a trailing comma after the last item, a missing comma between items, " +
+               "an unescaped backslash in a Windows path (write \\ not \), or an unescaped `"quote`" inside a prompt.")
     }
 
-    for ($i = 0; $i -lt $tasks.Count; $i++) {
-        $task = $tasks[$i]
-        $taskNumber = $i + 1
+    $defaults = @{
+        StopOnError       = $true
+        MaxRunsPerTask    = 20
+        MaxRetriesOnError = 2
+        LimitWaitMinutes  = 30
+        ResetBufferMinutes = 2
+    }
+    $settings = $defaults.Clone()
+    $settingsNode = $parsed.PSObject.Properties['settings']
+    if ($null -ne $settingsNode -and $null -ne $settingsNode.Value) {
+        foreach ($key in @($defaults.Keys)) {
+            $jsonKey = $key.Substring(0,1).ToLower() + $key.Substring(1)
+            $prop = $settingsNode.Value.PSObject.Properties[$jsonKey]
+            if ($null -ne $prop -and $null -ne $prop.Value) { $settings[$key] = $prop.Value }
+        }
+    }
 
-        foreach ($propertyName in @("name", "projectPath", "model", "effort", "prompt")) {
-            $property = $task.PSObject.Properties[$propertyName]
+    $tasksNode = $parsed.PSObject.Properties['tasks']
+    if ($null -eq $tasksNode) { throw "Config file has no `"tasks`" array: $Path" }
+    $rawTasks = @($tasksNode.Value)
+    if ($rawTasks.Count -eq 0) { throw "Config file contains no tasks: $Path" }
 
-            if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
-                throw "Task $taskNumber is missing required JSON property: $propertyName"
+    $tasks = @()
+    for ($i = 0; $i -lt $rawTasks.Count; $i++) {
+        $t = $rawTasks[$i]
+        $n = $i + 1
+
+        foreach ($required in @('name', 'cli', 'projectPath', 'prompt')) {
+            $p = $t.PSObject.Properties[$required]
+            if ($null -eq $p -or [string]::IsNullOrWhiteSpace([string]$p.Value)) {
+                throw "Task $n is missing required JSON property: $required"
             }
         }
 
-        if (-not (Test-Path -LiteralPath $task.projectPath)) {
-            throw "Project path does not exist for task $taskNumber`: $($task.projectPath)"
+        $cli = ([string]$t.cli).ToLower()
+        if ($AllowedClis -notcontains $cli) {
+            throw "Task $n has unknown cli `"$($t.cli)`". Allowed values: $($AllowedClis -join ', ')"
+        }
+
+        $projectPath = $t.projectPath
+        if (-not [System.IO.Path]::IsPathRooted($projectPath)) {
+            $projectPath = Join-Path (Get-Location) $projectPath
+        }
+        $projectPath = [System.IO.Path]::GetFullPath($projectPath)
+        if (-not (Test-Path -LiteralPath $projectPath -PathType Container)) {
+            throw "Project path does not exist for task $n (`"$($t.name)`"): $projectPath"
+        }
+
+        $extraArgs = @()
+        $extraNode = $t.PSObject.Properties['extraArgs']
+        if ($null -ne $extraNode -and $null -ne $extraNode.Value) {
+            if ($extraNode.Value -is [string]) {
+                $extraArgs = @($extraNode.Value -split '\s+' | Where-Object { $_ })
+            }
+            elseif ($extraNode.Value -is [System.Array]) {
+                $extraArgs = @($extraNode.Value | ForEach-Object { [string]$_ })
+            }
+            else {
+                throw "Task $n extraArgs must be a string or an array of strings."
+            }
+        }
+
+        $model  = $null
+        $effort = $null
+        if ($t.PSObject.Properties['model'])  { $model  = [string]$t.model }
+        if ($t.PSObject.Properties['effort']) { $effort = [string]$t.effort }
+
+        $tasks += [pscustomobject]@{
+            Name        = [string]$t.name
+            Cli         = $cli
+            ProjectPath = $projectPath
+            Model       = $model
+            Effort      = $effort
+            Prompt      = [string]$t.prompt
+            ExtraArgs   = $extraArgs
         }
     }
 
-    return $tasks
+    return @{ Settings = $settings; Tasks = $tasks }
 }
+
+function Test-CliBinariesAvailable {
+    param($Tasks)
+
+    $missing = @()
+    foreach ($cli in ($Tasks | ForEach-Object { $_.Cli } | Sort-Object -Unique)) {
+        if (-not (Get-Command $cli -ErrorAction SilentlyContinue)) {
+            $missing += $cli
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw ("The following CLI(s) are used in the queue but not found on PATH: $($missing -join ', ')`n" +
+               "Install instructions:`n" +
+               "  claude : npm install -g @anthropic-ai/claude-code`n" +
+               "  codex  : npm install -g @openai/codex`n" +
+               "  gemini : npm install -g @google/gemini-cli")
+    }
+}
+
 
 function Get-TaskKey {
     param([int]$TaskIndex)
@@ -474,11 +555,26 @@ function Resume-ClaudeTaskRun {
     }
 }
 
+if ($LoadFunctionsOnly) { return }
+
+if ($ValidateOnly) {
+    $config = Read-QueueConfig -Path $QueuePath
+    Test-CliBinariesAvailable -Tasks $config.Tasks
+    Write-Host "Config OK: $QueuePath"
+    Write-Host "Tasks: $($config.Tasks.Count)"
+    foreach ($t in $config.Tasks) {
+        Write-Host (" - [{0}] {1}  ({2})" -f $t.Cli, $t.Name, $t.ProjectPath)
+    }
+    exit 0
+}
+
 $transcriptStarted = $false
 
 try {
     Initialize-RunnerState
-    $ClaudeTasks = Get-QueueTasks
+    $config = Read-QueueConfig -Path $QueuePath
+    $ClaudeTasks = $config.Tasks
+    $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
 
     Start-Transcript -Path $LogPath -Append
     $transcriptStarted = $true
@@ -511,8 +607,8 @@ try {
         while ($true) {
             $runCount++
 
-            if ($runCount -gt $MaxRunsPerTask) {
-                throw "Task $taskNumber exceeded MaxRunsPerTask=$MaxRunsPerTask"
+            if ($runCount -gt $config.Settings.MaxRunsPerTask) {
+                throw "Task $taskNumber exceeded MaxRunsPerTask=$config.Settings.MaxRunsPerTask"
             }
 
             if (-not (Test-Path -LiteralPath $task.ProjectPath)) {
@@ -555,16 +651,16 @@ try {
                     continue
                 }
 
-                if ($StopOnClaudeError) {
+                if ($config.Settings.StopOnError) {
                     $errorRetryCount++
 
-                    if ($errorRetryCount -le $MaxRetriesOnError) {
+                    if ($errorRetryCount -le $config.Settings.MaxRetriesOnError) {
                         $mustWaitForFreshSession = $false
-                        Write-Host "Transient error (attempt $errorRetryCount of $MaxRetriesOnError). Resuming same session."
+                        Write-Host "Transient error (attempt $errorRetryCount of $config.Settings.MaxRetriesOnError). Resuming same session."
                         continue
                     }
 
-                    throw "Claude failed on task $taskNumber with exit code $($runResult.ExitCode) after $MaxRetriesOnError retries."
+                    throw "Claude failed on task $taskNumber with exit code $($runResult.ExitCode) after $config.Settings.MaxRetriesOnError retries."
                 }
 
                 # Clear session to avoid resuming a broken session repeatedly.
