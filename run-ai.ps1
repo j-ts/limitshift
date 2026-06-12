@@ -441,6 +441,51 @@ $TaskCompleteMarker
 "@
 }
 
+function Get-CliArguments {
+    param(
+        $Task,
+        [ValidateSet('New', 'Resume')] [string]$Mode,
+        [string]$SessionId,
+        [string]$Prompt
+    )
+
+    switch ($Task.Cli) {
+        'claude' {
+            $args = @('-p')
+            if ($Mode -eq 'New')    { $args += @('--session-id', $SessionId) }
+            if ($Mode -eq 'Resume') { $args += @('--resume', $SessionId) }
+            $args += @('--output-format', 'json')
+            if ($Task.Model)  { $args += @('--model', $Task.Model) }
+            if ($Task.Effort) { $args += @('--effort', $Task.Effort) }
+            $args += $Task.ExtraArgs
+            $args += @($Prompt)
+            return $args
+        }
+        'codex' {
+            $args = @('exec')
+            if ($Mode -eq 'Resume') { $args += @('resume', $SessionId) }
+            $args += @('--json', '-C', $Task.ProjectPath)
+            if ($Task.Model)  { $args += @('-m', $Task.Model) }
+            if ($Task.Effort) { $args += @('-c', "model_reasoning_effort=$($Task.Effort)") }
+            $args += $Task.ExtraArgs
+            $args += @($Prompt)
+            return $args
+        }
+        'gemini' {
+            if ($Task.Effort) { Write-Host "Note: 'effort' is not supported by gemini and is ignored for task '$($Task.Name)'." }
+            $args = @()
+            if ($Mode -eq 'Resume' -and -not [string]::IsNullOrWhiteSpace($SessionId)) {
+                $args += @('--resume', $SessionId)
+            }
+            $args += @('-p', $Prompt, '--output-format', 'json')
+            if ($Task.Model) { $args += @('-m', $Task.Model) }
+            $args += $Task.ExtraArgs
+            return $args
+        }
+    }
+    throw "No argument builder for cli '$($Task.Cli)'"
+}
+
 function Test-TaskCompletedFromOutput {
     param([string]$OutputText)
 

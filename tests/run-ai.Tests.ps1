@@ -40,3 +40,67 @@ Describe 'Read-QueueConfig' {
         }
     }
 }
+
+Describe 'Get-CliArguments' {
+    $BaseTask = @{
+        Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+        Model = 'claude-sonnet-4-6'; Effort = 'high'
+        Prompt = 'do the thing'; ExtraArgs = @('--verbose')
+    }
+
+    It 'builds a claude new-session command' {
+        $t = [pscustomobject]$BaseTask
+        $a = Get-CliArguments -Task $t -Mode New -SessionId 'abc-123' -Prompt 'P'
+        ($a -join ' ') | Should Be '-p --session-id abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose P'
+    }
+    It 'builds a claude resume command' {
+        $t = [pscustomobject]$BaseTask
+        $a = Get-CliArguments -Task $t -Mode Resume -SessionId 'abc-123' -Prompt 'P'
+        ($a -join ' ') | Should Be '-p --resume abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose P'
+    }
+    It 'builds a codex new-session command mapping effort to a -c override' {
+        $t = [pscustomobject](@{
+            Name = 't'; Cli = 'codex'; ProjectPath = 'C:\proj'
+            Model = 'gpt-5-codex'; Effort = 'high'
+            Prompt = 'do the thing'; ExtraArgs = @('--verbose')
+        })
+        $a = Get-CliArguments -Task $t -Mode New -SessionId $null -Prompt 'P'
+        ($a -join ' ') | Should Be 'exec --json -C C:\proj -m gpt-5-codex -c model_reasoning_effort=high --verbose P'
+    }
+    It 'builds a codex resume command from a thread id' {
+        $t = [pscustomobject](@{
+            Name = 't'; Cli = 'codex'; ProjectPath = 'C:\proj'
+            Model = 'gpt-5-codex'; Effort = 'high'
+            Prompt = 'do the thing'; ExtraArgs = @('--verbose')
+        })
+        $a = Get-CliArguments -Task $t -Mode Resume -SessionId 'thr_9' -Prompt 'P'
+        ($a -join ' ') | Should Be 'exec resume thr_9 --json -C C:\proj -m gpt-5-codex -c model_reasoning_effort=high --verbose P'
+    }
+    It 'builds a gemini command and omits effort' {
+        $t = [pscustomobject](@{
+            Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
+            Model = 'gemini-2.5-pro'; Effort = 'high'
+            Prompt = 'do the thing'; ExtraArgs = @('--verbose')
+        })
+        $a = Get-CliArguments -Task $t -Mode New -SessionId $null -Prompt 'P'
+        ($a -join ' ') | Should Be '-p P --output-format json -m gemini-2.5-pro --verbose'
+    }
+    It 'builds a gemini resume command when a session id exists' {
+        $t = [pscustomobject](@{
+            Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
+            Model = 'gemini-2.5-pro'; Effort = 'high'
+            Prompt = 'do the thing'; ExtraArgs = @('--verbose')
+        })
+        $a = Get-CliArguments -Task $t -Mode Resume -SessionId 'g-1' -Prompt 'P'
+        ($a -join ' ') | Should Be '--resume g-1 -p P --output-format json -m gemini-2.5-pro --verbose'
+    }
+    It 'omits model/effort args entirely when the task does not set them' {
+        $t = [pscustomobject](@{
+            Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+            Model = $null; Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+        })
+        $a = Get-CliArguments -Task $t -Mode New -SessionId 's' -Prompt 'P'
+        ($a -join ' ') | Should Be '-p --session-id s --output-format json P'
+    }
+}
+
