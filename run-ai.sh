@@ -74,12 +74,12 @@ write_step() {
 task_field() {
   local idx="$1"
   local field="$2"
-  jq -r ".tasks[$idx].$field // empty" "$QUEUE_PATH"
+  jq -r ".tasks[$idx].$field // empty" "$QUEUE_PATH" | tr -d '\r'
 }
 
 get_task_extra_args() {
   local idx="$1"
-  jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\")[] else empty end" "$QUEUE_PATH"
+  jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\")[] else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
 read_queue_config() {
@@ -92,17 +92,17 @@ read_queue_config() {
     exit 2
   fi
 
-  TASK_COUNT=$(jq '.tasks | length' "$QUEUE_PATH")
+  TASK_COUNT=$(jq '.tasks | length' "$QUEUE_PATH" | tr -d '\r')
   if [ "$TASK_COUNT" = "null" ] || [ "$TASK_COUNT" -eq 0 ]; then
     echo "Config file contains no tasks: $QUEUE_PATH" >&2
     exit 2
   fi
 
-  STOP_ON_ERROR=$(jq -r '.settings.stopOnError // true' "$QUEUE_PATH")
-  MAX_RUNS_PER_TASK=$(jq -r '.settings.maxRunsPerTask // 20' "$QUEUE_PATH")
-  MAX_RETRIES_ON_ERROR=$(jq -r '.settings.maxRetriesOnError // 2' "$QUEUE_PATH")
-  LIMIT_WAIT_MINUTES=$(jq -r '.settings.limitWaitMinutes // 30' "$QUEUE_PATH")
-  RESET_BUFFER_MINUTES=$(jq -r '.settings.resetBufferMinutes // 2' "$QUEUE_PATH")
+  STOP_ON_ERROR=$(jq -r '.settings.stopOnError // true' "$QUEUE_PATH" | tr -d '\r')
+  MAX_RUNS_PER_TASK=$(jq -r '.settings.maxRunsPerTask // 20' "$QUEUE_PATH" | tr -d '\r')
+  MAX_RETRIES_ON_ERROR=$(jq -r '.settings.maxRetriesOnError // 2' "$QUEUE_PATH" | tr -d '\r')
+  LIMIT_WAIT_MINUTES=$(jq -r '.settings.limitWaitMinutes // 30' "$QUEUE_PATH" | tr -d '\r')
+  RESET_BUFFER_MINUTES=$(jq -r '.settings.resetBufferMinutes // 2' "$QUEUE_PATH" | tr -d '\r')
 
   local i=0 n cli path
   while [ "$i" -lt "$TASK_COUNT" ]; do
@@ -131,7 +131,7 @@ read_queue_config() {
 
 check_cli_binaries() {
   local cli unique_clis missing_clis=()
-  unique_clis=$(jq -r '.tasks[].cli' "$QUEUE_PATH" | tr '[:upper:]' '[:lower:]' | sort -u)
+  unique_clis=$(jq -r '.tasks[].cli' "$QUEUE_PATH" | tr '[:upper:]' '[:lower:]' | tr -d '\r' | sort -u)
   for cli in $unique_clis; do
     if ! command -v "$cli" >/dev/null 2>&1; then
       missing_clis+=("$cli")
