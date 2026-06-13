@@ -1,24 +1,8 @@
 # LimitShift
 
-Queue long-running prompts for Claude Code, Codex, or Gemini CLI, run them headless one by one, and survive usage limits without losing the session. Start it before bed, let the runner wait out quota resets, and inspect the output in the morning.
+You write a to-do list of prompts in one file. LimitShift runs them one by one in Claude Code, Codex, or Gemini while you're away. If you hit your usage limit, it waits for the reset and continues the same conversation.
 
-## How it works
-
-1. Read a JSON queue file containing `name`, `cli`, `projectPath`, `prompt`, and optional per-task settings.
-2. Validate the JSON, required fields, project paths, and CLI binaries.
-3. Start the task in the target project folder using structured JSON/JSONL output.
-4. Parse the output to decide whether the task finished, blocked, hit a limit, or failed.
-5. On limit, wait until the reset time or fall back to `limitWaitMinutes`.
-6. Resume the same Claude/Codex/Gemini session when supported.
-7. Mark only completed real runs as done so re-runs skip finished work.
-
-```text
-run -> parse output -> complete?
-                   |-> yes: mark done, next task
-                   |-> limit: wait, resume same session
-                   |-> error: retry or stop
-                   |-> no marker yet: resume same session
-```
+> **Set expectations before you start.** There is **no guarantee** a task completes exactly as you intended — the result depends on the model, your prompt, and the project. Treat the first run as a **draft**: you steer the outcome by adding follow-up tasks or re-running with a refined prompt. **Always run against a git-controlled folder** so you can review the diff and revert anything you don't like.
 
 ## Requirements
 
@@ -48,9 +32,139 @@ chmod +x limitshift.sh
 
 > **Deprecation:** the scripts were renamed from `run-ai.ps1` / `run-ai.sh` to `limitshift.ps1` / `limitshift.sh`. Thin `run-ai.ps1` / `run-ai.sh` forwarder stubs still work for one release (they print a deprecation warning and call the new script); they will be removed next release. Update your commands to the new names.
 
+## Simple example
+
+Start here. This is the smallest useful queue: **one** task, only the required fields, plus `"completionCheck": false` so LimitShift just runs your prompt once and only intervenes if you hit a usage limit. This is "run my prompt, survive limits" mode.
+
+The file ships as [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json):
+
+```json
+{
+  "$schema": "./limitshift-queue.schema.json",
+  "tasks": [
+    {
+      "name": "Document install steps",
+      "cli": "claude",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "prompt": "Add a README section that explains how to install the project, then commit it",
+      "completionCheck": false
+    }
+  ]
+}
+```
+
+Copy it to `limitshift-queue.json` (the default name the runner looks for), change `projectPath` to a real git-controlled folder, and edit the `prompt`. The four required fields per task are `name`, `cli`, `projectPath`, and `prompt`. On Windows, escape backslashes in the path: `"C:\\Users\\me\\proj"`.
+
+The `$schema` line is optional but gives you inline validation in editors that understand JSON Schema.
+
+**Always validate first, then run.**
+
+Windows (PowerShell):
+
+```powershell
+.\limitshift.ps1 -ValidateOnly
+.\limitshift.ps1
+```
+
+macOS/Linux (Bash):
+
+```bash
+./limitshift.sh --validate-only
+./limitshift.sh
+```
+
+The console shows only the agent's reply, under a clear header — not the raw CLI JSON:
+
+```text
+--- agent response ---
+Added an "Installation" section to README.md with clone, dependency, and build
+steps, then committed it as "docs: add installation instructions".
+```
+
+The full raw CLI JSON is still saved to `.limitshift-limitshift-queue/outputs/task-01-<slug>-output.txt` if you ever need it.
+
+## Advanced example
+
+Once you're comfortable, this 3-task queue shows every optional field. It ships as [`limitshift-queue.example-advanced.json`](limitshift-queue.example-advanced.json):
+
+```json
+{
+  "$schema": "./limitshift-queue.schema.json",
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 20,
+    "maxStalls": 2,
+    "limitWaitMinutes": 30,
+    "completionCheck": true
+  },
+  "tasks": [
+    {
+      "name": "Implement fixes with Codex",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "medium",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Implement the fixes listed in docs/audit.md, run the tests, and summarize what changed."
+    },
+    {
+      "name": "Write release notes with Gemini",
+      "cli": "gemini",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"],
+      "effort": null,
+      "extraArgs": ["--approval-mode", "auto_edit"],
+      "prompt": "Read the git log since the last tag and write RELEASE_NOTES.md."
+    },
+    {
+      "name": "Audit the project with Claude",
+      "cli": "claude",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "sonnet",
+      "extraArgs": ["--permission-mode", "acceptEdits"],
+      "completionCheck": true,
+      "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths. End with [[TASK_COMPLETE]] on its own line when done, or [[TASK_BLOCKED]] <reason> if you cannot finish."
+    }
+  ]
+}
+```
+
+What each piece does:
+
+- **`settings`** applies to the whole queue. `stopOnError` (`true`) halts the queue if a task fails unrecoverably. `maxRunsPerTask` (`20`) caps how many new + resumed runs one task may use. `maxStalls` (`2`) fails a task that returns the same answer twice in a row without finishing (only matters when `completionCheck` is `true`). `limitWaitMinutes` (`30`) is the fallback wait when LimitShift cannot read the exact reset time. `completionCheck` (`true`) is the queue-wide default for the completion-marker workflow described below; individual tasks override it.
+- **Task 1 (Codex)** uses `model` `"gpt-5.4"` and `effort` `"medium"` (Codex accepts `minimal`/`low`/`medium`/`high`/`xhigh`). `extraArgs` `["--sandbox", "workspace-write"]` lets Codex edit files inside the workspace without prompting. Array form for `extraArgs` is safest because each flag and value is a separate element.
+- **Task 2 (Gemini)** passes `model` as an **array** — a rotation list. On a usage limit LimitShift switches to the next model in the list immediately (no waiting) and only waits for a reset once every listed model is exhausted. Gemini has no reasoning-effort flag, so `effort` **must be `null` or omitted** (a non-null effort on a gemini task is rejected at validation). `extraArgs` `["--approval-mode", "auto_edit"]` lets Gemini apply edits automatically.
+- **Task 3 (Claude)** sets `completionCheck` to `true`, so LimitShift appends `[[TASK_COMPLETE]]` instructions to the prompt and keeps resuming the same session until the agent ends with that marker (or `[[TASK_BLOCKED]] <reason>`). `model` is the `sonnet` alias. `extraArgs` `["--permission-mode", "acceptEdits"]` lets Claude apply edits without asking.
+
+Every field above passes both schema validation and the runner's stricter runtime checks (for example the per-CLI effort rules). See the [Reference](#reference) for the full field table.
+
+> Three example files ship with LimitShift: [`limitshift-queue.example.json`](limitshift-queue.example.json) (a copy of the simple example, kept under the legacy default name for one release), [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json), and [`limitshift-queue.example-advanced.json`](limitshift-queue.example-advanced.json).
+
+---
+
+# Reference
+
+## How it works
+
+1. Read a JSON queue file containing `name`, `cli`, `projectPath`, `prompt`, and optional per-task settings.
+2. Validate the JSON, required fields, project paths, and CLI binaries.
+3. Start the task in the target project folder using structured JSON/JSONL output.
+4. Parse the output to decide whether the task finished, blocked, hit a limit, or failed.
+5. On limit, wait until the reset time or fall back to `limitWaitMinutes`.
+6. Resume the same Claude/Codex/Gemini session when supported.
+7. Mark only completed real runs as done so re-runs skip finished work.
+
+```text
+run -> parse output -> complete?
+                   |-> yes: mark done, next task
+                   |-> limit: wait, resume same session
+                   |-> error: retry or stop
+                   |-> no marker yet: resume same session
+```
+
 ## Configuration reference
 
-The queue file is `limitshift-queue.json` by default. Copy [`limitshift-queue.example.json`](limitshift-queue.example.json) and edit it. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release — the runner uses it if `limitshift-queue.json` is absent and prints a warning telling you to rename it.)
+The queue file is `limitshift-queue.json` by default. Copy one of the example files and edit it. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release — the runner uses it if `limitshift-queue.json` is absent and prints a warning telling you to rename it.)
 
 | Field | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -63,7 +177,7 @@ The queue file is `limitshift-queue.json` by default. Copy [`limitshift-queue.ex
 | `settings.maxStalls` | integer | no | `2` | When `completionCheck` is `true`, fail the task after this many identical no-marker responses in a row |
 | `tasks[].name` | string | yes | none | Human-readable task name |
 | `tasks[].cli` | string | yes | none | `claude`, `codex`, or `gemini` |
-| `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside |
+| `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside (must exist) |
 | `tasks[].prompt` | string | yes | none | Task prompt |
 | `tasks[].model` | string or array of strings | no | none | Passed through where supported. An array lists models in preference order; on a usage limit the runner rotates to the next model (see below). Primarily useful for gemini |
 | `tasks[].effort` | string or null | no | none | Reasoning effort, allowed values per CLI (enforced at validation): **claude** `low`, `medium`, `high`, `xhigh`, `max`; **codex** `minimal`, `low`, `medium`, `high`, `xhigh`; **gemini** must be `null` (it has no effort flag — use `thinkingLevel`/`thinkingBudget` via gemini settings instead). Claude Haiku supports no effort, so claude + a haiku model must also be `null`. `ultracode` (claude's interactive `/effort` menu) and codex `none` (plan-mode only) are rejected |
@@ -203,7 +317,7 @@ To re-run **one** finished task by hand, delete its `status/task-NN.done` file. 
 
 ## Completion marker
 
-The runner appends `[[TASK_COMPLETE]]` instructions to every prompt automatically. A task is only marked done when the final non-empty line is exactly `[[TASK_COMPLETE]]`.
+When `completionCheck` is `true`, the runner appends `[[TASK_COMPLETE]]` instructions to every prompt automatically. A task is only marked done when the final non-empty line is exactly `[[TASK_COMPLETE]]`.
 
 If the agent cannot finish, it should end with:
 
@@ -211,7 +325,7 @@ If the agent cannot finish, it should end with:
 [[TASK_BLOCKED]] <one-line reason>
 ```
 
-Prompts should therefore describe concrete end conditions such as “write `docs/audit.md` and summarize the changes”.
+Prompts should therefore describe concrete end conditions such as "write `docs/audit.md` and summarize the changes".
 
 ## Troubleshooting
 

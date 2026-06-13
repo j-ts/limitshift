@@ -1524,6 +1524,38 @@ $out"
   fi
 }
 
+run_shipped_examples_validate_test() {
+  # Task 7: every shipped example file (legacy name, simple, advanced) must pass
+  # --validate-only. The examples carry placeholder projectPath values that do not
+  # exist on this machine and validation requires projectPath to exist, so copy each
+  # example to a temp file and rewrite every task's projectPath to a real temp dir first.
+  local repo_root="$HERE/.."
+  local root="$TMP_ROOT/shipped-examples"
+  local project_dir="$root/project"
+  mkdir -p "$project_dir"
+
+  local example
+  for example in \
+    limitshift-queue.example.json \
+    limitshift-queue.example-simple.json \
+    limitshift-queue.example-advanced.json; do
+    local src="$repo_root/$example"
+    local dst="$root/$example"
+    local desc="shipped example $example passes --validate-only"
+
+    if [ ! -f "$src" ]; then
+      fail "$desc" "missing example file: $src"
+      continue
+    fi
+    # Rewrite ALL task projectPath values (advanced has multiple) to the temp dir.
+    if ! jq --arg pp "$project_dir" '(.tasks[].projectPath) = $pp' "$src" > "$dst" 2>/dev/null; then
+      fail "$desc" "could not rewrite projectPath in $src"
+      continue
+    fi
+    check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$dst" --validate-only
+  done
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -1568,6 +1600,7 @@ run_effort_empty_string_normalized_test
 run_model_rotation_switch_test
 run_model_rotation_exhaust_test
 run_model_single_string_test
+run_shipped_examples_validate_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

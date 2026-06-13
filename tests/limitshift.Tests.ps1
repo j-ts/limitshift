@@ -1742,4 +1742,42 @@ exit 0
             }
         }
     }
+
+    Context 'Shipped examples validate (Task 7)' {
+        # Guards the three shipped example files against schema / effort-rule / validation rot.
+        # Each example carries placeholder projectPath values that do not exist here, and validation
+        # requires projectPath to exist, so copy each example and rewrite every task's projectPath to
+        # a real temp dir before running -ValidateOnly.
+        It 'validates shipped example <Example> with exit 0' -ForEach @(
+            @{ Example = 'limitshift-queue.example.json' }
+            @{ Example = 'limitshift-queue.example-simple.json' }
+            @{ Example = 'limitshift-queue.example-advanced.json' }
+        ) {
+            $repoRoot = Split-Path -Parent $script:__limitshiftScriptPath
+            $srcPath = Join-Path $repoRoot $Example
+            Test-Path -LiteralPath $srcPath | Should -BeTrue
+
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+
+            # Rewrite ALL task projectPath values (the advanced example has several) to the temp dir.
+            $config = Get-Content -LiteralPath $srcPath -Raw | ConvertFrom-Json
+            foreach ($task in $config.tasks) {
+                $task.projectPath = $projectPath
+            }
+            $queuePath = Join-Path $root 'queue.json'
+            $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $queuePath -Encoding UTF8
+
+            $run = Invoke-RunnerProcess -Arguments @(
+                '-NoProfile',
+                '-File', $script:__limitshiftScriptPath,
+                '-ValidateOnly',
+                '-QueuePath', $queuePath
+            )
+
+            $run.ExitCode | Should -Be 0
+            $run.Output | Should -Match 'Config OK'
+        }
+    }
 }

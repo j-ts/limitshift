@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Example queues**: ship `limitshift-queue.example-simple.json` (one task, required fields only, `completionCheck: false`) and `limitshift-queue.example-advanced.json` (3 tasks exercising every optional field). The legacy `limitshift-queue.example.json` is now a copy of the simple example. A regression test in both suites validates all three shipped examples with `-ValidateOnly` / `--validate-only`.
+- **Beginner-friendly README**: top-down rewrite (what it is, expectations callout, simple example, advanced example) with the reference material moved under a `## Reference` heading.
+
 ### Changed
 - **Naming alignment**: renamed the runner scripts to `limitshift.ps1` / `limitshift.sh`, the default queue file to `limitshift-queue.json`, the shipped example/schema to `limitshift-queue.example.json` / `limitshift-queue.schema.json`, and the per-queue state folder to `.limitshift-<queue-name>/` (was `.ai-runner-<queue-name>/`).
 - **Automatic state-folder migration**: on startup the runner renames an existing `.ai-runner-<queue-name>/` folder to `.limitshift-<queue-name>/` when the new one does not yet exist.

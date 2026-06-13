@@ -8,7 +8,7 @@
 # new and legacy queue filenames by pattern, then re-include the shipped example + schema.
 limitshift-queue*.json
 ai-run-queue*.json
-!limitshift-queue.example.json
+!limitshift-queue.example*.json
 !limitshift-queue.schema.json
 
 # Private local planning and predecessor scripts
