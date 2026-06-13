@@ -552,7 +552,7 @@ save_task_failed_marker() {
 }
 
 build_cli_args() {
-  local idx="$1" mode="$2" session_id="$3" prompt="$4"
+  local idx="$1" mode="$2" session_id="$3"
   local cli model effort project_path
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
   model=$(task_field "$idx" "model")
@@ -579,7 +579,6 @@ build_cli_args() {
       while IFS= read -r arg; do
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
       done < <(get_task_extra_args "$idx")
-      CLI_ARGS+=("$prompt")
       ;;
     codex)
       CLI_ARGS+=("exec")
@@ -603,7 +602,6 @@ build_cli_args() {
           if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
         done < <(get_task_extra_args "$idx")
       fi
-      CLI_ARGS+=("$prompt")
       ;;
     gemini)
       if [ -n "$effort" ]; then
@@ -612,7 +610,7 @@ build_cli_args() {
       if [ "$mode" = "Resume" ] && [ -n "$session_id" ]; then
         CLI_ARGS+=("--resume" "$session_id")
       fi
-      CLI_ARGS+=("-p" "$prompt" "--output-format" "json")
+      CLI_ARGS+=("--output-format" "json")
       if [ -n "$model" ]; then
         CLI_ARGS+=("-m" "$model")
       fi
@@ -781,10 +779,11 @@ invoke_cli_task_run() {
     fi
   fi
 
-  build_cli_args "$idx" "$mode" "$session_id" "$prompt_with_marker"
+  build_cli_args "$idx" "$mode" "$session_id"
 
   echo "==== $mode run for task $((idx + 1)): $name [$cli] ===="
   echo "Command: $cli ${CLI_ARGS[@]}"
+  echo "(prompt sent via stdin; full text in the output file)"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     R_OK=1
@@ -795,10 +794,13 @@ invoke_cli_task_run() {
     return
   fi
 
+  # Log the full prompt before the run; the displayed command line no longer contains it.
+  printf '%s\n\n' "$prompt_with_marker" >> "$output_file_path"
+
   local output_text exit_code
   local tmp_out
   tmp_out=$(mktemp)
-  ( cd "$project_path" && "$cli" "${CLI_ARGS[@]}" ) > "$tmp_out" 2>&1
+  ( cd "$project_path" && printf '%s' "$prompt_with_marker" | "$cli" "${CLI_ARGS[@]}" ) > "$tmp_out" 2>&1
   exit_code=$?
   
   output_text=$(cat "$tmp_out")

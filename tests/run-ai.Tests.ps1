@@ -124,38 +124,40 @@ Describe 'run-ai.ps1' {
     }
 
     Context 'Get-CliArguments' {
-        It 'builds a claude new-session command' {
+        It 'builds a claude new-session command without the prompt in the args' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
                 Model = 'claude-sonnet-4-6'; Effort = 'high'
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 
-            $args = Get-CliArguments -Task $task -Mode New -SessionId 'abc-123' -Prompt 'P'
-            ($args -join ' ') | Should -Be '-p --session-id abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose P'
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 'abc-123'
+            ($args -join ' ') | Should -Be '-p --session-id abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose'
+            $args | Should -Not -Contain 'do the thing'
         }
 
-        It 'builds a claude resume command' {
+        It 'builds a claude resume command without the prompt in the args' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
                 Model = 'claude-sonnet-4-6'; Effort = 'high'
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 
-            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'abc-123' -Prompt 'P'
-            ($args -join ' ') | Should -Be '-p --resume abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose P'
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'abc-123'
+            ($args -join ' ') | Should -Be '-p --resume abc-123 --output-format json --model claude-sonnet-4-6 --effort high --verbose'
         }
 
-        It 'builds a codex new-session command without forcing -C' {
+        It 'builds a codex new-session command without forcing -C and without the prompt' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'codex'; ProjectPath = 'C:\proj'
                 Model = 'gpt-5-codex'; Effort = 'high'
                 Prompt = 'do the thing'; ExtraArgs = @('--sandbox', 'workspace-write', '--skip-git-repo-check')
             }
 
-            $args = Get-CliArguments -Task $task -Mode New -SessionId $null -Prompt 'P'
-            ($args -join ' ') | Should -Be 'exec --json -m gpt-5-codex -c model_reasoning_effort=high --sandbox workspace-write --skip-git-repo-check P'
+            $args = Get-CliArguments -Task $task -Mode New -SessionId $null
+            ($args -join ' ') | Should -Be 'exec --json -m gpt-5-codex -c model_reasoning_effort=high --sandbox workspace-write --skip-git-repo-check'
             (@($args | Where-Object { $_ -ceq '-C' })).Count | Should -Be 0
+            $args | Should -Not -Contain 'do the thing'
         }
 
         It 'drops resume-unsupported codex flags while keeping supported ones' {
@@ -170,21 +172,23 @@ Describe 'run-ai.ps1' {
                 )
             }
 
-            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'thr_9' -Prompt 'P'
-            ($args -join ' ') | Should -Be 'exec resume thr_9 --json -m gpt-5-codex -c model_reasoning_effort=high --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox P'
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'thr_9'
+            ($args -join ' ') | Should -Be 'exec resume thr_9 --json -m gpt-5-codex -c model_reasoning_effort=high --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox'
             (@($args | Where-Object { $_ -ceq '-C' })).Count | Should -Be 0
             $args | Should -Not -Contain '--sandbox'
         }
 
-        It 'builds a gemini command and omits effort' {
+        It 'builds a gemini command, omitting effort and the -p prompt pair' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
                 Model = 'gemini-2.5-pro'; Effort = 'high'
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 
-            $args = Get-CliArguments -Task $task -Mode New -SessionId $null -Prompt 'P'
-            ($args -join ' ') | Should -Be '-p P --output-format json -m gemini-2.5-pro --verbose'
+            $args = Get-CliArguments -Task $task -Mode New -SessionId $null
+            ($args -join ' ') | Should -Be '--output-format json -m gemini-2.5-pro --verbose'
+            $args | Should -Not -Contain '-p'
+            $args | Should -Not -Contain 'do the thing'
         }
 
         It 'builds a gemini resume command when a session id exists' {
@@ -194,8 +198,8 @@ Describe 'run-ai.ps1' {
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 
-            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'g-1' -Prompt 'P'
-            ($args -join ' ') | Should -Be '--resume g-1 -p P --output-format json -m gemini-2.5-pro --verbose'
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'g-1'
+            ($args -join ' ') | Should -Be '--resume g-1 --output-format json -m gemini-2.5-pro --verbose'
         }
 
         It 'omits model and effort args when the task does not set them' {
@@ -204,8 +208,28 @@ Describe 'run-ai.ps1' {
                 Model = $null; Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
             }
 
-            $args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'P'
-            ($args -join ' ') | Should -Be '-p --session-id s --output-format json P'
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 's'
+            ($args -join ' ') | Should -Be '-p --session-id s --output-format json'
+        }
+    }
+
+    Context 'Invoke-NativeProcess stdin delivery' {
+        It 'round-trips a multi-line prompt with quotes through stdin to a .cmd shim' {
+            $root = New-TestRoot
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $stubPath = Join-Path $binPath 'echo-stdin.cmd'
+            '@powershell -NoProfile -Command "[Console]::In.ReadToEnd() | Write-Output"' |
+                Set-Content -LiteralPath $stubPath -Encoding Ascii
+
+            $prompt = "line one with `"double quotes`"`r`nline two`r`n`r`n[[TASK_COMPLETE]]"
+            $result = Invoke-NativeProcess -Command $stubPath -Arguments @() -WorkingDirectory $root -StdinText $prompt
+
+            $result.ExitCode | Should -Be 0
+            $received = ($result.StdOut -replace "`r`n", "`n").TrimEnd("`n")
+            $expected = ($prompt -replace "`r`n", "`n").TrimEnd("`n")
+            $received | Should -Be $expected
         }
     }
 
@@ -417,6 +441,11 @@ Ripgrep is not available. Falling back to GrepTool.
             $geminiPath = Join-Path $binPath 'gemini.ps1'
             @"
 [Console]::Error.WriteLine('Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.')
+`$stdinText = [Console]::In.ReadToEnd()
+if (`$stdinText -notmatch 'say hi') {
+    Write-Output '{"error":{"message":"prompt was not delivered on stdin","code":"400"}}'
+    exit 1
+}
 Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
 exit 0
 "@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
@@ -452,9 +481,16 @@ exit 0
 
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'prompt sent via stdin'
 
                 $statusPath = Join-Path $root '.ai-runner-queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
+
+                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-output.txt'
+                Test-Path -LiteralPath $outputFilePath | Should -BeTrue
+                $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
+                $outputFileText | Should -Match 'say hi'
+                $outputFileText | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
             }
             finally {
                 $env:PATH = $oldPath

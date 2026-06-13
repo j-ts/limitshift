@@ -281,7 +281,7 @@ function Get-ClaudeUsage {
     $usageExitCode = $LASTEXITCODE
     $usageText = $usageOutput | Out-String
 
-    $usageText | Tee-Object -FilePath $UsagePath | Out-Null
+    [System.IO.File]::WriteAllText($UsagePath, $usageText, [System.Text.UTF8Encoding]::new($false))
 
     if ($usageExitCode -ne 0) {
         throw "Claude /usage failed with exit code $usageExitCode.`n$usageText"
@@ -528,7 +528,8 @@ function Invoke-NativeProcess {
     param(
         [string]$Command,
         [string[]]$Arguments,
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+        [string]$StdinText
     )
 
     $commandInfo = Get-Command $Command -ErrorAction Stop
@@ -588,16 +589,27 @@ exit `$LASTEXITCODE
 
     $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stdout-" + [guid]::NewGuid() + ".txt")
     $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stderr-" + [guid]::NewGuid() + ".txt")
+    $stdinPath = $null
 
     try {
-        $process = Start-Process -FilePath $launcherPath `
-            -ArgumentList $launcherArguments `
-            -WorkingDirectory $WorkingDirectory `
-            -NoNewWindow `
-            -Wait `
-            -PassThru `
-            -RedirectStandardOutput $stdoutPath `
-            -RedirectStandardError $stderrPath
+        $startProcessParams = @{
+            FilePath               = $launcherPath
+            ArgumentList           = $launcherArguments
+            WorkingDirectory       = $WorkingDirectory
+            NoNewWindow            = $true
+            Wait                   = $true
+            PassThru               = $true
+            RedirectStandardOutput = $stdoutPath
+            RedirectStandardError  = $stderrPath
+        }
+
+        if ($PSBoundParameters.ContainsKey('StdinText') -and $null -ne $StdinText) {
+            $stdinPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stdin-" + [guid]::NewGuid() + ".txt")
+            [System.IO.File]::WriteAllText($stdinPath, $StdinText, [System.Text.UTF8Encoding]::new($false))
+            $startProcessParams['RedirectStandardInput'] = $stdinPath
+        }
+
+        $process = Start-Process @startProcessParams
 
         $stdout = if (Test-Path -LiteralPath $stdoutPath) {
             [System.IO.File]::ReadAllText($stdoutPath)
@@ -637,6 +649,9 @@ exit `$LASTEXITCODE
         if (-not [string]::IsNullOrWhiteSpace($argumentsPath)) {
             Remove-Item -LiteralPath $argumentsPath -Force -ErrorAction SilentlyContinue
         }
+        if (-not [string]::IsNullOrWhiteSpace($stdinPath)) {
+            Remove-Item -LiteralPath $stdinPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -663,12 +678,14 @@ function Save-TaskFailedMarker {
         Set-Content -LiteralPath (Join-Path $StatusStatePath "$taskKey.failed") -Encoding UTF8
 }
 
+# The prompt is intentionally NOT part of the argument list: it is delivered via stdin
+# (see Invoke-NativeProcess -StdinText). Passing multi-line prompts as process arguments
+# truncates them on Windows (Start-Process + cmd shim layers cannot carry embedded newlines).
 function Get-CliArguments {
     param(
         $Task,
         [ValidateSet('New', 'Resume')] [string]$Mode,
-        [string]$SessionId,
-        [string]$Prompt
+        [string]$SessionId
     )
 
     switch ($Task.Cli) {
@@ -680,7 +697,6 @@ function Get-CliArguments {
             if ($Task.Model)  { $cliArgs += @('--model', $Task.Model) }
             if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
             $cliArgs += $Task.ExtraArgs
-            $cliArgs += @($Prompt)
             return $cliArgs
         }
         'codex' {
@@ -697,7 +713,6 @@ function Get-CliArguments {
             if ($Task.Model)  { $cliArgs += @('-m', $Task.Model) }
             if ($Task.Effort) { $cliArgs += @('-c', "model_reasoning_effort=$($Task.Effort)") }
             $cliArgs += $codexExtraArgs
-            $cliArgs += @($Prompt)
             return $cliArgs
         }
         'gemini' {
@@ -706,7 +721,7 @@ function Get-CliArguments {
             if ($Mode -eq 'Resume' -and -not [string]::IsNullOrWhiteSpace($SessionId)) {
                 $cliArgs += @('--resume', $SessionId)
             }
-            $cliArgs += @('-p', $Prompt, '--output-format', 'json')
+            $cliArgs += @('--output-format', 'json')
             if ($Task.Model) { $cliArgs += @('-m', $Task.Model) }
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
@@ -843,20 +858,27 @@ function Invoke-CliTaskRun {
         $prompt = Get-ResumePrompt -Task $Task
     }
 
-    $arguments = Get-CliArguments -Task $Task -Mode $Mode -SessionId $SessionId -Prompt $prompt
+    $arguments = Get-CliArguments -Task $Task -Mode $Mode -SessionId $SessionId
 
     Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
     Write-Host "Command: $(Format-CommandForDisplay -Command $Task.Cli -Arguments $arguments)"
+    Write-Host "(prompt sent via stdin; full text in the output file)"
 
     if ($DryRun) {
         return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
     }
 
-    $processResult = Invoke-NativeProcess -Command $Task.Cli -Arguments $arguments -WorkingDirectory $Task.ProjectPath
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+
+    # Log the full prompt before the run; the displayed command line no longer contains it.
+    [System.IO.File]::AppendAllText($outputFilePath, $prompt + [Environment]::NewLine + [Environment]::NewLine, $utf8NoBom)
+
+    $processResult = Invoke-NativeProcess -Command $Task.Cli -Arguments $arguments -WorkingDirectory $Task.ProjectPath -StdinText $prompt
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
     if (-not [string]::IsNullOrWhiteSpace($outputText)) {
-        $outputText | Tee-Object -FilePath $outputFilePath -Append | Out-Host
+        [System.IO.File]::AppendAllText($outputFilePath, $outputText + [Environment]::NewLine, $utf8NoBom)
+        Write-Host $outputText
     }
 
     return ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode

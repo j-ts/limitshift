@@ -80,6 +80,7 @@ write_fake_codex() {
   cat > "$bin_dir/codex" <<EOF
 #!/usr/bin/env bash
 set -u
+cat > /dev/null
 printf '%q ' "\$@" >> "$log_file"
 printf '\n' >> "$log_file"
 if [ "\${1:-}" = "exec" ] && [ "\${2:-}" = "resume" ]; then
@@ -168,6 +169,11 @@ if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
   printf '%s\n' 'Current week (all models): 0% used'
   exit 0
 fi
+prompt=$(cat)
+if [ -z "$prompt" ]; then
+  printf '%s\n' '{"result":"no prompt arrived on stdin","session_id":"fake-claude-session","is_error":true}'
+  exit 1
+fi
 printf '%s\n' '{"result":"done\n\n[[TASK_COMPLETE]]","session_id":"fake-claude-session","is_error":false}'
 exit 0
 EOF
@@ -233,10 +239,79 @@ if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
   printf '%s\n' 'Current week (all models): 0% used'
   exit 0
 fi
+cat > /dev/null
 printf '%s\n' '{"result":"plain failure","session_id":"fake-claude-session","is_error":true}'
 exit 7
 EOF
   chmod +x "$bin_dir/claude"
+}
+
+run_stdin_prompt_roundtrip_test() {
+  local desc="multi-line prompt with quotes round-trips intact via stdin"
+  local root="$TMP_ROOT/stdin-roundtrip"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received-prompt.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used'
+  printf '%s\n' 'Current week (all models): 0% used'
+  exit 0
+fi
+cat > "$received_file"
+printf '%s\n' '{"result":"done\n\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 1,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "stdin roundtrip",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "line one with \"double quotes\"\nline two\n[[TASK_COMPLETE]] should survive as literal text"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -ne 0 ] || [ ! -f "$received_file" ]; then
+    fail "$desc" "exit=$exit_code
+$out"
+    return
+  fi
+
+  local prompt expected received
+  prompt=$(printf 'line one with "double quotes"\nline two\n[[TASK_COMPLETE]] should survive as literal text')
+  expected=$(printf '%s\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with exactly this as the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$prompt" "[[TASK_COMPLETE]]" "[[TASK_BLOCKED]]")
+  received=$(cat "$received_file")
+
+  if [ "$received" = "$expected" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "expected:
+$expected
+received:
+$received"
+  fi
 }
 
 run_exit_code_propagation_test() {
@@ -292,6 +367,7 @@ check "missing queue file gives copy hint"       2 "ai-run-queue.example.json" -
 run_dry_run_state_test
 run_codex_limit_resume_test
 run_duplicate_name_test
+run_stdin_prompt_roundtrip_test
 run_exit_code_propagation_test
 
 echo
