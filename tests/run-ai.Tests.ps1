@@ -1195,6 +1195,39 @@ exit 0
             }
         }
 
+        It 're-runs a task whose .done marker is a legacy single timestamp line (no fingerprint), then writes a 2-line marker' {
+            # Legacy markers (written before fingerprinting existed) hold only a timestamp. They have
+            # no fingerprint line, so they mismatch the current fingerprint and the task re-runs ONCE,
+            # after which a 2-line marker (timestamp + fingerprint) is written and it stabilizes.
+            $fx = New-FingerprintFixture -Prompt 'unchanged prompt'
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$($fx.BinPath);$oldPath"
+
+                # Seed a legacy single-line .done marker for an otherwise-unchanged queue task.
+                $statusPath = Join-Path $fx.Root '.ai-runner-queue\status'
+                New-Item -ItemType Directory -Path $statusPath -Force | Out-Null
+                $donePath = Join-Path $statusPath 'task-01.done'
+                (Get-Date).ToString("s") | Set-Content -LiteralPath $donePath -Encoding UTF8
+                @(Get-Content -LiteralPath $donePath).Count | Should -Be 1
+
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'changed since last run'
+                $run.Output | Should -Not -Match 'already marked as done'
+
+                # The legacy marker has been upgraded to the 2-line timestamp + fingerprint form.
+                $doneLines = @(Get-Content -LiteralPath $donePath)
+                $doneLines.Count | Should -Be 2
+                $doneLines[1] | Should -Match '^[0-9a-f]{64}$'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
         It 'skips a done task when nothing changed (fingerprint matches)' {
             $fx = New-FingerprintFixture -Prompt 'unchanged prompt'
             $oldPath = $env:PATH

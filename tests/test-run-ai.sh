@@ -991,6 +991,47 @@ $out"
   fi
 }
 
+run_legacy_done_reruns_test() {
+  local desc="legacy single-line .done (no fingerprint) re-runs once, then gains a fingerprint"
+  local root="$TMP_ROOT/legacy-done"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local done_file="$root/.ai-runner-queue/status/task-01.done"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "unchanged prompt" } ]
+}
+EOF
+
+  # Seed a legacy marker: a single timestamp line with no fingerprint (older format).
+  mkdir -p "$root/.ai-runner-queue/status"
+  printf '%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$done_file"
+
+  local out exit_code line_count fp_line
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  line_count=$(wc -l < "$done_file" 2>/dev/null | tr -d ' ')
+  fp_line=$(sed -n '2p' "$done_file" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'changed since last run' &&
+     ! printf '%s' "$out" | grep -q 'already marked as done' &&
+     [ "$line_count" = "2" ] &&
+     printf '%s' "$fp_line" | grep -qE '^[0-9a-f]{64}$'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code line_count=$line_count fp=[$fp_line]
+$out"
+  fi
+}
+
 run_cli_change_reruns_test() {
   local desc="changing the cli invalidates the done marker (task re-runs)"
   local root="$TMP_ROOT/cli-change"
@@ -1056,6 +1097,7 @@ run_state_layout_test
 run_done_marker_format_test
 run_stale_done_reruns_test
 run_unchanged_done_skips_test
+run_legacy_done_reruns_test
 run_cli_change_reruns_test
 
 echo

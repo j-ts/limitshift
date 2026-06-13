@@ -265,7 +265,13 @@ function Get-TaskSlug {
 }
 
 # Task 4 canonical task fingerprint.
-# CANONICAL FORMAT (must match run-ai.sh get_task_fingerprint exactly so a queue is portable):
+# PURPOSE: detect when a task's definition changed since it was last marked done, so the task
+#   re-runs. The fingerprint is consistent and stable WITHIN this runner on one machine. It is
+#   NOT intended to match run-ai.sh's fingerprint or be portable across machines: ProjectPath is
+#   normalized to an absolute, OS-specific native path here (run-ai.sh hashes the raw JSON value),
+#   so the two runners produce different hashes. Within-runner self-consistency is the only
+#   requirement. Keep the algorithm (fields, order, separator, lowercase hex) exactly as below.
+#   CANONICAL FORMAT:
 #   fields, in this exact order:  Name, Cli, ProjectPath, Model, Effort, Prompt, ExtraArgs-joined
 #   ExtraArgs-joined = the args joined by a single space (" ").
 #   null/empty Model/Effort contribute an empty string.

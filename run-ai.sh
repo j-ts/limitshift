@@ -528,7 +528,13 @@ sha256_hex() {
 }
 
 # Task 4 canonical task fingerprint.
-# CANONICAL FORMAT (must match run-ai.ps1 Get-TaskFingerprint exactly so a queue is portable):
+# PURPOSE: detect when a task's definition changed since it was last marked done, so the task
+#   re-runs. The fingerprint is consistent and stable WITHIN this runner on one machine. It is
+#   NOT intended to match run-ai.ps1's fingerprint or be portable across machines: this hashes the
+#   raw JSON projectPath value while run-ai.ps1 hashes a normalized absolute, OS-specific native
+#   path, so the two runners produce different hashes. Within-runner self-consistency is the only
+#   requirement. Keep the algorithm (fields, order, separator, lowercase hex) exactly as below.
+#   CANONICAL FORMAT:
 #   fields, in this exact order:  name, cli, projectPath, model, effort, prompt, extraArgs-joined
 #   extraArgs-joined = the args joined by a single space (" ").
 #   empty model/effort contribute an empty string.
