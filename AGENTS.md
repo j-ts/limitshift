@@ -1,101 +1,126 @@
-# AGENTS.md — instructions for AI agents working in this repo
+# AGENTS.md - LimitShift agent guide
 
-This file tells an AI coding agent (Codex, Claude Code, Gemini, etc.) how to help a user build a
-**LimitShift queue**. Agents read this file automatically when the user opens this folder.
+This repository contains **LimitShift**, a small cross-platform queue runner for AI coding CLIs
+(`claude`, `codex`, and `gemini`). Your most common task is to convert a user's rough draft into a
+valid `limitshift-queue.json` that LimitShift can run.
 
-**Your most common job:** the user gives you a rough draft of what they want done to *their* project
-and asks you to turn it into runnable tasks. Do exactly that, and **edit only `limitshift-queue.json`**
-unless the user explicitly asks for more.
+## Default Scope
 
-A typical request looks like:
+- Unless the user explicitly asks for something else, edit only `limitshift-queue.json`.
+- If the user asks to change docs, scripts, tests, or this file, keep the edit limited to the named files.
+- Do not modify the user's target project. Queue tasks should point at it through `projectPath`.
+- Treat this file as the canonical agent manifest. `CLAUDE.md` and `GEMINI.md` are compatibility
+  shims that point back here.
 
-> "Read this folder and create prompts for my project based on the draft below. Change only
-> `limitshift-queue.json`. Suggest appropriate models and use codex."
+## Repository Map
 
-## What you are producing
+- `limitshift.ps1` - Windows runner and validator.
+- `limitshift.sh` - macOS/Linux runner and validator.
+- `limitshift-queue.schema.json` - authoritative queue schema. Read this before editing a queue.
+- `limitshift-queue.example-simple.json` - minimal one-task queue.
+- `limitshift-queue.example-workflow.json` - review -> fix -> verify workflow.
+- `limitshift-queue.example-advanced.json` - model, effort, rotation, and completion-check examples.
+- `tests/` - PowerShell and Bash regression tests for runner changes.
+- `README.md` and `QUICKSTART.md` - user-facing docs.
 
-`limitshift-queue.json` is a JSON file with an optional `settings` object and a `tasks` array. LimitShift
-runs each task in order through one AI CLI (`claude`, `codex`, or `gemini`), and waits out usage limits.
-The authoritative shape is [`limitshift-queue.schema.json`](limitshift-queue.schema.json) — **read it and
-keep your output valid against it.** Validate your result with `limitshift.ps1 -ValidateOnly` (Windows) or
-`./limitshift.sh --validate-only` before telling the user you're done.
+## Queue-Building Workflow
 
-### Required fields, per task
+1. Read the user's draft, target project path, preferred CLI, and any model preference.
+2. Read `limitshift-queue.schema.json`; keep the queue schema-compliant.
+3. Rewrite vague requests into ordered, self-contained tasks. Each prompt must name relevant files
+   and define what "done" looks like.
+4. Use the user's real absolute `projectPath`. If it is unknown, ask for it, or use the current
+   folder only when that is clearly what the user wants.
+5. Add the required permission flag in `extraArgs` for every task that should edit files.
+6. Validate before reporting back:
+   - Windows: `.\limitshift.ps1 -ValidateOnly`
+   - macOS/Linux: `./limitshift.sh --validate-only`
 
-- `name` — short human label.
-- `cli` — `"claude"`, `"codex"`, or `"gemini"`. Use what the user asked for (default to `"codex"` only if they say so).
-- `projectPath` — the absolute folder the CLI runs in. **On Windows, escape backslashes** (`"C:\\Users\\me\\project"`); forward slashes also work (`"C:/Users/me/project"`). Use the user's actual project path.
-- `prompt` — a clear, self-contained instruction. Rewrite the user's draft into a concrete prompt that names files and states what "done" looks like.
+## Queue Schema Essentials
 
-### Useful optional fields
+Each task must include:
 
-- `model` — a string, or an **array** of strings in preference order (rotation: on a usage limit LimitShift switches to the next model). Suggest a sensible model for the CLI (see below).
-- `effort` — reasoning effort. **Rules (enforced at validation):** claude `low|medium|high|xhigh|max`; codex `minimal|low|medium|high|xhigh`; **gemini must be `null` or omitted**; claude + a **haiku** model must be `null`. Never use `ultracode` or codex `none`.
-- `completionCheck` — `true` (default) makes LimitShift append a `[[TASK_COMPLETE]]` instruction and keep resuming until the agent emits that marker; `false` ("simple mode") just runs the prompt once. Use `true` for multi-step work, `false` for one-shot prompts.
-- `extraArgs` — array of extra CLI flags. **Headless runs cannot answer permission prompts, so if the task should edit files you MUST add a permission flag:** claude `["--permission-mode","acceptEdits"]`; codex `["--sandbox","workspace-write"]`; gemini `["--approval-mode","auto_edit"]`. Without it the AI runs read-only and changes nothing.
+- `name` - short human label.
+- `cli` - one of `claude`, `codex`, or `gemini`; use the user's requested CLI when specified.
+- `projectPath` - absolute folder for the CLI run. Windows paths need escaped backslashes
+  (`"C:\\Users\\me\\project"`) or forward slashes (`"C:/Users/me/project"`).
+- `prompt` - concrete task instruction, including files to inspect/edit and completion criteria.
 
-### Settings (optional, top-level)
+Useful optional fields:
 
-`stopOnError` (bool), `maxRunsPerTask` (int), `maxRetriesOnError` (int), `limitWaitMinutes` (int),
-`resetBufferMinutes` (int), `completionCheck` (bool, queue-wide default), `maxStalls` (int).
+- `model` - a string or an array in preference order for model rotation on usage limits.
+- `effort` - CLI-specific reasoning effort; omit or set `null` when unsupported.
+- `completionCheck` - `true` for multi-step work that should resume until `[[TASK_COMPLETE]]`;
+  `false` for one-shot prompts.
+- `extraArgs` - CLI flags. Use array form for reliability.
 
-## Suggesting models
+## Model and Effort Guidance
 
-- **codex**: `gpt-5.5` or `gpt-5.4` for substantive coding/reasoning; `gpt-5.4-mini` for quick or repetitive tasks. (`gpt-5-codex`, `gpt-5.2` are deprecated — don't use.)
-- **claude**: `opus` for the hardest work, `sonnet` for everyday tasks, `haiku` for cheap/simple ones (haiku takes no `effort`).
-- **gemini**: `gemini-3-flash-preview` or `gemini-2.5-flash` for speed, `gemini-2.5-pro`/`gemini-3.1-pro-preview` for depth. Gemini takes no `effort`. A model **array** is especially handy for gemini to dodge limits.
+- Codex: use `gpt-5.5` or `gpt-5.4` for substantive coding/reasoning; use `gpt-5.4-mini` for quick
+  or repetitive edits. Effort: `minimal`, `low`, `medium`, `high`, or `xhigh`. Do not use
+  deprecated `gpt-5-codex`, `gpt-5.2`, or codex effort `none`.
+- Claude: use `opus` for the hardest work, `sonnet` for everyday tasks, and `haiku` for cheap/simple
+  tasks. Effort: `low`, `medium`, `high`, `xhigh`, or `max`; omit effort for Haiku.
+- Gemini: use `gemini-3-flash-preview` or `gemini-2.5-flash` for speed; use
+  `gemini-2.5-pro` or `gemini-3.1-pro-preview` for depth. Omit `effort` or set it to `null`.
+  Model arrays are especially useful for Gemini limit rotation.
 
-Match the model to the task: heavier reasoning → stronger model; bulk/cheap edits → a mini/flash model.
+## Permission Flags
 
-## Rules of engagement
+Headless CLI runs cannot answer permission prompts. If a task should edit files, include:
 
-1. **Edit only `limitshift-queue.json`** unless the user says otherwise. Do not modify the scripts, schema, or their project files.
-2. **Keep it valid JSON** and schema-compliant. Run `-ValidateOnly` / `--validate-only` and fix any error before finishing.
-3. **Turn vague drafts into concrete prompts** — name the files, describe the end state. Chain multi-step work into separate tasks (e.g. find → fix → verify), because each task is its own CLI run and tasks run in order.
-4. **Add the right permission flag** in `extraArgs` whenever a task is meant to change files.
-5. **Use the user's real `projectPath`.** If you don't know it, ask, or use the current folder.
-6. Briefly tell the user which models you chose and why.
+- Claude: `["--permission-mode", "acceptEdits"]`
+- Codex: `["--sandbox", "workspace-write"]`
+- Gemini: `["--approval-mode", "auto_edit"]`
 
-## Example: turning a draft into a queue
+Without these flags, the agent may run read-only and leave the project unchanged.
 
-User draft: *"go through my project, find bugs, fix them, then double-check. use codex."*
+## Prompt Quality Bar
 
-A good `limitshift-queue.json`:
+- Match prompt detail to the chosen tool and model. A capable model with a precise task can take a
+  short prompt; cheaper/smaller models, or broad and fuzzy goals, need step-by-step detail, named
+  files, and an explicit definition of "done". Don't pad a clear task, and don't under-specify a vague one.
+- For a short or vague draft (for example "audit the whole repo code"), with `claude` or `codex` you
+  may begin the `prompt` with the `/goal` command (e.g. `/goal audit the whole repo and write the
+  findings to audit.md`) so the agent sets its own success criteria and keeps working until they are
+  met. (Gemini has no `/goal`.)
+- Prefer explicit file paths and artifacts over broad requests.
+- Split multi-stage work into separate tasks, because each task is its own CLI run.
+- Chain outputs intentionally, for example: write `bugs.md`, then fix entries in `bugs.md`, then
+  verify and mark each entry.
+- Ask agents to summarize changed files and verification commands in their final response.
+- Use `completionCheck: true` for tasks that may need multiple resumes; prompts should end by
+  emitting `[[TASK_COMPLETE]]` or `[[TASK_BLOCKED]] <reason>`.
 
-```json
-{
-  "$schema": "./limitshift-queue.schema.json",
-  "settings": { "stopOnError": true, "completionCheck": true },
-  "tasks": [
-    {
-      "name": "Find bugs",
-      "cli": "codex",
-      "projectPath": "C:\\Users\\me\\my-project",
-      "model": "gpt-5.4",
-      "effort": "high",
-      "extraArgs": ["--sandbox", "workspace-write"],
-      "prompt": "Review the code in src/ and write every bug or issue you find to bugs.md — one numbered item per bug, each with its file path and a short description. Do not fix anything yet."
-    },
-    {
-      "name": "Fix bugs",
-      "cli": "codex",
-      "projectPath": "C:\\Users\\me\\my-project",
-      "model": "gpt-5.4",
-      "effort": "high",
-      "extraArgs": ["--sandbox", "workspace-write"],
-      "prompt": "Read bugs.md and fix each listed issue one by one. After fixing an item, append ' — FIXED' to its line in bugs.md."
-    },
-    {
-      "name": "Verify fixes",
-      "cli": "codex",
-      "projectPath": "C:\\Users\\me\\my-project",
-      "model": "gpt-5.4",
-      "effort": "high",
-      "extraArgs": ["--sandbox", "workspace-write"],
-      "prompt": "Read bugs.md, review the current implementation against each item, and mark each line 'Verified fixed' or 'Still broken: <why>'."
-    }
-  ]
-}
-```
+## Good Local Examples
 
-Then validate it and report which models you used.
+- Minimal queue shape: `limitshift-queue.example-simple.json`.
+- Multi-task workflow: `limitshift-queue.example-workflow.json`.
+- Advanced options and model rotation: `limitshift-queue.example-advanced.json`.
+
+Avoid:
+
+- Inventing fields not present in `limitshift-queue.schema.json`.
+- Leaving placeholder paths such as `C:\\Users\\you\\project` in the final queue.
+- Using unescaped Windows backslashes in JSON.
+- Choosing a model/effort combination that validation rejects.
+- Omitting `extraArgs` on tasks expected to modify files.
+
+## Security and Safety
+
+- Never put API keys, tokens, passwords, private URLs, customer data, or production secrets in
+  `AGENTS.md`, prompts, or queue files.
+- Refer to where secrets live, not to their values.
+- Do not run destructive commands, push commits, install packages, or apply infrastructure changes
+  unless the user explicitly asks for that work.
+- If validation or a task requirement is ambiguous, ask a concise clarifying question before guessing.
+
+## Runner Development
+
+Only use this section when the user explicitly asks to modify LimitShift itself.
+
+- PowerShell tests: `Invoke-Pester tests/limitshift.Tests.ps1`
+- Bash tests: `bash tests/test-limitshift.sh`
+- Validate representative queues with `.\limitshift.ps1 -ValidateOnly` or
+  `./limitshift.sh --validate-only`.
+- Keep README and examples synchronized when schema or behavior changes.
