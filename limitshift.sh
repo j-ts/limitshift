@@ -1132,7 +1132,7 @@ What is in here:
 Re-running:
   Delete this whole folder to start completely from scratch.
   Delete status/task-NN.done to force ONE task to run again.
-  Editing a task's prompt, cli, projectPath, model, effort, or extraArgs now AUTO-INVALIDATES
+  Editing a task's name, prompt, cli, projectPath, model, effort, or extraArgs now AUTO-INVALIDATES
   its done marker: the runner notices the change and re-runs that task with a fresh session.
 EOF
 }

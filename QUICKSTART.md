@@ -4,7 +4,7 @@
 
 1. **Get the files** - Clone or download this folder.
 2. **Trust each project once** - Open every target project in `claude`, `codex`, or `gemini` interactively once so the CLI can finish its trust/onboarding prompt for that folder.
-3. **Create your queue** - Copy `limitshift-queue.example-simple.json` to `limitshift-queue.json` and edit it. It is one task with only the required fields (`name`, `cli`, `projectPath`, `prompt`) plus `"completionCheck": false`, which just runs your prompt once and only waits if you hit a usage limit:
+3. **Create your queue** - Copy `limitshift-queue.example-simple.json` to `limitshift-queue.json` and edit it (use a plain-text editor like Notepad, not Word). It is one task with the required fields (`name`, `cli`, `projectPath`, `prompt`) plus `"completionCheck": false` (run the prompt once, only wait if you hit a usage limit) and a permission flag so the AI can actually edit files:
 
    ```json
    {
@@ -13,15 +13,16 @@
        {
          "name": "Document install steps",
          "cli": "claude",
-         "projectPath": "C:\\Users\\you\\Documents\\my-project",
-         "prompt": "Add a README section that explains how to install the project, then commit it",
-         "completionCheck": false
+         "projectPath": "C:/Users/you/Documents/my-project",
+         "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
+         "completionCheck": false,
+         "extraArgs": ["--permission-mode", "acceptEdits"]
        }
      ]
    }
    ```
 
-   Change `projectPath` to a real git-controlled folder and edit the `prompt`. On Windows, escape backslashes: `"C:\\Users\\me\\proj"`. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release, with a warning to rename it.)
+   Change `projectPath` to a real git-controlled folder and edit the `prompt`. **Tip:** use forward slashes in paths even on Windows (`C:/Users/me/proj`) — no escaping needed. Without the `extraArgs` permission flag the AI runs read-only and won't change files. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release, with a warning to rename it.)
 4. **Validate**
    Windows: `.\limitshift.ps1 -ValidateOnly`
    macOS/Linux: `./limitshift.sh --validate-only`
@@ -40,7 +41,7 @@ Keep the machine awake for long runs. On macOS, for example: `caffeinate -i ./li
 
 All of LimitShift's memory lives in one folder, `.limitshift-limitshift-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `limitshift-log.txt`, and a `_README.txt` describing it all.
 
-- Editing a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` **auto-invalidates** its done marker, so that task re-runs with a fresh session next time.
+- Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` **auto-invalidates** its done marker, so that task re-runs with a fresh session next time.
 - To re-run one finished task, delete its `status/task-NN.done` file.
 - To start over completely, delete the whole `.limitshift-limitshift-queue/` folder.
 - The entire state folder is **safe to delete at any time** — it is rebuilt on the next run.

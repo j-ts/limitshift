@@ -1,95 +1,212 @@
 # LimitShift
 
-You write a to-do list of prompts in one file. LimitShift runs them one by one in Claude Code, Codex, or Gemini while you're away. If you hit your usage limit, it waits for the reset and continues the same conversation.
+**Give your AI coding assistant a to-do list and walk away. LimitShift works through it one task at a time — and when you hit your usage limit, it waits for the limit to reset and picks up right where it left off.**
 
-> **Set expectations before you start.** There is **no guarantee** a task completes exactly as you intended — the result depends on the model, your prompt, and the project. Treat the first run as a **draft**: you steer the outcome by adding follow-up tasks or re-running with a refined prompt. **Always run against a git-controlled folder** so you can review the diff and revert anything you don't like.
+You already use an AI coding tool in your terminal — Claude Code, Codex, or Gemini. Normally you sit there, type one request, wait, type the next. LimitShift lets you write all your requests down in a single list, start it, and go do something else. It runs each one for you. If the AI says "you've used up your quota for now," LimitShift doesn't give up — it sleeps until your quota comes back and then continues. You wake up to the work done (or as far as it could get).
 
-## Requirements
+Think of it like a queue at a coffee shop: you hand over a list of orders, and they get made one by one. If the machine needs to cool down, the barista waits and then keeps going — they don't throw out your list.
 
-- Windows: Windows PowerShell 5.1+
-- macOS/Linux: Bash 3.2+ and `jq`
-- At least one installed CLI: `claude`, `codex`, or `gemini`
-- Each CLI must already be trusted/onboarded in every `projectPath` you plan to automate
+> 🔰 **New to words like *terminal*, *npm*, or *Git*?** Don't worry — there's a plain-language [glossary at the bottom](#a-few-words-explained), and the steps below explain each thing as you reach it.
 
-Headless runs cannot answer first-run trust prompts. Open each project once interactively in the target CLI before using LimitShift.
+> **⚠️ Read this before you start — set your expectations.**
+> There is **no guarantee** a task comes out exactly how you pictured it. The result depends on the AI model, how clearly you wrote the request, and the project itself. Treat the first run as a **rough draft**. You steer it by adding more tasks afterward or by editing a request and running again. **Only point LimitShift at a folder that's backed up with Git** (version control) so you can look at what changed and undo anything you don't like.
 
-## Installation
+---
 
-Clone or download the folder. There is no build step.
+## Is this for me?
 
-Windows:
+You'll get value from LimitShift if:
+
+- You already have **Claude Code, Codex, or Gemini** working on your computer.
+- You often hand the AI a series of related jobs and wish you didn't have to babysit each one.
+- You keep hitting usage limits in the middle of a long session and lose your place.
+
+You do **not** need to be a programmer. You **do** need to be willing to open a terminal (we show you how just below), install a tool or two, and edit a small text file. Every step is spelled out.
+
+---
+
+## The one skill you need: opening a terminal
+
+A **terminal** is an app already on your computer where you type commands instead of clicking buttons. Everything below happens in one.
+
+- **Windows:** press the Start button, type **PowerShell**, and open **Windows PowerShell**.
+- **Mac:** press `Cmd+Space`, type **Terminal**, and press Enter.
+- **Linux:** open your **Terminal** app.
+
+Most commands also need your terminal to be "pointed at" a specific folder. The easiest way:
+
+- **Windows:** in File Explorer, open the folder, then right-click an empty area inside it and choose **"Open in Terminal"** (or hold Shift while right-clicking → "Open PowerShell window here").
+- **Mac:** open the **Terminal**, type `cd ` (with a space), then drag the folder from Finder onto the Terminal window and press Enter.
+
+If a command ever fails with "cannot find path" or "file not found," it almost always means your terminal isn't pointed at the right folder yet — redo the step above.
+
+---
+
+## What you need before you start
+
+| You need... | Why | How to check |
+| --- | --- | --- |
+| A **Windows, Mac, or Linux** computer | LimitShift is a small script that runs on all three | — |
+| **Node.js** (it comes with **npm**, an installer used below) | The AI tools are installed with `npm` | Type `npm --version` in your terminal. If it errors, install Node.js (the "LTS" version) from [nodejs.org](https://nodejs.org), then reopen your terminal |
+| At least one **AI coding tool**: `claude`, `codex`, or `gemini` | LimitShift drives one of these tools to do the actual work — it doesn't talk to the AI itself | Type the tool's name (e.g. `claude`). If it starts up, you have it (press `Ctrl+C` to leave). If you see "not recognized" or "command not found," install it below |
+| Each tool **signed in and trusted** in your project folder, once | LimitShift runs the tools silently in the background, where they can't stop to ask "do you trust this folder?" — so you answer that ahead of time | Open your project once, normally, in the tool (e.g. run `claude` inside the folder and let it start) |
+| (Mac/Linux only) a small helper called **`jq`** | The Mac/Linux version uses it to read the tool's output | Type `jq --version`. If it's missing: Mac `brew install jq`, Linux `sudo apt install jq` |
+| A project folder that's **tracked by Git** | So you can review and undo anything the AI changes | Type `git status` inside the folder. If it says "not a git repository," the folder isn't backed up yet — the simplest fix is the free [GitHub Desktop](https://desktop.github.com) app (buttons, no typing): use it to "create a repository" from your folder |
+
+Don't have one of the AI tools yet? Type the matching line into your terminal:
+
+```text
+claude  →  npm install -g @anthropic-ai/claude-code
+codex   →  npm install -g @openai/codex
+gemini  →  npm install -g @google/gemini-cli
+```
+
+> **Important, one-time step:** because LimitShift runs the tools in the background, they can't answer first-time "do you trust this folder?" prompts. **Open each project once, normally, in the tool before automating it.**
+
+---
+
+## Install LimitShift
+
+There's nothing to build.
+
+1. **Download the files.** On this project's web page, click the green **Code** button → **Download ZIP**. Unzip it somewhere you'll remember, like your **Documents** folder. (You'll now have a folder containing `limitshift.ps1`, `limitshift.sh`, and the examples.)
+2. **Open a terminal in that folder** using the trick from ["The one skill you need"](#the-one-skill-you-need-opening-a-terminal) above.
+3. **Run the one setup command for your system:**
+
+**Windows:**
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 Unblock-File .\limitshift.ps1
 ```
 
-macOS/Linux:
+The first line lets your computer run scripts you've explicitly allowed — it's a standard, safe setting that doesn't lower your overall security, and you can undo it later. **If it asks you to confirm, type `Y` and press Enter.** The second line clears the "downloaded from the internet" block on the script.
+
+**Mac / Linux:**
 
 ```bash
 chmod +x limitshift.sh
 ```
 
-> **Deprecation:** the scripts were renamed from `run-ai.ps1` / `run-ai.sh` to `limitshift.ps1` / `limitshift.sh`. Thin `run-ai.ps1` / `run-ai.sh` forwarder stubs still work for one release (they print a deprecation warning and call the new script); they will be removed next release. Update your commands to the new names.
+(This marks the script as runnable.)
 
-## Simple example
+---
 
-Start here. This is the smallest useful queue: **one** task, only the required fields, plus `"completionCheck": false` so LimitShift just runs your prompt once and only intervenes if you hit a usage limit. This is "run my prompt, survive limits" mode.
+## Your first run, step by step
 
-The file ships as [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json):
+### Step 1 — Write your to-do list
+
+Your to-do list is a small text file in **JSON** format (a structured way of writing a list that the computer can read). Each item is one **task**.
+
+> **Edit it in a plain-text editor** — Notepad on Windows, or TextEdit in *plain text* mode on Mac — **not Microsoft Word**, which adds hidden formatting that breaks the file. Keep every quote, comma, and brace exactly as shown; they all matter.
+
+Here is the simplest useful list — one task:
 
 ```json
 {
-  "$schema": "./limitshift-queue.schema.json",
   "tasks": [
     {
       "name": "Document install steps",
       "cli": "claude",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
-      "prompt": "Add a README section that explains how to install the project, then commit it",
-      "completionCheck": false
+      "projectPath": "C:/Users/you/Documents/my-project",
+      "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
+      "completionCheck": false,
+      "extraArgs": ["--permission-mode", "acceptEdits"]
     }
   ]
 }
 ```
 
-Copy it to `limitshift-queue.json` (the default name the runner looks for), change `projectPath` to a real git-controlled folder, and edit the `prompt`. The four required fields per task are `name`, `cli`, `projectPath`, and `prompt`. On Windows, escape backslashes in the path: `"C:\\Users\\me\\proj"`.
+What each line means:
 
-The `$schema` line is optional but gives you inline validation in editors that understand JSON Schema.
+- **`name`** — any short label so you can recognize the task. It's for you.
+- **`cli`** — which AI tool to use: `"claude"`, `"codex"`, or `"gemini"`.
+- **`projectPath`** — the folder the AI should work in. **Tip:** use forward slashes (`/`) even on Windows — it works and saves you the headache of escaping backslashes.
+- **`prompt`** — what you're actually asking for, in plain words. This is the part that matters most.
+- **`completionCheck: false`** — keeps things simple: run the prompt once and stop (it only waits if you hit a usage limit). Leave this in while you're learning; the other mode is explained [later](#doing-more-the-advanced-example).
+- **`extraArgs`** — gives the AI permission to actually edit files. This matters: because LimitShift runs the tool in the background, the AI **can't stop to ask "may I edit this file?"** Without a permission line it runs read-only and changes nothing — even though it reports success. The `["--permission-mode", "acceptEdits"]` shown here lets Claude make edits. (Codex uses `["--sandbox", "workspace-write"]`; Gemini uses `["--approval-mode", "auto_edit"]`.)
 
-**Always validate first, then run.**
+The first four fields (`name`, `cli`, `projectPath`, `prompt`) are required. The rest are optional — but you'll almost always want the permission line if you expect the AI to change anything.
 
-Windows (PowerShell):
+### Step 2 — Save it
 
+Save your file as **`limitshift-queue.json`** — that's the name LimitShift looks for automatically. Save it in the **LimitShift folder** (the one with `limitshift.ps1` / `limitshift.sh` that you unzipped). Note this is usually **not** the same folder as your `projectPath`, which points at the project you want the AI to work on.
+
+> **Notepad trap:** when saving, set **"Save as type"** to **"All Files"** — otherwise Notepad silently adds `.txt` and you get `limitshift-queue.json.txt`, which LimitShift won't find.
+
+(A ready-made copy ships as [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json) — you can copy that and edit it. Change `projectPath` to a real folder of yours and write your own `prompt`.)
+
+### Step 3 — Check it before running
+
+This catches typos (a missing comma, a wrong tool name, a folder that doesn't exist) **before** anything runs. Nothing is changed; it just looks.
+
+**Windows:**
 ```powershell
 .\limitshift.ps1 -ValidateOnly
-.\limitshift.ps1
 ```
-
-macOS/Linux (Bash):
-
+**Mac / Linux:**
 ```bash
 ./limitshift.sh --validate-only
+```
+
+(The `.\` at the front just means "the script here in this folder" — type it exactly.) If you see `Config OK`, you're ready. If you get an error you don't understand, the [Troubleshooting table](#troubleshooting) near the bottom lists the common ones and their fixes.
+
+### Step 4 — Run it
+
+**Windows:**
+```powershell
+.\limitshift.ps1
+```
+**Mac / Linux:**
+```bash
 ./limitshift.sh
 ```
 
-The console shows only the agent's reply, under a clear header — not the raw CLI JSON:
+### Step 5 — Watch what happens
+
+LimitShift prints the AI's reply in plain text under a clear header — not a wall of technical data:
 
 ```text
 --- agent response ---
-Added an "Installation" section to README.md with clone, dependency, and build
-steps, then committed it as "docs: add installation instructions".
+Added an "Installation" section to README.md with clone, dependency, and build steps.
 ```
 
-The full raw CLI JSON is still saved to `.limitshift-limitshift-queue/outputs/task-01-<slug>-output.txt` if you ever need it.
+It may sit quietly for a minute or more while the AI works — that's normal, not frozen. To stop it at any time, press **`Ctrl+C`**; your progress is saved, so you can start again later and it picks up where it left off. When a task finishes you'll see `Task 1 completed`. That's it — you ran your first queue.
 
-## Advanced example
+(The full technical output is quietly saved to a file too — see [Where LimitShift keeps its notes](#where-limitshift-keeps-its-notes).)
 
-Once you're comfortable, this 3-task queue shows every optional field. It ships as [`limitshift-queue.example-advanced.json`](limitshift-queue.example-advanced.json):
+---
+
+## Steering the results
+
+Remember the expectations note up top: the first run is a draft. You shape the outcome **with follow-up requests**, not by getting the one perfect prompt. A few easy ways:
+
+- **Didn't go how you wanted?** Edit the task's `prompt` and run again. LimitShift notices the change and re-does that task automatically — you don't have to delete anything.
+- **Want to refine it?** Add another task to the list ("Now also add a Troubleshooting section") and run again. Finished tasks are skipped; only the new one runs.
+- **Want to be more specific?** The clearer and more concrete your `prompt` (name the file, describe what "done" looks like), the closer the result lands.
+
+---
+
+## What happens when you hit your usage limit
+
+This is the whole reason LimitShift exists. AI tools cap how much you can use in a session or a week. Normally, hitting that cap mid-task means you stop and lose your place.
+
+LimitShift instead **notices the limit, figures out when it resets, waits that long, and then continues the same conversation** — so the AI still remembers what it was doing. You can start a big list before bed and find it further along (or finished) in the morning.
+
+If you give a task a **list** of models instead of one, LimitShift can switch to the next model the moment one hits its limit, so it doesn't even have to wait. That's covered in [Model rotation](#model-rotation-on-usage-limits).
+
+> **Tip for long overnight runs:** stop your computer from going to sleep. On Windows: Settings → System → Power → set "When plugged in, put my device to sleep" to **Never**. On Mac: run with `caffeinate -i ./limitshift.sh`. On Linux: `systemd-inhibit ./limitshift.sh`.
+
+---
+
+## Doing more: the advanced example
+
+When you're comfortable, you can use the optional fields: pick a specific model, give a model a rotation list, set how hard the AI should think (`effort`), pass extra options to the tool, and turn on "completion checking" (where LimitShift keeps nudging the AI until it explicitly says the task is done).
+
+A full 3-task example using every option ships as [`limitshift-queue.example-advanced.json`](limitshift-queue.example-advanced.json):
 
 ```json
 {
-  "$schema": "./limitshift-queue.schema.json",
   "settings": {
     "stopOnError": true,
     "maxRunsPerTask": 20,
@@ -101,7 +218,7 @@ Once you're comfortable, this 3-task queue shows every optional field. It ships 
     {
       "name": "Implement fixes with Codex",
       "cli": "codex",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": "C:/Users/you/Documents/my-project",
       "model": "gpt-5.4",
       "effort": "medium",
       "extraArgs": ["--sandbox", "workspace-write"],
@@ -110,7 +227,7 @@ Once you're comfortable, this 3-task queue shows every optional field. It ships 
     {
       "name": "Write release notes with Gemini",
       "cli": "gemini",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": "C:/Users/you/Documents/my-project",
       "model": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"],
       "effort": null,
       "extraArgs": ["--approval-mode", "auto_edit"],
@@ -119,7 +236,7 @@ Once you're comfortable, this 3-task queue shows every optional field. It ships 
     {
       "name": "Audit the project with Claude",
       "cli": "claude",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": "C:/Users/you/Documents/my-project",
       "model": "sonnet",
       "extraArgs": ["--permission-mode", "acceptEdits"],
       "completionCheck": true,
@@ -129,20 +246,40 @@ Once you're comfortable, this 3-task queue shows every optional field. It ships 
 }
 ```
 
-What each piece does:
+In plain terms:
 
-- **`settings`** applies to the whole queue. `stopOnError` (`true`) halts the queue if a task fails unrecoverably. `maxRunsPerTask` (`20`) caps how many new + resumed runs one task may use. `maxStalls` (`2`) fails a task that returns the same answer twice in a row without finishing (only matters when `completionCheck` is `true`). `limitWaitMinutes` (`30`) is the fallback wait when LimitShift cannot read the exact reset time. `completionCheck` (`true`) is the queue-wide default for the completion-marker workflow described below; individual tasks override it.
-- **Task 1 (Codex)** uses `model` `"gpt-5.4"` and `effort` `"medium"` (Codex accepts `minimal`/`low`/`medium`/`high`/`xhigh`). `extraArgs` `["--sandbox", "workspace-write"]` lets Codex edit files inside the workspace without prompting. Array form for `extraArgs` is safest because each flag and value is a separate element.
-- **Task 2 (Gemini)** passes `model` as an **array** — a rotation list. On a usage limit LimitShift switches to the next model in the list immediately (no waiting) and only waits for a reset once every listed model is exhausted. Gemini has no reasoning-effort flag, so `effort` **must be `null` or omitted** (a non-null effort on a gemini task is rejected at validation). `extraArgs` `["--approval-mode", "auto_edit"]` lets Gemini apply edits automatically.
-- **Task 3 (Claude)** sets `completionCheck` to `true`, so LimitShift appends `[[TASK_COMPLETE]]` instructions to the prompt and keeps resuming the same session until the agent ends with that marker (or `[[TASK_BLOCKED]] <reason>`). `model` is the `sonnet` alias. `extraArgs` `["--permission-mode", "acceptEdits"]` lets Claude apply edits without asking.
+- **`settings`** are options for the whole list. `stopOnError` halts everything if a task fails badly. `maxRunsPerTask` is a safety cap on how many tries one task gets. `maxStalls` gives up on a task that keeps repeating itself without finishing. `limitWaitMinutes` is a fallback wait time. `completionCheck` turns on the "keep going until the AI says it's done" behavior for the whole list (individual tasks can override it).
+- **Task 1 (Codex)** picks the `gpt-5.4` model, tells it to think at `medium` effort, and uses `extraArgs` to let it edit files inside the workspace without asking each time.
+- **Task 2 (Gemini)** gives a **list** of models (rotation — see below). Gemini has no "effort" setting, so `effort` must be `null`.
+- **Task 3 (Claude)** turns on `completionCheck`, so LimitShift keeps resuming until the AI ends its reply with the special marker `[[TASK_COMPLETE]]` (or `[[TASK_BLOCKED]] <reason>` if it gets stuck).
 
-Every field above passes both schema validation and the runner's stricter runtime checks (for example the per-CLI effort rules). See the [Reference](#reference) for the full field table.
+Don't worry about memorizing these — the full list of options is in the [Reference](#reference) below, and you can ignore all of them until you need one.
 
-> Three example files ship with LimitShift: [`limitshift-queue.example.json`](limitshift-queue.example.json) (a copy of the simple example, kept under the legacy default name for one release), [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json), and [`limitshift-queue.example-advanced.json`](limitshift-queue.example-advanced.json).
+---
+
+## A few words explained
+
+- **Terminal** — an app already on your computer where you type commands instead of clicking. On Windows it's **PowerShell**; on Mac and Linux it's **Terminal**.
+- **CLI / AI tool** — the AI coding assistant you run in your terminal (Claude Code, Codex, or Gemini). "CLI" means "command-line interface" — a program you type commands to.
+- **Node.js / npm** — Node.js is a free runtime you install once from [nodejs.org](https://nodejs.org); it includes **npm**, the installer used to add the AI tools (`npm install -g ...`).
+- **Download / clone** — "download" is the ZIP method in [Install](#install-limitshift). "Clone" is the Git way of copying a project; if you don't use Git, just download the ZIP.
+- **PATH** — the list of places your computer looks to find a program by name. "Not found on PATH" just means it can't find that tool — usually because it isn't installed yet.
+- **Headless / in the background** — running a tool silently with no one watching, so it can't stop to ask questions. That's how LimitShift runs the AI, which is why you trust the folder (and set a permission flag) ahead of time.
+- **Flag / argument** — an extra option you add to a command, like `--permission-mode acceptEdits`. In your queue these go in `extraArgs`.
+- **Prompt** — your request to the AI, written in plain language.
+- **Task** — one item on your to-do list (one prompt for one tool in one folder).
+- **Queue** — your whole to-do list (the `.json` file).
+- **Session** — one ongoing conversation with the AI. "Resuming the same session" means the AI still remembers the earlier part.
+- **Usage limit / quota** — the cap on how much you can use the AI in a window of time. It resets after a while.
+- **Git / version control** — a system that tracks every change to your files so you can review or undo them. Running only in a Git folder is your safety net.
+- **JSON** — a plain-text format for writing structured lists. Your queue file is JSON.
+- **`[[TASK_COMPLETE]]`** — a marker the AI is asked to put at the end of its reply to signal "this task is finished," used in completion-checking mode.
 
 ---
 
 # Reference
+
+Everything below is detail you can come back to when you need a specific option. The sections above are enough to get real work done.
 
 ## How it works
 
@@ -182,7 +319,7 @@ The queue file is `limitshift-queue.json` by default. Copy one of the example fi
 | `tasks[].model` | string or array of strings | no | none | Passed through where supported. An array lists models in preference order; on a usage limit the runner rotates to the next model (see below). Primarily useful for gemini |
 | `tasks[].effort` | string or null | no | none | Reasoning effort, allowed values per CLI (enforced at validation): **claude** `low`, `medium`, `high`, `xhigh`, `max`; **codex** `minimal`, `low`, `medium`, `high`, `xhigh`; **gemini** must be `null` (it has no effort flag — use `thinkingLevel`/`thinkingBudget` via gemini settings instead). Claude Haiku supports no effort, so claude + a haiku model must also be `null`. `ultracode` (claude's interactive `/effort` menu) and codex `none` (plan-mode only) are rejected |
 | `tasks[].completionCheck` | boolean | no | inherits `settings.completionCheck` | Per-task override of completion checking |
-| `tasks[].extraArgs` | string or array | no | none | Extra CLI flags |
+| `tasks[].extraArgs` | string or array | no | none | Extra CLI flags (this is where permission flags go — see [Permissions](#permissions-warning)) |
 
 `model` aliases (passed through to each CLI):
 
@@ -196,23 +333,20 @@ The queue file is `limitshift-queue.json` by default. Copy one of the example fi
 - String form is split on whitespace.
 - The runner filters `-C` / `--cd`, `--sandbox`, and `--add-dir` from `codex exec resume` because current Codex resume commands reject them.
 
-Windows path escaping in JSON:
+Windows paths in JSON — the easy way is to use **forward slashes**, which work fine on Windows:
 
 ```json
-{
-  "projectPath": "C:\\Users\\me\\repo"
-}
+{ "projectPath": "C:/Users/me/repo" }
 ```
 
-Wrong:
+If you prefer backslashes, you must double them (`\\`), because a single backslash has a special meaning in JSON:
 
 ```json
-{
-  "projectPath": "C:\Users\me\repo"
-}
+{ "projectPath": "C:\\Users\\me\\repo" }   // correct
+{ "projectPath": "C:\Users\me\repo" }       // wrong — will fail to parse
 ```
 
-If your editor supports JSON Schema, keep the `$schema` line from the example file to get inline validation.
+If your editor supports JSON Schema, keep the `$schema` line from the example file to get inline validation as you type.
 
 ## Per-CLI behavior
 
@@ -230,7 +364,7 @@ Switching models mid-session relies on gemini/claude resume. If a CLI rejects a 
 
 ## Permissions warning
 
-Headless runs cannot answer permission prompts. Decide your risk posture explicitly through `extraArgs`.
+Headless runs cannot answer permission prompts. Decide your risk posture explicitly through `extraArgs`. **If you leave these out, the AI runs read-only and won't change any files.**
 
 Examples:
 
@@ -294,13 +428,13 @@ The console shows only the agent's response text (under a `--- agent response --
 
 Keep the machine awake for long runs:
 
-- Windows: adjust sleep settings or use `presentationsettings`
+- Windows: adjust sleep settings (Settings → System → Power) or use `presentationsettings`
 - macOS: `caffeinate -i ./limitshift.sh`
 - Linux: `systemd-inhibit ./limitshift.sh`
 
-## State & re-running
+## Where LimitShift keeps its notes
 
-LimitShift keeps everything it remembers in one folder, `.limitshift-<queue-name>/`, created next to your queue file. It is built and maintained automatically, and a plain-language `_README.txt` explaining the layout is dropped inside it on every run.
+LimitShift keeps everything it remembers in one folder, `.limitshift-<queue-name>/`, created next to your queue file. For the default queue file `limitshift-queue.json`, that folder is literally named `.limitshift-limitshift-queue/`. It is built and maintained automatically, and a plain-language `_README.txt` explaining the layout is dropped inside it on every run.
 
 Where state lives and what is in it:
 
@@ -311,7 +445,7 @@ Where state lives and what is in it:
 - `limitshift-log.txt` — the full runner transcript.
 - `_README.txt` — the same explanation, right next to the data.
 
-Editing a task auto-invalidates its done marker. When you change a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` and run again, LimitShift notices the change (it stores a fingerprint of those fields inside the `.done` file), throws away the stale `.done` marker and the old session id, and **re-runs that task with a fresh session**. Tasks you did not touch keep being skipped.
+Editing a task auto-invalidates its done marker. When you change a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` and run again, LimitShift notices the change (it stores a fingerprint of those fields inside the `.done` file), throws away the stale `.done` marker and the old session id, and **re-runs that task with a fresh session**. Tasks you did not touch keep being skipped.
 
 To re-run **one** finished task by hand, delete its `status/task-NN.done` file. To start **completely over**, delete the whole `.limitshift-<queue-name>/` folder. The entire state folder is safe to delete at any time — LimitShift recreates whatever it needs on the next run.
 
@@ -331,14 +465,15 @@ Prompts should therefore describe concrete end conditions such as "write `docs/a
 
 | Message | Meaning | Fix |
 | --- | --- | --- |
-| `Config file is not valid JSON` | Broken JSON syntax | Check for trailing commas, missing commas, or bad escaping |
+| `Config file is not valid JSON` | Broken JSON syntax | Check for trailing commas, missing commas, or bad escaping (use forward slashes in paths) |
 | `Task N is missing required JSON property` | A task is missing `name`, `cli`, `projectPath`, or `prompt` | Fix the named field |
 | `Allowed values: claude, codex, gemini` | Unsupported `cli` value | Use one of the supported CLIs |
 | `Project path does not exist` | `projectPath` is wrong | Fix the path or create the folder |
 | `not found on PATH` | Required CLI is not installed or not on PATH | Install the CLI and retry |
-| `jq is required but not installed` | Unix runner cannot parse JSON without `jq` | Install `jq` first |
+| `jq is required but not installed` | Unix runner cannot parse JSON without `jq` | Install `jq` (Mac `brew install jq`, Linux `sudo apt install jq`) |
 | `Task N exceeded maxRunsPerTask` | The task never finished or kept resuming | Inspect the prompt/output and raise the cap only if needed |
 | `installed gemini rejects --resume` | Your Gemini CLI build does not support headless resume | The runner will retry with a continuation prompt |
+| The AI reported success but nothing changed | No permission flag, so it ran read-only | Add the right `extraArgs` permission flag (see [Permissions](#permissions-warning)) |
 
 ## Running the tests
 
