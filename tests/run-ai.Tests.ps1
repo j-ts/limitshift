@@ -227,6 +227,45 @@ Describe 'run-ai.ps1' {
             $prompt = Get-ResumePrompt -Task $task
             $prompt | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
         }
+
+        # Task 3 (Bug C): the resume prompt must repeat the original task verbatim so a thin
+        # session and slash commands (e.g. /goal) survive the resume.
+        It 'repeats the original prompt (incl. a /goal line) and the continue sentence on resume for cli=<Cli> (completionCheck true)' -ForEach @(
+            @{ Cli = 'claude' }
+            @{ Cli = 'codex' }
+            @{ Cli = 'gemini' }
+        ) {
+            $originalPrompt = "/goal ship the widget`nImplement the feature end to end."
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = $Cli; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = $originalPrompt; ExtraArgs = @()
+                CompletionCheck = $true
+            }
+            $prompt = Get-ResumePrompt -Task $task
+            # (a) original prompt verbatim, including the /goal line
+            $prompt | Should -Match '/goal ship the widget'
+            $prompt | Should -BeLike "*$originalPrompt*"
+            # (b) the continue sentence
+            $prompt | Should -Match 'Continue the previous task in this same session from where you stopped\. Do not restart from scratch\.'
+            # (c) the marker instructions block (completionCheck true)
+            $prompt | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+        }
+
+        It 'simple-mode resume repeats the original prompt but omits the marker block (completionCheck false)' {
+            $originalPrompt = "/goal ship the widget`nImplement the feature end to end."
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = $originalPrompt; ExtraArgs = @()
+                CompletionCheck = $false
+            }
+            $prompt = Get-ResumePrompt -Task $task
+            # The original prompt IS present...
+            $prompt | Should -BeLike "*$originalPrompt*"
+            $prompt | Should -Match 'Continue the previous task in this same session from where you stopped\. Do not restart from scratch\.'
+            # ...but no marker text leaks in simple mode.
+            $prompt | Should -Not -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+            $prompt | Should -Not -Match '\[\[TASK_COMPLETE\]\]'
+        }
     }
 
     Context 'Get-MarkerStatus (loosened detection)' {

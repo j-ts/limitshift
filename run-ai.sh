@@ -816,11 +816,10 @@ invoke_cli_task_run() {
       prompt_with_marker=$(printf '%s' "$prompt")
     fi
   else
-    if [ "$cli" = "gemini" ]; then
-      prompt_with_marker=$(printf 'You were interrupted partway through the following task. Inspect the current state of the working directory to see what is already done. Do not redo completed work; continue from where things stand.\n\nOriginal task:\n%s%s\n' "$prompt" "$marker_block")
-    else
-      prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.%s\n' "$marker_block")
-    fi
+    # Task 3 (Bug C): one unified resume template for all three CLIs. The resume prompt now
+    # repeats the original task verbatim so a thin session and slash commands (e.g. /goal)
+    # survive the resume instead of leaving the agent with nothing to continue.
+    prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$prompt" "$marker_block")
   fi
 
   build_cli_args "$idx" "$mode" "$session_id"

@@ -662,6 +662,159 @@ $out"
   fi
 }
 
+run_resume_repeats_prompt_test() {
+  local desc="resume prompt repeats the original task (incl. /goal) and the continue sentence"
+  local root="$TMP_ROOT/resume-repeats"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_dir="$root/received"
+  local status_dir="$root/.ai-runner-queue/status"
+
+  mkdir -p "$bin_dir" "$project_dir" "$received_dir"
+
+  # A claude stub that records each run's stdin into a separate, numbered file. The first run
+  # answers WITHOUT a marker (forcing a resume); the second run answers WITH the marker (done).
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used'
+  printf '%s\n' 'Current week (all models): 0% used'
+  exit 0
+fi
+count_file="$received_dir/count"
+n=0
+if [ -f "\$count_file" ]; then n=\$(cat "\$count_file"); fi
+n=\$((n + 1))
+printf '%s' "\$n" > "\$count_file"
+cat > "$received_dir/run-\$n.txt"
+if [ "\$n" = "1" ]; then
+  printf '%s\n' '{"result":"made some progress, no marker yet","session_id":"resume-sess","is_error":false}'
+else
+  printf '%s\n' '{"result":"all done\n\n[[TASK_COMPLETE]]","session_id":"resume-sess","is_error":false}'
+fi
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0,
+    "maxStalls": 5
+  },
+  "tasks": [
+    {
+      "name": "resume repeats",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "/goal ship the widget\nImplement the feature end to end."
+    }
+  ]
+}
+EOF
+
+  local out exit_code resume_prompt
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  resume_prompt=$(cat "$received_dir/run-2.txt" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$status_dir/task-01.done" ] &&
+     printf '%s' "$resume_prompt" | grep -q 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.' &&
+     printf '%s' "$resume_prompt" | grep -q '/goal ship the widget' &&
+     printf '%s' "$resume_prompt" | grep -q 'Implement the feature end to end.'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+resume prompt (run 2):
+$resume_prompt
+$out"
+  fi
+}
+
+run_resume_simple_mode_test() {
+  local desc="simple-mode resume repeats the original prompt but omits the marker block"
+  local root="$TMP_ROOT/resume-simple"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_dir="$root/received"
+
+  mkdir -p "$bin_dir" "$project_dir" "$received_dir"
+
+  # In simple mode the first OK run completes the task, so a resume would never happen via the
+  # main loop. To exercise the simple-mode RESUME prompt directly, seed a saved session id so the
+  # very first invocation is a Resume, and force a limit on run 1 so a second (resume) run records
+  # the prompt. Simpler: drive Get-ResumePrompt-equivalent by making run 1 hit a usage limit so the
+  # runner pauses and resumes; the resume run then records its prompt. We keep completionCheck:false.
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used'
+  printf '%s\n' 'Current week (all models): 0% used'
+  exit 0
+fi
+count_file="$received_dir/count"
+n=0
+if [ -f "\$count_file" ]; then n=\$(cat "\$count_file"); fi
+n=\$((n + 1))
+printf '%s' "\$n" > "\$count_file"
+cat > "$received_dir/run-\$n.txt"
+if [ "\$n" = "1" ]; then
+  printf '%s\n' '{"result":"You have hit your usage limit. Try again in 0s.","session_id":"simple-sess","is_error":true}'
+  exit 1
+fi
+printf '%s\n' '{"result":"finished it","session_id":"simple-sess","is_error":false}'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0,
+    "completionCheck": false
+  },
+  "tasks": [
+    {
+      "name": "simple resume",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "/goal ship it\ndo the simple task"
+    }
+  ]
+}
+EOF
+
+  local out exit_code resume_prompt
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  resume_prompt=$(cat "$received_dir/run-2.txt" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$resume_prompt" | grep -q 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.' &&
+     printf '%s' "$resume_prompt" | grep -q '/goal ship it' &&
+     printf '%s' "$resume_prompt" | grep -q 'do the simple task' &&
+     ! printf '%s' "$resume_prompt" | grep -q 'IMPORTANT AUTOMATION INSTRUCTIONS' &&
+     ! printf '%s' "$resume_prompt" | grep -q 'TASK_COMPLETE'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+resume prompt (run 2):
+$resume_prompt
+$out"
+  fi
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -680,6 +833,8 @@ run_loose_marker_test
 run_stall_guard_test
 run_clean_output_test
 run_show_raw_test
+run_resume_repeats_prompt_test
+run_resume_simple_mode_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"
