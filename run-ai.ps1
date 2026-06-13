@@ -121,14 +121,14 @@ function Read-QueueConfig {
             throw "Project path does not exist for task $n (`"$($t.name)`"): $projectPath"
         }
 
-        $extraArgs = @()
+        $extraArgs = [string[]]@()
         $extraNode = $t.PSObject.Properties['extraArgs']
         if ($null -ne $extraNode -and $null -ne $extraNode.Value) {
             if ($extraNode.Value -is [string]) {
-                $extraArgs = @($extraNode.Value -split '\s+' | Where-Object { $_ })
+                $extraArgs = [string[]]@($extraNode.Value -split '\s+' | Where-Object { $_ })
             }
             elseif ($extraNode.Value -is [System.Array]) {
-                $extraArgs = @($extraNode.Value | ForEach-Object { [string]$_ })
+                $extraArgs = [string[]]@($extraNode.Value | ForEach-Object { [string]$_ })
             }
             else {
                 throw "Task $n extraArgs must be a string or an array of strings."
@@ -463,6 +463,183 @@ $TaskBlockedMarker <one-line reason>
 "@
 }
 
+function Get-ObjectPropertyValue {
+    param(
+        [AllowNull()]$Object,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ($null -eq $Object) { return $Default }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop -or $null -eq $prop.Value) { return $Default }
+    return $prop.Value
+}
+
+function Get-CodexResumeExtraArgs {
+    param([string[]]$ExtraArgs)
+
+    if ($null -eq $ExtraArgs -or $ExtraArgs.Count -eq 0) {
+        return @()
+    }
+
+    $filteredArgs = @()
+    for ($i = 0; $i -lt $ExtraArgs.Count; $i++) {
+        $arg = [string]$ExtraArgs[$i]
+
+        if ($arg -match '^(--sandbox|-s|--cd|-C|--add-dir)$') {
+            if ($i + 1 -lt $ExtraArgs.Count) {
+                $i++
+            }
+            continue
+        }
+
+        if ($arg -match '^(--sandbox=|--cd=|--add-dir=)' -or $arg -match '^-C=') {
+            continue
+        }
+
+        $filteredArgs += $arg
+    }
+
+    return $filteredArgs
+}
+
+function Format-CommandForDisplay {
+    param(
+        [string]$Command,
+        [string[]]$Arguments
+    )
+
+    $renderedArgs = foreach ($arg in $Arguments) {
+        $text = [string]$arg
+        $text = $text -replace "`r", '' -replace "`n", '\n'
+        if ($text -match '[\s"]') {
+            '"' + ($text -replace '"', '\"') + '"'
+        }
+        else {
+            $text
+        }
+    }
+
+    return (($Command + ' ' + ($renderedArgs -join ' ')).Trim())
+}
+
+function Invoke-NativeProcess {
+    param(
+        [string]$Command,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+
+    $commandInfo = Get-Command $Command -ErrorAction Stop
+    $commandPath = if (-not [string]::IsNullOrWhiteSpace($commandInfo.Source)) {
+        $commandInfo.Source
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($commandInfo.Path)) {
+        $commandInfo.Path
+    }
+    else {
+        $Command
+    }
+
+    $launcherPath = $commandPath
+    $launcherArguments = @($Arguments)
+    $wrapperPath = $null
+    $argumentsPath = $null
+    $extension = [System.IO.Path]::GetExtension($commandPath).ToLowerInvariant()
+
+    if (@('.ps1', '.cmd', '.bat') -contains $extension) {
+        $wrapperPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-wrapper-" + [guid]::NewGuid() + ".ps1")
+        $argumentsPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-args-" + [guid]::NewGuid() + ".json")
+
+        @($Arguments) | ConvertTo-Json -Compress -Depth 4 | Set-Content -LiteralPath $argumentsPath -Encoding UTF8
+@"
+param(
+    [string]`$CommandPath,
+    [string]`$ArgumentsPath,
+    [string]`$WorkingDirectory
+)
+
+`$ErrorActionPreference = 'Continue'
+Set-Location -LiteralPath `$WorkingDirectory
+
+`$arguments = @()
+if (Test-Path -LiteralPath `$ArgumentsPath) {
+    `$decoded = Get-Content -LiteralPath `$ArgumentsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (`$null -ne `$decoded) {
+        `$arguments = @(`$decoded | ForEach-Object { [string]`$_ })
+    }
+}
+
+& `$CommandPath @arguments
+exit `$LASTEXITCODE
+"@ | Set-Content -LiteralPath $wrapperPath -Encoding UTF8
+
+        $launcherPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $launcherArguments = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-File', $wrapperPath,
+            '-CommandPath', $commandPath,
+            '-ArgumentsPath', $argumentsPath,
+            '-WorkingDirectory', $WorkingDirectory
+        )
+    }
+
+    $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stdout-" + [guid]::NewGuid() + ".txt")
+    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stderr-" + [guid]::NewGuid() + ".txt")
+
+    try {
+        $process = Start-Process -FilePath $launcherPath `
+            -ArgumentList $launcherArguments `
+            -WorkingDirectory $WorkingDirectory `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) {
+            [System.IO.File]::ReadAllText($stdoutPath)
+        }
+        else {
+            ''
+        }
+
+        $stderr = if (Test-Path -LiteralPath $stderrPath) {
+            [System.IO.File]::ReadAllText($stderrPath)
+        }
+        else {
+            ''
+        }
+
+        $parts = @()
+        if (-not [string]::IsNullOrWhiteSpace($stdout)) { $parts += $stdout.TrimEnd("`r", "`n") }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) { $parts += $stderr.TrimEnd("`r", "`n") }
+
+        return @{
+            ExitCode   = $process.ExitCode
+            StdOut     = $stdout
+            StdErr     = $stderr
+            OutputText = ($parts -join [Environment]::NewLine)
+        }
+    }
+    finally {
+        if (-not [string]::IsNullOrWhiteSpace($stdoutPath)) {
+            Remove-Item -LiteralPath $stdoutPath -Force -ErrorAction SilentlyContinue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderrPath)) {
+            Remove-Item -LiteralPath $stderrPath -Force -ErrorAction SilentlyContinue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($wrapperPath)) {
+            Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+        }
+        if (-not [string]::IsNullOrWhiteSpace($argumentsPath)) {
+            Remove-Item -LiteralPath $argumentsPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-MarkerStatus {
     param([string]$Text)
 
@@ -496,36 +673,43 @@ function Get-CliArguments {
 
     switch ($Task.Cli) {
         'claude' {
-            $args = @('-p')
-            if ($Mode -eq 'New')    { $args += @('--session-id', $SessionId) }
-            if ($Mode -eq 'Resume') { $args += @('--resume', $SessionId) }
-            $args += @('--output-format', 'json')
-            if ($Task.Model)  { $args += @('--model', $Task.Model) }
-            if ($Task.Effort) { $args += @('--effort', $Task.Effort) }
-            $args += $Task.ExtraArgs
-            $args += @($Prompt)
-            return $args
+            $cliArgs = @('-p')
+            if ($Mode -eq 'New')    { $cliArgs += @('--session-id', $SessionId) }
+            if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
+            $cliArgs += @('--output-format', 'json')
+            if ($Task.Model)  { $cliArgs += @('--model', $Task.Model) }
+            if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
+            $cliArgs += $Task.ExtraArgs
+            $cliArgs += @($Prompt)
+            return $cliArgs
         }
         'codex' {
-            $args = @('exec')
-            if ($Mode -eq 'Resume') { $args += @('resume', $SessionId) }
-            $args += @('--json', '-C', $Task.ProjectPath)
-            if ($Task.Model)  { $args += @('-m', $Task.Model) }
-            if ($Task.Effort) { $args += @('-c', "model_reasoning_effort=$($Task.Effort)") }
-            $args += $Task.ExtraArgs
-            $args += @($Prompt)
-            return $args
+            $cliArgs = @('exec')
+            $codexExtraArgs = if ($Mode -eq 'Resume') {
+                @(Get-CodexResumeExtraArgs -ExtraArgs $Task.ExtraArgs)
+            }
+            else {
+                @($Task.ExtraArgs)
+            }
+
+            if ($Mode -eq 'Resume') { $cliArgs += @('resume', $SessionId) }
+            $cliArgs += @('--json')
+            if ($Task.Model)  { $cliArgs += @('-m', $Task.Model) }
+            if ($Task.Effort) { $cliArgs += @('-c', "model_reasoning_effort=$($Task.Effort)") }
+            $cliArgs += $codexExtraArgs
+            $cliArgs += @($Prompt)
+            return $cliArgs
         }
         'gemini' {
             if ($Task.Effort) { Write-Host "Note: 'effort' is not supported by gemini and is ignored for task '$($Task.Name)'." }
-            $args = @()
+            $cliArgs = @()
             if ($Mode -eq 'Resume' -and -not [string]::IsNullOrWhiteSpace($SessionId)) {
-                $args += @('--resume', $SessionId)
+                $cliArgs += @('--resume', $SessionId)
             }
-            $args += @('-p', $Prompt, '--output-format', 'json')
-            if ($Task.Model) { $args += @('-m', $Task.Model) }
-            $args += $Task.ExtraArgs
-            return $args
+            $cliArgs += @('-p', $Prompt, '--output-format', 'json')
+            if ($Task.Model) { $cliArgs += @('-m', $Task.Model) }
+            $cliArgs += $Task.ExtraArgs
+            return $cliArgs
         }
     }
     throw "No argument builder for cli '$($Task.Cli)'"
@@ -540,11 +724,16 @@ function ConvertFrom-JsonTolerant {
     param([string]$Text)
 
     if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
-    try { return ($Text | ConvertFrom-Json) } catch { }
+    $trimmed = $Text.Trim()
+    if (($trimmed.StartsWith('{') -and $trimmed.EndsWith('}')) -or
+        ($trimmed.StartsWith('[') -and $trimmed.EndsWith(']'))) {
+        try { return ($trimmed | ConvertFrom-Json) } catch { }
+    }
     $start = $Text.IndexOf('{')
     $end = $Text.LastIndexOf('}')
     if ($start -ge 0 -and $end -gt $start) {
-        try { return ($Text.Substring($start, $end - $start + 1) | ConvertFrom-Json) } catch { }
+        $candidate = $Text.Substring($start, $end - $start + 1)
+        try { return ($candidate | ConvertFrom-Json) } catch { }
     }
     return $null
 }
@@ -571,11 +760,12 @@ function ConvertFrom-CliOutput {
                 $isLimit = ($OutputText -match $limitRegex)
                 return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null -ErrorText $OutputText
             }
-            $text = [string]$json.result
-            $isError = [bool]$json.is_error -or ($ExitCode -ne 0)
+            $text = [string](Get-ObjectPropertyValue -Object $json -Name 'result' -Default '')
+            $sessionId = [string](Get-ObjectPropertyValue -Object $json -Name 'session_id' -Default $null)
+            $isError = [bool](Get-ObjectPropertyValue -Object $json -Name 'is_error' -Default $false) -or ($ExitCode -ne 0)
             $isLimit = $isError -and ($text -match $limitRegex)
             return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
-                -SessionId ([string]$json.session_id) -ErrorText $(if ($isError) { $text } else { $null })
+                -SessionId $sessionId -ErrorText $(if ($isError) { $text } else { $null })
         }
         'codex' {
             $text = $null; $threadId = $null; $errorText = $null
@@ -583,14 +773,28 @@ function ConvertFrom-CliOutput {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 $evt = $null
                 try { $evt = $line | ConvertFrom-Json } catch { continue }
-                if ($null -eq $evt -or $null -eq $evt.PSObject.Properties['type']) { continue }
-                switch ($evt.type) {
-                    'thread.started' { $threadId = [string]$evt.thread_id }
-                    'item.completed' {
-                        if ($evt.item.type -eq 'agent_message') { $text = [string]$evt.item.text }
+                $eventType = [string](Get-ObjectPropertyValue -Object $evt -Name 'type' -Default $null)
+                if ([string]::IsNullOrWhiteSpace($eventType)) { continue }
+                switch ($eventType) {
+                    'thread.started' {
+                        $threadId = [string](Get-ObjectPropertyValue -Object $evt -Name 'thread_id' -Default $threadId)
                     }
-                    'error'       { $errorText = [string]$evt.message }
-                    'turn.failed' { if ($evt.error.message) { $errorText = [string]$evt.error.message } }
+                    'item.completed' {
+                        $item = Get-ObjectPropertyValue -Object $evt -Name 'item' -Default $null
+                        if ([string](Get-ObjectPropertyValue -Object $item -Name 'type' -Default '') -eq 'agent_message') {
+                            $text = [string](Get-ObjectPropertyValue -Object $item -Name 'text' -Default $text)
+                        }
+                    }
+                    'error' {
+                        $errorText = [string](Get-ObjectPropertyValue -Object $evt -Name 'message' -Default $errorText)
+                    }
+                    'turn.failed' {
+                        $error = Get-ObjectPropertyValue -Object $evt -Name 'error' -Default $null
+                        $message = [string](Get-ObjectPropertyValue -Object $error -Name 'message' -Default $null)
+                        if (-not [string]::IsNullOrWhiteSpace($message)) {
+                            $errorText = $message
+                        }
+                    }
                 }
             }
             $isError = ($null -ne $errorText) -or ($ExitCode -ne 0)
@@ -604,15 +808,15 @@ function ConvertFrom-CliOutput {
                 $isLimit = ($OutputText -match $limitRegex)
                 return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null -ErrorText $OutputText
             }
-            $sessionId = $null
-            if ($json.PSObject.Properties['session_id']) { $sessionId = [string]$json.session_id }
-            $errorNode = $json.PSObject.Properties['error']
-            if ($null -ne $errorNode -and $null -ne $errorNode.Value) {
-                $msg = [string]$errorNode.Value.message
-                $isLimit = ($msg -match $limitRegex) -or ("$($errorNode.Value.code)" -eq '429')
+            $sessionId = [string](Get-ObjectPropertyValue -Object $json -Name 'session_id' -Default $null)
+            $errorNode = Get-ObjectPropertyValue -Object $json -Name 'error' -Default $null
+            if ($null -ne $errorNode) {
+                $msg = [string](Get-ObjectPropertyValue -Object $errorNode -Name 'message' -Default '')
+                $code = [string](Get-ObjectPropertyValue -Object $errorNode -Name 'code' -Default '')
+                $isLimit = ($msg -match $limitRegex) -or ($code -eq '429')
                 return New-CliResult -Ok $false -IsLimit $isLimit -Text $msg -SessionId $sessionId -ErrorText $msg
             }
-            $text = [string]$json.response
+            $text = [string](Get-ObjectPropertyValue -Object $json -Name 'response' -Default '')
             return New-CliResult -Ok ($ExitCode -eq 0) -IsLimit $false -Text $text -SessionId $sessionId `
                 -ErrorText $(if ($ExitCode -ne 0) { $OutputText } else { $null })
         }
@@ -642,23 +846,15 @@ function Invoke-CliTaskRun {
     $arguments = Get-CliArguments -Task $Task -Mode $Mode -SessionId $SessionId -Prompt $prompt
 
     Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
-    Write-Host "Command: $($Task.Cli) $($arguments -join ' ')"
+    Write-Host "Command: $(Format-CommandForDisplay -Command $Task.Cli -Arguments $arguments)"
 
     if ($DryRun) {
-        # Marker on its own line: completion detection requires it to be the LAST line.
-        return New-CliResult -Ok $true -IsLimit $false -Text "[dry-run]`n$TaskCompleteMarker" -SessionId $SessionId -ErrorText $null
+        return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
     }
 
-    Push-Location $Task.ProjectPath
-    try {
-        $outputLines = & $Task.Cli @arguments 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        Pop-Location
-    }
-
-    $outputText = $outputLines | Out-String
+    $processResult = Invoke-NativeProcess -Command $Task.Cli -Arguments $arguments -WorkingDirectory $Task.ProjectPath
+    $exitCode = $processResult.ExitCode
+    $outputText = $processResult.OutputText
     if (-not [string]::IsNullOrWhiteSpace($outputText)) {
         $outputText | Tee-Object -FilePath $outputFilePath -Append | Out-Host
     }
@@ -729,11 +925,30 @@ function Wait-ForLimitReset {
     }
 }
 
+function Test-QueuePreflight {
+    param(
+        [string]$Path,
+        [switch]$RequireCliBinaries
+    )
+
+    $config = Read-QueueConfig -Path $Path
+    if ($RequireCliBinaries) {
+        Test-CliBinariesAvailable -Tasks $config.Tasks
+    }
+    return $config
+}
+
 if ($LoadFunctionsOnly) { return }
 
+try {
+    $config = Test-QueuePreflight -Path $QueuePath -RequireCliBinaries:($ValidateOnly -or -not $DryRun)
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 2
+}
+
 if ($ValidateOnly) {
-    $config = Read-QueueConfig -Path $QueuePath
-    Test-CliBinariesAvailable -Tasks $config.Tasks
     Write-Host "Config OK: $QueuePath"
     Write-Host "Tasks: $($config.Tasks.Count)"
     foreach ($t in $config.Tasks) {
@@ -743,10 +958,10 @@ if ($ValidateOnly) {
 }
 
 $transcriptStarted = $false
+$exitCode = 0
 
 try {
     Initialize-RunnerState
-    $config = Read-QueueConfig -Path $QueuePath
     $Tasks = $config.Tasks
     $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
 
@@ -797,6 +1012,11 @@ try {
             }
             else {
                 $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId
+            }
+
+            if ($DryRun) {
+                Write-Step "Dry run for task $taskNumber recorded the command only"
+                break
             }
 
             # Persist the session id the CLI reported (this is how codex thread ids get captured)
@@ -856,14 +1076,19 @@ try {
     }
 
     Write-Step "Script completed"
-    Write-Host "All Claude queue tasks are finished."
-    Write-Host "PC will stay on."
+    Write-Host "All queue tasks are finished."
     Write-Host "Finished at: $(Get-Date)"
     Write-Host "Log saved to: $LogPath"
     Write-Host "Last Claude usage saved to: $UsagePath"
+}
+catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    $exitCode = 1
 }
 finally {
     if ($transcriptStarted) {
         Stop-Transcript
     }
 }
+
+exit $exitCode

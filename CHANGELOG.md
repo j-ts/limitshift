@@ -13,4 +13,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validation Modes**: Added configuration validation checks (`-ValidateOnly` / `--validate-only`) to check JSON syntax, task schema requirements, folder existence, and tool bin availability at startup.
 - **Dry-run Execution**: Support for dry-run simulation (`-DryRun` / `--dry-run`) to preview command line construction.
 - **Structured JSON Parsing**: Replaced regex console scraping with structured JSON/JSONL output parsing and automated limit wait recovery.
-- **Unit & Integration Tests**: Added a complete Pester 3/5 test suite for PowerShell and a pure shell test harness for Unix.
+- **Regression Tests**: Added a Pester 5 suite for PowerShell and a pure Bash test harness for the Unix runner.

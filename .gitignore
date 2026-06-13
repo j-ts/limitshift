@@ -5,6 +5,11 @@
 # The user's real queue (contains private prompts and local paths)
 ai-run-queue.json
 
+# Private local planning and predecessor scripts
+run-gemini-phase1.ps1
+phase1-automation-tasks.ps1
+RELEASE-PLAN.md
+
 # OS noise
 Thumbs.db
 .DS_Store

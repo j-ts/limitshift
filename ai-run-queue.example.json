@@ -20,7 +20,7 @@
       "name": "Example: implement fixes with Codex",
       "cli": "codex",
       "projectPath": "C:\\Users\\you\\Documents\\my-project",
-      "model": "gpt-5-codex",
+      "model": "gpt-5.5",
       "extraArgs": ["--sandbox", "workspace-write"],
       "prompt": "Implement the fixes listed in docs/audit.md, run the tests, and summarize what changed."
     },

@@ -1,27 +1,38 @@
 {
   "settings": {
-    "stopOnError": false
+    "stopOnError": false,
+    "maxRunsPerTask": 7,
+    "maxRetriesOnError": 4,
+    "limitWaitMinutes": 11,
+    "resetBufferMinutes": 1
   },
   "tasks": [
     {
       "name": "t1",
       "cli": "claude",
       "projectPath": ".",
+      "model": "claude-sonnet-4-6",
+      "effort": "medium",
       "prompt": "p1",
-      "extraArgs": ["--arg1", "val1"]
+      "extraArgs": ["--permission-mode", "acceptEdits"]
     },
     {
       "name": "t2",
       "cli": "codex",
       "projectPath": ".",
+      "model": "gpt-5.4",
+      "effort": "high",
       "prompt": "p2",
-      "extraArgs": "--arg2 val2"
+      "extraArgs": ["--sandbox", "workspace-write", "--skip-git-repo-check"]
     },
     {
       "name": "t3",
       "cli": "gemini",
       "projectPath": ".",
-      "prompt": "p3"
+      "model": "gemini-2.5-pro",
+      "effort": null,
+      "prompt": "p3",
+      "extraArgs": "--approval-mode yolo"
     }
   ]
 }

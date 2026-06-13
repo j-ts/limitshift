@@ -28,8 +28,14 @@
           "name": { "type": "string", "minLength": 1 },
           "cli": { "enum": ["claude", "codex", "gemini"] },
           "projectPath": { "type": "string", "minLength": 1 },
-          "model": { "type": "string" },
-          "effort": { "enum": ["low", "medium", "high"] },
+          "model": {
+            "type": "string",
+            "description": "Model name or alias passed through to the CLI. Examples — claude: fable, opus, sonnet, haiku, claude-fable-5, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash."
+          },
+          "effort": {
+            "enum": [null, "minimal", "low", "medium", "high", "xhigh", "max"],
+            "description": "Reasoning effort. Allowed values depend on cli (see the per-cli rules below). Use null or omit the field when the CLI/model does not support effort."
+          },
           "prompt": { "type": "string", "minLength": 1 },
           "extraArgs": {
             "oneOf": [
@@ -37,7 +43,68 @@
               { "type": "array", "items": { "type": "string" } }
             ]
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "cli": { "const": "gemini" } },
+              "required": ["cli"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null],
+                  "description": "Gemini CLI has no effort flag. Must be null (or omitted). For Gemini 3+ models use thinkingLevel, and for Gemini 2.5 models use thinkingBudget, via settings or generation config — not via this field."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "cli": { "const": "claude" } },
+              "required": ["cli"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null, "low", "medium", "high", "xhigh", "max"],
+                  "description": "Claude Code --effort accepts low, medium, high, xhigh, max. 'ultracode' exists only in the interactive /effort menu and is rejected by the --effort flag, so it is not allowed here. If a model does not support the requested level (e.g. xhigh on Opus 4.6 / Sonnet 4.6), Claude Code falls back to the highest supported level at or below it."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "cli": { "const": "claude" },
+                "model": { "pattern": "(?i)haiku" }
+              },
+              "required": ["cli", "model"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null],
+                  "description": "Claude Haiku 4.5 does not support effort. Must be null (or omitted)."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "cli": { "const": "codex" } },
+              "required": ["cli"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null, "minimal", "low", "medium", "high", "xhigh"],
+                  "description": "Codex model_reasoning_effort accepts minimal, low, medium, high, xhigh ('none' is plan-mode only and not valid for exec runs). xhigh availability is model-dependent."
+                }
+              }
+            }
+          }
+        ]
       }
     }
   }

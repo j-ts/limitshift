@@ -3,6 +3,7 @@
 # waiting out usage limits and resuming sessions. macOS (bash 3.2+) and Linux.
 
 set -u
+set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUEUE_PATH="$SCRIPT_DIR/ai-run-queue.json"
@@ -80,6 +81,37 @@ task_field() {
 get_task_extra_args() {
   local idx="$1"
   jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
+}
+
+get_codex_resume_extra_args() {
+  local idx="$1"
+  local raw_args=()
+  local arg
+
+  while IFS= read -r arg; do
+    if [ -n "$arg" ]; then
+      raw_args+=("$arg")
+    fi
+  done < <(get_task_extra_args "$idx")
+
+  CODEX_RESUME_EXTRA_ARGS=()
+  local i=0
+  while [ "$i" -lt "${#raw_args[@]}" ]; do
+    arg="${raw_args[$i]}"
+    case "$arg" in
+      --sandbox|-s|--cd|-C|--add-dir)
+        i=$((i + 2))
+        continue
+        ;;
+      --sandbox=*|--cd=*|--add-dir=*|-C=*)
+        i=$((i + 1))
+        continue
+        ;;
+    esac
+
+    CODEX_RESUME_EXTRA_ARGS+=("$arg")
+    i=$((i + 1))
+  done
 }
 
 read_queue_config() {
@@ -443,35 +475,31 @@ wait_for_limit_reset() {
 }
 
 get_task_key() {
-  local name="$1"
-  printf '%s' "$name" | sed 's/[^a-zA-Z0-9_-]/-/g'
+  local idx="$1"
+  printf 'task-%02d' $((idx + 1))
 }
 
 get_task_session_file_path() {
-  local idx="$1" name key
-  name=$(task_field "$idx" "name")
-  key=$(get_task_key "$name")
+  local idx="$1" key
+  key=$(get_task_key "$idx")
   printf '%s' "$SESSION_STATE_PATH/$key.session"
 }
 
 get_task_output_file_path() {
-  local idx="$1" name key
-  name=$(task_field "$idx" "name")
-  key=$(get_task_key "$name")
+  local idx="$1" key
+  key=$(get_task_key "$idx")
   printf '%s' "$OUTPUT_STATE_PATH/$key.txt"
 }
 
 get_task_done_file_path() {
-  local idx="$1" name key
-  name=$(task_field "$idx" "name")
-  key=$(get_task_key "$name")
+  local idx="$1" key
+  key=$(get_task_key "$idx")
   printf '%s' "$STATUS_STATE_PATH/$key.done"
 }
 
 get_task_failed_file_path() {
-  local idx="$1" name key
-  name=$(task_field "$idx" "name")
-  key=$(get_task_key "$name")
+  local idx="$1" key
+  key=$(get_task_key "$idx")
   printf '%s' "$STATUS_STATE_PATH/$key.failed"
 }
 
@@ -557,17 +585,24 @@ build_cli_args() {
       CLI_ARGS+=("exec")
       if [ "$mode" = "Resume" ]; then
         CLI_ARGS+=("resume" "$session_id")
+        get_codex_resume_extra_args "$idx"
       fi
-      CLI_ARGS+=("--json" "-C" "$project_path")
+      CLI_ARGS+=("--json")
       if [ -n "$model" ]; then
         CLI_ARGS+=("-m" "$model")
       fi
       if [ -n "$effort" ]; then
         CLI_ARGS+=("-c" "model_reasoning_effort=$effort")
       fi
-      while IFS= read -r arg; do
-        if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
-      done < <(get_task_extra_args "$idx")
+      if [ "$mode" = "Resume" ]; then
+        for arg in "${CODEX_RESUME_EXTRA_ARGS[@]}"; do
+          CLI_ARGS+=("$arg")
+        done
+      else
+        while IFS= read -r arg; do
+          if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
+        done < <(get_task_extra_args "$idx")
+      fi
       CLI_ARGS+=("$prompt")
       ;;
     gemini)
@@ -598,9 +633,9 @@ parse_cli_output() {
 
   local limit_regex=""
   case "$cli" in
-    claude) limit_regex='(?i)(you'\''ve hit your .{0,40}limit|usage limit)' ;;
-    codex)  limit_regex='(?i)(usage limit|rate limit|too many requests|try again (at|in)|quota)' ;;
-    gemini) limit_regex='(?i)(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)' ;;
+    claude) limit_regex='(you'\''ve hit your .{0,40}limit|usage limit)' ;;
+    codex)  limit_regex='(usage limit|rate limit|too many requests|try again (at|in)|quota)' ;;
+    gemini) limit_regex='(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)' ;;
   esac
 
   case "$cli" in
@@ -754,9 +789,8 @@ invoke_cli_task_run() {
   if [ "$DRY_RUN" -eq 1 ]; then
     R_OK=1
     R_IS_LIMIT=0
-    R_TEXT="[dry-run]
-$TASK_COMPLETE_MARKER"
-    R_SESSION_ID="$session_id"
+    R_TEXT="[dry-run]"
+    R_SESSION_ID=""
     R_ERROR_TEXT=""
     return
   fi
@@ -798,6 +832,10 @@ if [ "$VALIDATE_ONLY" -eq 1 ]; then
     i=$((i + 1))
   done
   exit 0
+fi
+
+if [ "$DRY_RUN" -ne 1 ]; then
+  check_cli_binaries
 fi
 
 initialize_runner_state
@@ -858,6 +896,11 @@ run_queue() {
         invoke_cli_task_run "$i" "New" "$sessionId"
       else
         invoke_cli_task_run "$i" "Resume" "$savedSessionId"
+      fi
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+        write_step "Dry run for task $taskNumber recorded the command only"
+        break
       fi
 
       # Read results from globals set by invoke_cli_task_run
@@ -927,7 +970,6 @@ run_queue() {
 
   write_step "Script completed"
   echo "All queue tasks are finished."
-  echo "PC will stay on."
   echo "Finished at: $(date)"
   echo "Log saved to: $LOG_PATH"
   echo "Last Claude usage saved to: $USAGE_PATH"

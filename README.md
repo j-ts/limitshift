@@ -1,176 +1,224 @@
 # LimitShift
 
-LimitShift is a lightweight queue runner designed to execute long-running prompt queues against modern AI developer CLI tools: Claude Code (`claude`), Codex (`codex`), and Gemini CLI (`gemini`). It manages task state, resumes conversation sessions, parses structured JSON/JSONL outputs, and handles usage/rate limit cooldowns automatically. Start a massive batch of prompts before bed and review completed files in the morning.
+Queue long-running prompts for Claude Code, Codex, or Gemini CLI, run them headless one by one, and survive usage limits without losing the session. Start it before bed, let the runner wait out quota resets, and inspect the output in the morning.
 
-## How It Works
+## How it works
 
-LimitShift executes prompts sequentially from a JSON task queue.
+1. Read a JSON queue file containing `name`, `cli`, `projectPath`, `prompt`, and optional per-task settings.
+2. Validate the JSON, required fields, project paths, and CLI binaries.
+3. Start the task in the target project folder using structured JSON/JSONL output.
+4. Parse the output to decide whether the task finished, blocked, hit a limit, or failed.
+5. On limit, wait until the reset time or fall back to `limitWaitMinutes`.
+6. Resume the same Claude/Codex/Gemini session when supported.
+7. Mark only completed real runs as done so re-runs skip finished work.
 
+```text
+run -> parse output -> complete?
+                   |-> yes: mark done, next task
+                   |-> limit: wait, resume same session
+                   |-> error: retry or stop
+                   |-> no marker yet: resume same session
 ```
-+-------------------------------------------------------------+
-|                     Read Queue Config                       |
-+-------------------------------------------------------------+
-                               |
-                               v
-                       [ Next Task ]
-                               |
-                               v
-                      Does Task Exist? ---> (No) ---> [ Done ]
-                               | (Yes)
-                               v
-                    Already marked done? ---> (Yes) ---> [ Skip ]
-                               | (No)
-                               v
-                       Execute CLI Run
-                               |
-                               +-----------------------+
-                               |                       |
-                               v                       v
-                          (Success)                 (Error)
-                               |                       |
-                  +------------+------------+          v
-                  |                         |      Is Limit?
-                  v                         v      /   \
-          Contains Done?            Contains Block?       /     \
-             /       \                 /       \      (Yes)     (No)
-         (Yes)       (No)          (Yes)       (No)     |         |
-           |           |             |           |      v         v
-           v           v             v           v    Wait    Retry/Stop
-       Mark Done   Resume Session  Mark Failed  Resume
-```
-
-1. **Initialize State**: Creates output, session, and status directories.
-2. **Load Queue**: Reads the JSON file and parses configuration settings.
-3. **Task Loop**: Checks if each task has a `.done` marker. If yes, it skips.
-4. **Execution**: Builds task arguments, navigates to the project directory, and runs the CLI.
-5. **Output Parsing**: Extracts structured assistant output, session/thread IDs, and error events.
-6. **Limit Wait**: If a usage rate limit is hit, parses the wake time and sleeps until reset.
-7. **Idempotent Continuation**: Resumes incomplete sessions automatically or transitions to next task upon completion.
 
 ## Requirements
 
-- **Windows**: Windows PowerShell 5.1+
-- **macOS / Linux**: Bash 3.2+, and the `jq` JSON utility (`brew install jq` or `sudo apt install jq`).
-- **AI CLIs**: The target CLIs must be installed and logged in:
-  - `claude` (Anthropic Claude Code, tested with version 2.1.170)
-  - `codex` (OpenAI Codex CLI, tested with version 0.136.0)
-  - `gemini` (Google Gemini CLI, tested with version 0.46.0)
-- **Interactive Trust**: You must run each CLI once interactively in every target project directory to accept any onboarding/workspace trust prompts before using LimitShift headless.
+- Windows: Windows PowerShell 5.1+
+- macOS/Linux: Bash 3.2+ and `jq`
+- At least one installed CLI: `claude`, `codex`, or `gemini`
+- Each CLI must already be trusted/onboarded in every `projectPath` you plan to automate
+
+Headless runs cannot answer first-run trust prompts. Open each project once interactively in the target CLI before using LimitShift.
 
 ## Installation
 
-Download or clone the files to your machine. No build or install step is required.
+Clone or download the folder. There is no build step.
 
-- **Windows**: Allow script execution if restricted:
-  ```powershell
-  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-  Unblock-File .\run-ai.ps1
-  ```
-- **macOS / Linux**: Mark script as executable:
-  ```bash
-  chmod +x run-ai.sh
-  ```
+Windows:
 
-## Configuration Reference
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+Unblock-File .\run-ai.ps1
+```
 
-The queue is configured using `ai-run-queue.json`. Below is the property reference:
+macOS/Linux:
 
-| Field | Type | Required? | Default | Description |
-|---|---|---|---|---|
-| `settings.stopOnError` | Boolean | No | `true` | Stop entire queue if a task fails after retries |
-| `settings.maxRunsPerTask` | Integer | No | `20` | Maximum resumes/runs allowed for a single task |
-| `settings.maxRetriesOnError` | Integer | No | `2` | Number of times to retry a task on transient error |
-| `settings.limitWaitMinutes` | Integer | No | `30` | Default sleep time when rate limits do not publish reset time |
-| `settings.resetBufferMinutes` | Integer | No | `2` | Grace buffer minutes added to parsed reset wake times |
-| `tasks` | Array | Yes | N/A | List of tasks to run |
-| `tasks[].name` | String | Yes | N/A | Unique task identifier |
-| `tasks[].cli` | String | Yes | N/A | CLI to use (`claude`, `codex`, `gemini`) |
-| `tasks[].projectPath` | String | Yes | N/A | Absolute or relative path to the workspace |
-| `tasks[].prompt` | String | Yes | N/A | Initial prompt text |
-| `tasks[].model` | String | No | `null` | Custom model argument overrides |
-| `tasks[].effort` | String | No | `null` | Effort/reasoning overrides (`low`, `medium`, `high`) |
-| `tasks[].extraArgs` | String/Array| No | `null` | Custom CLI arguments |
+```bash
+chmod +x run-ai.sh
+```
 
-### Path Escaping on Windows
-Since Windows paths contain backslashes, escape them in your JSON:
-- **Wrong**: `"projectPath": "C:\Users\me\projects\app"`
-- **Right**: `"projectPath": "C:\\Users\\me\\projects\\app"`
+## Configuration reference
 
-## Per-CLI Behavior
+The queue file is `ai-run-queue.json` by default. Copy [`ai-run-queue.example.json`](ai-run-queue.example.json) and edit it.
 
-| CLI | Execution Mode | Resume Session | Limit Detection |
-|---|---|---|---|
-| **claude** | Native JSON | Native session resume (`--resume <session-id>`) | Parses native `/usage` for exact session and weekly resets |
-| **codex** | JSONL events | Thread resume (`resume <thread-id>`) | Parses JSONL error messages and calculates sleep time |
-| **gemini** | JSON object | Continuation prompt framing | Parses JSON errors and falls back to `limitWaitMinutes` |
+| Field | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `settings.stopOnError` | boolean | no | `true` | Stop the queue after an unrecoverable task failure |
+| `settings.maxRunsPerTask` | integer | no | `20` | Cap new + resumed runs per task |
+| `settings.maxRetriesOnError` | integer | no | `2` | Retries for non-limit failures |
+| `settings.limitWaitMinutes` | integer | no | `30` | Fallback wait when reset time cannot be parsed |
+| `settings.resetBufferMinutes` | integer | no | `2` | Extra buffer added after parsed reset time |
+| `tasks[].name` | string | yes | none | Human-readable task name |
+| `tasks[].cli` | string | yes | none | `claude`, `codex`, or `gemini` |
+| `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside |
+| `tasks[].prompt` | string | yes | none | Task prompt |
+| `tasks[].model` | string | no | none | Passed through where supported |
+| `tasks[].effort` | string | no | none | `low`, `medium`, `high`; Gemini ignores it |
+| `tasks[].extraArgs` | string or array | no | none | Extra CLI flags |
 
-## Permissions Warning
+`extraArgs` rules:
 
-Headless execution runs without active user monitoring, meaning prompt instructions will automatically run shell commands.
-- For **Claude**, add `--permission-mode acceptEdits` or `--dangerously-skip-permissions` in `extraArgs` if desired.
-- For **Codex**, use `--dangerously-bypass-approvals-and-sandbox` or sandbox configurations.
-- For **Gemini**, specify `--approval-mode auto_edit` or `--yolo`.
+- Array form is safest when a flag value contains spaces.
+- String form is split on whitespace.
+- The runner filters `-C` / `--cd`, `--sandbox`, and `--add-dir` from `codex exec resume` because current Codex resume commands reject them.
 
-> [!CAUTION]
-> Granting full automation permissions carries risk. Always execute queues on clean, version-controlled repositories so changes are easy to review or revert.
+Windows path escaping in JSON:
+
+```json
+{
+  "projectPath": "C:\\Users\\me\\repo"
+}
+```
+
+Wrong:
+
+```json
+{
+  "projectPath": "C:\Users\me\repo"
+}
+```
+
+If your editor supports JSON Schema, keep the `$schema` line from the example file to get inline validation.
+
+## Per-CLI behavior
+
+| CLI | Run mode | Resume mode | Limit detection |
+| --- | --- | --- | --- |
+| Claude | `claude -p --output-format json` | Native `--resume <session-id>` | Parses `claude -p "/usage"` for session and weekly resets |
+| Codex | `codex exec --json` | `codex exec resume <thread-id> --json` | Parses JSONL error events and error text |
+| Gemini | `gemini -p --output-format json` | Uses `--resume <session-id>` when supported by the installed CLI, otherwise falls back to a continuation prompt | Parses JSON error text / 429s, then falls back to `limitWaitMinutes` |
+
+## Permissions warning
+
+Headless runs cannot answer permission prompts. Decide your risk posture explicitly through `extraArgs`.
+
+Examples:
+
+- Claude: `--permission-mode acceptEdits` or `--dangerously-skip-permissions`
+- Codex: `--sandbox workspace-write` or `--dangerously-bypass-approvals-and-sandbox`
+- Gemini: `--approval-mode auto_edit` or `--approval-mode yolo`
+
+More autonomy means more risk. Run this only against version-controlled project folders.
 
 ## Running
 
-- **Windows**:
-  ```powershell
-  .\run-ai.ps1 --queue my-queue.json
-  ```
-- **macOS / Linux**:
-  ```bash
-  ./run-ai.sh --queue my-queue.json
-  ```
+Validate first:
 
-### Keep Machine Awake
-Ensure your computer does not suspend or drop network connection mid-run:
-- **macOS**: Wrap running command in caffeinate:
-  ```bash
-  caffeinate -i ./run-ai.sh
-  ```
-- **Windows**: Use `presentationsettings` to prevent sleep.
+```powershell
+.\run-ai.ps1 -ValidateOnly
+```
 
-## State and Logs
+```bash
+./run-ai.sh --validate-only
+```
 
-LimitShift creates a `.ai-runner-<queue-name>` folder in the same directory as your queue file:
-- `/sessions/`: Persists session IDs and Codex thread IDs.
-- `/outputs/`: Log outputs from each prompt execution.
-- `/status/`: `.done` files indicating completed runs, and `.failed` files indicating blocked runs.
-- `ai-run-log.txt`: Runner event log.
+Dry run prints the exact commands and does not mark tasks done:
 
-To force-retry a completed task, delete its `.done` file from the status folder.
+```powershell
+.\run-ai.ps1 -DryRun
+```
 
-## Completion Marker
+```bash
+./run-ai.sh --dry-run
+```
 
-Tasks must end with `[[TASK_COMPLETE]]` on their own line to be marked complete. LimitShift automatically appends instructions telling the LLM to output this when done. Ensure your prompt provides concrete completion criteria so the agent knows when to stop.
+Run the default queue file:
 
-If an agent determines a task is impossible, it will write `[[TASK_BLOCKED]] <reason>` which halts execution or moves on based on your settings.
+```powershell
+.\run-ai.ps1
+```
+
+```bash
+./run-ai.sh
+```
+
+Use a custom queue path:
+
+```powershell
+.\run-ai.ps1 -QueuePath .\my-queue.json
+```
+
+```bash
+./run-ai.sh --queue ./my-queue.json
+```
+
+Keep the machine awake for long runs:
+
+- Windows: adjust sleep settings or use `presentationsettings`
+- macOS: `caffeinate -i ./run-ai.sh`
+- Linux: `systemd-inhibit ./run-ai.sh`
+
+## State, logs, and re-running
+
+LimitShift creates `.ai-runner-<queue-name>/` next to the queue file:
+
+- `sessions/` stores session or thread ids
+- `outputs/` stores captured CLI output
+- `status/` stores `.done` and `.failed` markers
+- `ai-run-log.txt` stores the runner transcript
+
+To re-run one finished task, delete its `.done` file. To start over completely, delete the whole `.ai-runner-<queue-name>/` folder.
+
+## Completion marker
+
+The runner appends `[[TASK_COMPLETE]]` instructions to every prompt automatically. A task is only marked done when the final non-empty line is exactly `[[TASK_COMPLETE]]`.
+
+If the agent cannot finish, it should end with:
+
+```text
+[[TASK_BLOCKED]] <one-line reason>
+```
+
+Prompts should therefore describe concrete end conditions such as “write `docs/audit.md` and summarize the changes”.
 
 ## Troubleshooting
 
-| Error Message | Cause | Solution |
-|---|---|---|
-| `Config file is not valid JSON` | Typo, trailing comma, or bad quotes in queue JSON | Run the validator, check trailing commas |
-| `missing required JSON property` | A task is missing name, cli, projectPath, or prompt | Ensure all 4 fields exist in every task |
-| `unknown cli` | CLI field has an unsupported value | Allowed: `claude`, `codex`, `gemini` |
-| `Project path does not exist` | Invalid or mistyped folder path | Check folder path, escape backslashes on Windows |
-| `not found on PATH` | Target CLI binary is not installed | Install the CLI using NPM / package manager |
-| `exceeded maxRunsPerTask` | Agent is stuck in a loop without completing | Review prompts, increase limit, or fix code |
+| Message | Meaning | Fix |
+| --- | --- | --- |
+| `Config file is not valid JSON` | Broken JSON syntax | Check for trailing commas, missing commas, or bad escaping |
+| `Task N is missing required JSON property` | A task is missing `name`, `cli`, `projectPath`, or `prompt` | Fix the named field |
+| `Allowed values: claude, codex, gemini` | Unsupported `cli` value | Use one of the supported CLIs |
+| `Project path does not exist` | `projectPath` is wrong | Fix the path or create the folder |
+| `not found on PATH` | Required CLI is not installed or not on PATH | Install the CLI and retry |
+| `jq is required but not installed` | Unix runner cannot parse JSON without `jq` | Install `jq` first |
+| `Task N exceeded maxRunsPerTask` | The task never finished or kept resuming | Inspect the prompt/output and raise the cap only if needed |
+| `installed gemini rejects --resume` | Your Gemini CLI build does not support headless resume | The runner will retry with a continuation prompt |
 
-## Running the Tests
+## Running the tests
 
-- **PowerShell**:
-  ```powershell
-  Invoke-Pester tests/run-ai.Tests.ps1
-  ```
-- **Bash**:
-  ```bash
-  bash tests/test-run-ai.sh
-  ```
+PowerShell regression suite (requires Pester 5):
+
+```powershell
+Invoke-Pester tests/run-ai.Tests.ps1
+```
+
+Install Pester 5 if needed:
+
+```powershell
+Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
+```
+
+Bash regression suite:
+
+```bash
+bash tests/test-run-ai.sh
+```
+
+On Windows, run the bash suite from Git Bash, or from PowerShell with:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' tests/test-run-ai.sh
+```
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
