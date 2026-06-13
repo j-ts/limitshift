@@ -1,7 +1,7 @@
-Describe 'run-ai.ps1' {
+Describe 'limitshift.ps1' {
     BeforeAll {
         $repoRoot = Split-Path -Parent $PSScriptRoot
-        $scriptPath = Join-Path $repoRoot 'run-ai.ps1'
+        $scriptPath = Join-Path $repoRoot 'limitshift.ps1'
         $configFixtures = Join-Path $PSScriptRoot 'fixtures\configs'
         $outputFixtures = Join-Path $PSScriptRoot 'fixtures\outputs'
         $powershellExe = (Get-Command powershell.exe).Source
@@ -668,7 +668,7 @@ Ripgrep is not available. Falling back to GrepTool.
             $run.ExitCode | Should -Be 0
             $run.Output | Should -Match 'Command: claude'
 
-            $statusPath = Join-Path $root '.ai-runner-queue\status'
+            $statusPath = Join-Path $root '.limitshift-queue\status'
             $doneFiles = Get-ChildItem -LiteralPath $statusPath -Filter '*.done' -ErrorAction SilentlyContinue
             $doneFiles | Should -BeNullOrEmpty
         }
@@ -765,10 +765,10 @@ exit 0
                 $run.Output | Should -Match 'Task 1 completed'
                 $run.Output | Should -Match 'prompt sent via stdin'
 
-                $statusPath = Join-Path $root '.ai-runner-queue\status\task-01.done'
+                $statusPath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
 
-                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-gemini-warning-output.txt'
+                $outputFilePath = Join-Path $root '.limitshift-queue\outputs\task-01-gemini-warning-output.txt'
                 Test-Path -LiteralPath $outputFilePath | Should -BeTrue
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match 'say hi'
@@ -832,7 +832,7 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Task 1 completed'
 
-                $donePath = Join-Path $root '.ai-runner-queue\status\task-01.done'
+                $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
 
                 $received = [System.IO.File]::ReadAllText($receivedFile)
@@ -902,7 +902,7 @@ exit 0
                 $run.Output | Should -Match 'paused by a usage limit'
                 $run.Output | Should -Match 'Task 1 completed'
 
-                $donePath = Join-Path $root '.ai-runner-queue\status\task-01.done'
+                $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
             }
             finally {
@@ -961,7 +961,7 @@ exit 0
                 $run.ExitCode | Should -Be 1
                 $run.Output | Should -Match 'no progress'
 
-                $failedPath = Join-Path $root '.ai-runner-queue\status\task-01.failed'
+                $failedPath = Join-Path $root '.limitshift-queue\status\task-01.failed'
                 Test-Path -LiteralPath $failedPath | Should -BeTrue
                 $failedText = [System.IO.File]::ReadAllText($failedPath)
                 $failedText | Should -Match 'no progress: agent repeated the same response without a completion marker'
@@ -1025,7 +1025,7 @@ exit 0
                 $run.Output | Should -Not -Match '"result"'
 
                 # The raw JSON still lands in the per-task output file.
-                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-clean-output-task-output.txt'
+                $outputFilePath = Join-Path $root '.limitshift-queue\outputs\task-01-clean-output-task-output.txt'
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match '"session_id"'
             }
@@ -1142,18 +1142,18 @@ exit 0
                 )
                 $run.ExitCode | Should -Be 0
 
-                $donePath = Join-Path $fx.Root '.ai-runner-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
                 $doneLines = @(Get-Content -LiteralPath $donePath)
                 # Two lines: timestamp then a 64-hex fingerprint.
                 $doneLines.Count | Should -Be 2
                 $doneLines[1] | Should -Match '^[0-9a-f]{64}$'
 
-                $readmePath = Join-Path $fx.Root '.ai-runner-queue\_README.txt'
+                $readmePath = Join-Path $fx.Root '.limitshift-queue\_README.txt'
                 Test-Path -LiteralPath $readmePath | Should -BeTrue
                 (Get-Content -LiteralPath $readmePath -Raw) | Should -Match 'delete this whole folder'
 
-                $csvPath = Join-Path $fx.Root '.ai-runner-queue\runs.csv'
+                $csvPath = Join-Path $fx.Root '.limitshift-queue\runs.csv'
                 Test-Path -LiteralPath $csvPath | Should -BeTrue
                 $csvLines = @(Get-Content -LiteralPath $csvPath)
                 $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status'
@@ -1173,9 +1173,9 @@ exit 0
                     '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
                 )
                 $first.ExitCode | Should -Be 0
-                $donePath = Join-Path $fx.Root '.ai-runner-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
-                $sessionPath = Join-Path $fx.Root '.ai-runner-queue\sessions\task-01-session-id.txt'
+                $sessionPath = Join-Path $fx.Root '.limitshift-queue\sessions\task-01-session-id.txt'
                 Test-Path -LiteralPath $sessionPath | Should -BeTrue
 
                 # Change the prompt in the queue, then re-run.
@@ -1205,7 +1205,7 @@ exit 0
                 $env:PATH = "$($fx.BinPath);$oldPath"
 
                 # Seed a legacy single-line .done marker for an otherwise-unchanged queue task.
-                $statusPath = Join-Path $fx.Root '.ai-runner-queue\status'
+                $statusPath = Join-Path $fx.Root '.limitshift-queue\status'
                 New-Item -ItemType Directory -Path $statusPath -Force | Out-Null
                 $donePath = Join-Path $statusPath 'task-01.done'
                 (Get-Date).ToString("s") | Set-Content -LiteralPath $donePath -Encoding UTF8

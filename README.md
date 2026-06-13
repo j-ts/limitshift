@@ -37,18 +37,20 @@ Windows:
 
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-Unblock-File .\run-ai.ps1
+Unblock-File .\limitshift.ps1
 ```
 
 macOS/Linux:
 
 ```bash
-chmod +x run-ai.sh
+chmod +x limitshift.sh
 ```
+
+> **Deprecation:** the scripts were renamed from `run-ai.ps1` / `run-ai.sh` to `limitshift.ps1` / `limitshift.sh`. Thin `run-ai.ps1` / `run-ai.sh` forwarder stubs still work for one release (they print a deprecation warning and call the new script); they will be removed next release. Update your commands to the new names.
 
 ## Configuration reference
 
-The queue file is `ai-run-queue.json` by default. Copy [`ai-run-queue.example.json`](ai-run-queue.example.json) and edit it.
+The queue file is `limitshift-queue.json` by default. Copy [`limitshift-queue.example.json`](limitshift-queue.example.json) and edit it. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release — the runner uses it if `limitshift-queue.json` is absent and prints a warning telling you to rename it.)
 
 | Field | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
@@ -117,62 +119,62 @@ More autonomy means more risk. Run this only against version-controlled project 
 Validate first:
 
 ```powershell
-.\run-ai.ps1 -ValidateOnly
+.\limitshift.ps1 -ValidateOnly
 ```
 
 ```bash
-./run-ai.sh --validate-only
+./limitshift.sh --validate-only
 ```
 
 Dry run prints the exact commands and does not mark tasks done:
 
 ```powershell
-.\run-ai.ps1 -DryRun
+.\limitshift.ps1 -DryRun
 ```
 
 ```bash
-./run-ai.sh --dry-run
+./limitshift.sh --dry-run
 ```
 
 Run the default queue file:
 
 ```powershell
-.\run-ai.ps1
+.\limitshift.ps1
 ```
 
 ```bash
-./run-ai.sh
+./limitshift.sh
 ```
 
 Use a custom queue path:
 
 ```powershell
-.\run-ai.ps1 -QueuePath .\my-queue.json
+.\limitshift.ps1 -QueuePath .\my-queue.json
 ```
 
 ```bash
-./run-ai.sh --queue ./my-queue.json
+./limitshift.sh --queue ./my-queue.json
 ```
 
 The console shows only the agent's response text (under a `--- agent response ---` header); the full raw CLI JSON is still written to `outputs/task-NN-<slug>-output.txt`. To print the raw JSON to the console instead (useful for debugging), use:
 
 ```powershell
-.\run-ai.ps1 -ShowRawOutput
+.\limitshift.ps1 -ShowRawOutput
 ```
 
 ```bash
-./run-ai.sh --show-raw
+./limitshift.sh --show-raw
 ```
 
 Keep the machine awake for long runs:
 
 - Windows: adjust sleep settings or use `presentationsettings`
-- macOS: `caffeinate -i ./run-ai.sh`
-- Linux: `systemd-inhibit ./run-ai.sh`
+- macOS: `caffeinate -i ./limitshift.sh`
+- Linux: `systemd-inhibit ./limitshift.sh`
 
 ## State & re-running
 
-LimitShift keeps everything it remembers in one folder, `.ai-runner-<queue-name>/`, created next to your queue file. It is built and maintained automatically, and a plain-language `_README.txt` explaining the layout is dropped inside it on every run.
+LimitShift keeps everything it remembers in one folder, `.limitshift-<queue-name>/`, created next to your queue file. It is built and maintained automatically, and a plain-language `_README.txt` explaining the layout is dropped inside it on every run.
 
 Where state lives and what is in it:
 
@@ -185,7 +187,7 @@ Where state lives and what is in it:
 
 Editing a task auto-invalidates its done marker. When you change a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` and run again, LimitShift notices the change (it stores a fingerprint of those fields inside the `.done` file), throws away the stale `.done` marker and the old session id, and **re-runs that task with a fresh session**. Tasks you did not touch keep being skipped.
 
-To re-run **one** finished task by hand, delete its `status/task-NN.done` file. To start **completely over**, delete the whole `.ai-runner-<queue-name>/` folder. The entire state folder is safe to delete at any time — LimitShift recreates whatever it needs on the next run.
+To re-run **one** finished task by hand, delete its `status/task-NN.done` file. To start **completely over**, delete the whole `.limitshift-<queue-name>/` folder. The entire state folder is safe to delete at any time — LimitShift recreates whatever it needs on the next run.
 
 ## Completion marker
 
@@ -217,7 +219,7 @@ Prompts should therefore describe concrete end conditions such as “write `docs
 PowerShell regression suite (requires Pester 5):
 
 ```powershell
-Invoke-Pester tests/run-ai.Tests.ps1
+Invoke-Pester tests/limitshift.Tests.ps1
 ```
 
 Install Pester 5 if needed:
@@ -229,13 +231,13 @@ Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
 Bash regression suite:
 
 ```bash
-bash tests/test-run-ai.sh
+bash tests/test-limitshift.sh
 ```
 
 On Windows, run the bash suite from Git Bash, or from PowerShell with:
 
 ```powershell
-& 'C:\Program Files\Git\bin\bash.exe' tests/test-run-ai.sh
+& 'C:\Program Files\Git\bin\bash.exe' tests/test-limitshift.sh
 ```
 
 ## License

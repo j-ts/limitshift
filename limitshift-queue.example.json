@@ -1,5 +1,5 @@
 {
-  "$schema": "./ai-run-queue.schema.json",
+  "$schema": "./limitshift-queue.schema.json",
   "settings": {
     "stopOnError": true,
     "maxRunsPerTask": 20,

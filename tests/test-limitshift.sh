@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Test harness for run-ai.sh. Run from bash/Git Bash: bash tests/test-run-ai.sh
+# Test harness for limitshift.sh. Run from bash/Git Bash: bash tests/test-limitshift.sh
 set -u
 set -o pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SCRIPT="$HERE/../run-ai.sh"
+SCRIPT="$HERE/../limitshift.sh"
 CONFIGS="$HERE/fixtures/configs"
 PASS=0
 FAIL=0
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/limitshift-shell-tests.XXXXXX")"
 
 cleanup() {
-  rm -rf "$TMP_ROOT" "$CONFIGS"/.ai-runner-*
+  rm -rf "$TMP_ROOT" "$CONFIGS"/.limitshift-*
 }
 
 trap cleanup EXIT
@@ -52,7 +52,7 @@ assert_no_done_files() {
 }
 
 reset_fixture_state() {
-  rm -rf "$CONFIGS"/.ai-runner-*
+  rm -rf "$CONFIGS"/.limitshift-*
 }
 
 run_dry_run_state_test() {
@@ -62,7 +62,7 @@ run_dry_run_state_test() {
   local out exit_code state_dir
   out=$(bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --dry-run 2>&1)
   exit_code=$?
-  state_dir="$CONFIGS/.ai-runner-valid-full"
+  state_dir="$CONFIGS/.limitshift-valid-full"
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Command: claude' &&
@@ -186,7 +186,7 @@ run_duplicate_name_test() {
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_success "$bin_dir"
@@ -381,7 +381,7 @@ run_simple_mode_verbatim_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I did the thing, no marker","session_id":"s-1","is_error":false}'
@@ -431,7 +431,7 @@ run_simple_mode_override_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   # Reply WITHOUT a marker so completion-check mode would NOT mark done on the first run.
@@ -483,7 +483,7 @@ run_loose_marker_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"OK[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -529,7 +529,7 @@ run_stall_guard_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I am ready to help. What would you like me to work on?","session_id":"s-1","is_error":false}'
@@ -576,7 +576,7 @@ run_clean_output_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local output_file="$root/.ai-runner-queue/outputs/task-01-clean-output-output.txt"
+  local output_file="$root/.limitshift-queue/outputs/task-01-clean-output-output.txt"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"Here is the clean answer\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -669,7 +669,7 @@ run_resume_repeats_prompt_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_dir="$root/received"
-  local status_dir="$root/.ai-runner-queue/status"
+  local status_dir="$root/.limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir" "$received_dir"
 
@@ -833,7 +833,7 @@ run_state_layout_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local state_dir="$root/.ai-runner-queue"
+  local state_dir="$root/.limitshift-queue"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -887,7 +887,7 @@ run_done_marker_format_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local done_file="$root/.ai-runner-queue/status/task-01.done"
+  local done_file="$root/.limitshift-queue/status/task-01.done"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -998,7 +998,7 @@ run_legacy_done_reruns_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local done_file="$root/.ai-runner-queue/status/task-01.done"
+  local done_file="$root/.limitshift-queue/status/task-01.done"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -1011,7 +1011,7 @@ run_legacy_done_reruns_test() {
 EOF
 
   # Seed a legacy marker: a single timestamp line with no fingerprint (older format).
-  mkdir -p "$root/.ai-runner-queue/status"
+  mkdir -p "$root/.limitshift-queue/status"
   printf '%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$done_file"
 
   local out exit_code line_count fp_line
@@ -1079,7 +1079,7 @@ check "trailing comma rejected with explanation" 2 "not valid JSON"        -- ba
 check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-field.json" --validate-only
 check "unknown cli rejected listing allowed"     2 "claude, codex, gemini" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
-check "missing queue file gives copy hint"       2 "ai-run-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
+check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
 run_dry_run_state_test
 run_codex_limit_resume_test
 run_duplicate_name_test

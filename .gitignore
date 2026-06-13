@@ -1,9 +1,15 @@
-# Runner state (sessions, outputs, logs) — created next to the queue file
+# Runner state (sessions, outputs, logs) — created next to the queue file.
+# Both the new and the legacy (pre-rename) state-folder names are ignored.
+.limitshift-*/
 .ai-runner-*/
 .claude-runner-*/
 
-# The user's real queue (contains private prompts and local paths)
-ai-run-queue.json
+# The user's real queue files (contain private prompts and local paths). Ignore both the
+# new and legacy queue filenames by pattern, then re-include the shipped example + schema.
+limitshift-queue*.json
+ai-run-queue*.json
+!limitshift-queue.example.json
+!limitshift-queue.schema.json
 
 # Private local planning and predecessor scripts
 run-gemini-phase1.ps1

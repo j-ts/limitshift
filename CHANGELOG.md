@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Naming alignment**: renamed the runner scripts to `limitshift.ps1` / `limitshift.sh`, the default queue file to `limitshift-queue.json`, the shipped example/schema to `limitshift-queue.example.json` / `limitshift-queue.schema.json`, and the per-queue state folder to `.limitshift-<queue-name>/` (was `.ai-runner-<queue-name>/`).
+- **Automatic state-folder migration**: on startup the runner renames an existing `.ai-runner-<queue-name>/` folder to `.limitshift-<queue-name>/` when the new one does not yet exist.
+- **Legacy queue filename fallback**: when no queue path is given, the runner uses `limitshift-queue.json` if present, otherwise falls back to the old `ai-run-queue.json` with a warning.
+
+### Deprecated
+- The old `run-ai.ps1` / `run-ai.sh` script names now exist only as thin forwarder stubs that print a deprecation warning and call the new `limitshift.ps1` / `limitshift.sh` scripts. These forwarders, and the `ai-run-queue.json` legacy queue-filename fallback, will be **removed in the next release** — switch to the new names.
+
 ## [1.0.0] - 2026-06-12
 
 ### Added
