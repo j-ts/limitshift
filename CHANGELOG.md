@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Multi-line prompts on Windows (the "stuck in a loop" bug)**: prompts are now delivered to every CLI on **stdin** instead of as a process argument. Passing a multi-line prompt as an argument through `Start-Process` and the npm `.cmd` shim silently truncated it to (almost) nothing, so the agent never saw the task, never emitted the completion marker, and the runner resumed in a token-burning loop until `maxRunsPerTask`.
+- **Completion-marker detection**: a task is now marked done when the **last non-empty line *contains*** `[[TASK_COMPLETE]]` (e.g. `OK[[TASK_COMPLETE]]`, or the marker with trailing whitespace), not only when the line is exactly the marker. `[[TASK_BLOCKED]] <reason>` is detected the same way, checked first.
+- **Resume prompt loses the task**: on resume the runner now repeats the **original prompt verbatim** (including any `/goal …` line) alongside the "continue where you stopped" instruction, so a thin first run or a fresh session has the full task to work from.
+- **Output-file encoding**: per-task output and the usage capture are written as **UTF-8 without BOM** (were UTF-16/Tee-Object), so they are greppable and parseable.
+
 ### Added
+- **Optional completion checking (`completionCheck`)**: new `settings.completionCheck` (default `true`) with a per-task override. Set it to `false` for "simple mode" — the prompt is sent **verbatim** (no automation instructions appended) and the task is marked done after the first successful run; the only reason to resume is a usage limit.
+- **No-progress stall guard (`maxStalls`, default 2)**: in completion-check mode, if the agent returns the same response with no marker `maxStalls` times in a row, the task is failed instead of looping to `maxRunsPerTask`.
+- **Clean console output**: the terminal shows just the agent's response under an `--- agent response ---` header (claude `result` / codex final message / gemini `response`); the full raw JSON still goes to the per-task output file. `-ShowRawOutput` / `--show-raw` restores raw-JSON printing.
+- **Per-task model rotation (`model` may be an array)**: `tasks[].model` accepts a single string or an ordered list. On a usage limit the runner switches to the next model **immediately** (resuming the same session) and only waits for a reset once every listed model is limit-exhausted, then restarts from the first model. The current model index is persisted per task.
+- **Fingerprint-based done invalidation**: each `.done`/`.failed` marker stores a SHA-256 fingerprint of the task definition (name, cli, projectPath, model, effort, prompt, extraArgs). Editing any of those in the queue now **auto-invalidates** the marker so the task re-runs (and its stale session is dropped) — no more manually deleting state after a prompt edit.
+- **Self-documenting state directory**: each state folder gets a generated `_README.txt` explaining the layout and how to re-run; a `runs.csv` at the state root records one row per run (timestamp, task, run, mode, exit, status); per-task output files are named `task-NN-<slug>-output.txt`.
+- **Per-CLI effort validation**: misconfigured `effort` now fails at validation with a task-numbered message — gemini must use `effort: null`, claude accepts `low|medium|high|xhigh|max` (and rejects `ultracode`, and requires `null` for haiku models), codex accepts `minimal|low|medium|high|xhigh` (rejects plan-mode-only `none`).
 - **Example queues**: ship `limitshift-queue.example-simple.json` (one task, required fields only, `completionCheck: false`) and `limitshift-queue.example-advanced.json` (3 tasks exercising every optional field). The legacy `limitshift-queue.example.json` is now a copy of the simple example. A regression test in both suites validates all three shipped examples with `-ValidateOnly` / `--validate-only`.
 - **Beginner-friendly README**: top-down rewrite (what it is, expectations callout, simple example, advanced example) with the reference material moved under a `## Reference` heading.
 
 ### Changed
-- **Naming alignment**: renamed the runner scripts to `limitshift.ps1` / `limitshift.sh`, the default queue file to `limitshift-queue.json`, the shipped example/schema to `limitshift-queue.example.json` / `limitshift-queue.schema.json`, and the per-queue state folder to `.limitshift-<queue-name>/` (was `.ai-runner-<queue-name>/`).
+- **Naming alignment**: renamed the runner scripts to `limitshift.ps1` / `limitshift.sh`, the default queue file to `limitshift-queue.json`, the shipped example/schema to `limitshift-queue.example.json` / `limitshift-queue.schema.json`, the per-queue state folder to `.limitshift-<queue-name>/` (was `.ai-runner-<queue-name>/`), and the in-folder log to `limitshift-log.txt`.
 - **Automatic state-folder migration**: on startup the runner renames an existing `.ai-runner-<queue-name>/` folder to `.limitshift-<queue-name>/` when the new one does not yet exist.
 - **Legacy queue filename fallback**: when no queue path is given, the runner uses `limitshift-queue.json` if present, otherwise falls back to the old `ai-run-queue.json` with a warning.
 
