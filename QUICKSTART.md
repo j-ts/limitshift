@@ -13,7 +13,7 @@
        {
          "name": "Document install steps",
          "cli": "claude",
-         "projectPath": "C:/Users/you/Documents/my-project",
+         "projectPath": "C:\\Users\\you\\Documents\\my-project",
          "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
          "completionCheck": false,
          "extraArgs": ["--permission-mode", "acceptEdits"]
@@ -22,7 +22,9 @@
    }
    ```
 
-   Change `projectPath` to a real git-controlled folder and edit the `prompt`. **Tip:** use forward slashes in paths even on Windows (`C:/Users/me/proj`) — no escaping needed. Without the `extraArgs` permission flag the AI runs read-only and won't change files. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release, with a warning to rename it.)
+   Change `projectPath` to a real git-controlled folder and edit the `prompt`. **On Windows, double every backslash** in paths (`C:\\Users\\me\\proj`); a single `\` breaks JSON. (Forward slashes like `C:/Users/me/proj` also work.) Without the `extraArgs` permission flag the AI runs read-only and won't change files. (The old default name `ai-run-queue.json` is still accepted as a fallback for one release, with a warning to rename it.)
+
+   **Don't want to write JSON?** This folder ships an `AGENTS.md`, so you can open it in Codex/Claude/Gemini and just ask: *"read this folder and fill `limitshift-queue.json` with tasks for my project at `C:\\Users\\me\\proj` — suggest models and use codex."* The agent writes a valid queue for you.
 4. **Validate**
    Windows: `.\limitshift.ps1 -ValidateOnly`
    macOS/Linux: `./limitshift.sh --validate-only`

@@ -2,7 +2,9 @@
 
 **Give your AI coding assistant a to-do list and walk away. LimitShift works through it one task at a time — and when you hit your usage limit, it waits for the limit to reset and picks up right where it left off.**
 
-You already use an AI coding tool in your terminal — Claude Code, Codex, or Gemini. Normally you sit there, type one request, wait, type the next. LimitShift lets you write all your requests down in a single list, start it, and go do something else. It runs each one for you. If the AI says "you've used up your quota for now," LimitShift doesn't give up — it sleeps until your quota comes back and then continues. You wake up to the work done (or as far as it could get).
+Maybe you use **Codex, Claude, or Gemini** as an app — or in your code editor, like Antigravity — and you've never opened a terminal in your life. You line up a few tasks, then you hit your usage limit and **everything just stops.** The queues built into those apps don't wait for your limit to reset; they stall, and you lose your place.
+
+LimitShift is a tiny **terminal app** that fixes exactly that. You write your tasks down in one list, start it, and walk away. It runs each one for you. When the AI says "you've used up your quota for now," LimitShift doesn't give up — it **sleeps until your quota comes back and then continues the same conversation.** You wake up to the work done (or as far as it could get).
 
 Think of it like a queue at a coffee shop: you hand over a list of orders, and they get made one by one. If the machine needs to cool down, the barista waits and then keeps going — they don't throw out your list.
 
@@ -17,11 +19,13 @@ Think of it like a queue at a coffee shop: you hand over a list of orders, and t
 
 You'll get value from LimitShift if:
 
-- You already have **Claude Code, Codex, or Gemini** working on your computer.
-- You often hand the AI a series of related jobs and wish you didn't have to babysit each one.
-- You keep hitting usage limits in the middle of a long session and lose your place.
+- You use **Codex, Claude, or Gemini** and sometimes hand it a series of related jobs.
+- You wish you didn't have to babysit each one and re-start after every usage limit.
+- You keep hitting usage limits mid-session and lose your place, because the app's queue can't pause and wait.
 
-You do **not** need to be a programmer. You **do** need to be willing to open a terminal (we show you how just below), install a tool or two, and edit a small text file. Every step is spelled out.
+You do **not** need to be a programmer. You **do** need to be willing to open a terminal (I show you how just below) and edit a small text file. Every step is spelled out.
+
+> **One heads-up if you've only used the app.** LimitShift drives the *command-line* version of these tools — the `claude` / `codex` / `gemini` program you run in a terminal. If you've only ever used the desktop app or editor, you'll install the matching CLI once (a single command, shown below). It signs in with the same account.
 
 ---
 
@@ -47,19 +51,20 @@ If a command ever fails with "cannot find path" or "file not found," it almost a
 | You need... | Why | How to check |
 | --- | --- | --- |
 | A **Windows, Mac, or Linux** computer | LimitShift is a small script that runs on all three | — |
-| **Node.js** (it comes with **npm**, an installer used below) | The AI tools are installed with `npm` | Type `npm --version` in your terminal. If it errors, install Node.js (the "LTS" version) from [nodejs.org](https://nodejs.org), then reopen your terminal |
-| At least one **AI coding tool**: `claude`, `codex`, or `gemini` | LimitShift drives one of these tools to do the actual work — it doesn't talk to the AI itself | Type the tool's name (e.g. `claude`). If it starts up, you have it (press `Ctrl+C` to leave). If you see "not recognized" or "command not found," install it below |
+| At least one **AI coding terminal tool (CLI)**: `claude`, `codex`, or `gemini` | LimitShift drives one of these CLIs to do the actual work — it doesn't talk to the AI itself | Type the tool's name (e.g. `codex`). If it starts up, you have it (press `Ctrl+C` to leave). If you see "not recognized" or "command not found," install it below |
 | Each tool **signed in and trusted** in your project folder, once | LimitShift runs the tools silently in the background, where they can't stop to ask "do you trust this folder?" — so you answer that ahead of time | Open your project once, normally, in the tool (e.g. run `claude` inside the folder and let it start) |
 | (Mac/Linux only) a small helper called **`jq`** | The Mac/Linux version uses it to read the tool's output | Type `jq --version`. If it's missing: Mac `brew install jq`, Linux `sudo apt install jq` |
 | A project folder that's **tracked by Git** | So you can review and undo anything the AI changes | Type `git status` inside the folder. If it says "not a git repository," the folder isn't backed up yet — the simplest fix is the free [GitHub Desktop](https://desktop.github.com) app (buttons, no typing): use it to "create a repository" from your folder |
 
-Don't have one of the AI tools yet? Type the matching line into your terminal:
+Don't have the command-line version of your tool yet? Type the matching line into your terminal:
 
 ```text
 claude  →  npm install -g @anthropic-ai/claude-code
 codex   →  npm install -g @openai/codex
 gemini  →  npm install -g @google/gemini-cli
 ```
+
+(These use `npm`, which comes with [Node.js](https://nodejs.org) — **LimitShift itself doesn't need Node**, it's only how you install the AI CLIs. If `npm` isn't found, install Node.js, version "LTS", first. Some tools also offer a standalone installer; either way is fine.)
 
 > **Important, one-time step:** because LimitShift runs the tools in the background, they can't answer first-time "do you trust this folder?" prompts. **Open each project once, normally, in the tool before automating it.**
 
@@ -108,7 +113,7 @@ Here is the simplest useful list — one task:
     {
       "name": "Document install steps",
       "cli": "claude",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
       "completionCheck": false,
       "extraArgs": ["--permission-mode", "acceptEdits"]
@@ -121,7 +126,7 @@ What each line means:
 
 - **`name`** — any short label so you can recognize the task. It's for you.
 - **`cli`** — which AI tool to use: `"claude"`, `"codex"`, or `"gemini"`.
-- **`projectPath`** — the folder the AI should work in. **Tip:** use forward slashes (`/`) even on Windows — it works and saves you the headache of escaping backslashes.
+- **`projectPath`** — the folder the AI should work in. **On Windows, write each backslash twice:** `"C:\\Users\\you\\my-project"`. In JSON a single `\` is a special character, so a real Windows path needs doubled `\\` or it won't load. (A forward-slash path like `"C:/Users/you/my-project"` also works if you find it easier.)
 - **`prompt`** — what you're actually asking for, in plain words. This is the part that matters most.
 - **`completionCheck: false`** — keeps things simple: run the prompt once and stop (it only waits if you hit a usage limit). Leave this in while you're learning; the other mode is explained [later](#doing-more-the-advanced-example).
 - **`extraArgs`** — gives the AI permission to actually edit files. This matters: because LimitShift runs the tool in the background, the AI **can't stop to ask "may I edit this file?"** Without a permission line it runs read-only and changes nothing — even though it reports success. The `["--permission-mode", "acceptEdits"]` shown here lets Claude make edits. (Codex uses `["--sandbox", "workspace-write"]`; Gemini uses `["--approval-mode", "auto_edit"]`.)
@@ -135,6 +140,17 @@ Save your file as **`limitshift-queue.json`** — that's the name LimitShift loo
 > **Notepad trap:** when saving, set **"Save as type"** to **"All Files"** — otherwise Notepad silently adds `.txt` and you get `limitshift-queue.json.txt`, which LimitShift won't find.
 
 (A ready-made copy ships as [`limitshift-queue.example-simple.json`](limitshift-queue.example-simple.json) — you can copy that and edit it. Change `projectPath` to a real folder of yours and write your own `prompt`.)
+
+> ### 🤖 Shortcut: let your agent write the queue for you
+>
+> Writing JSON by hand isn't your thing? You don't have to. This folder ships an [`AGENTS.md`](AGENTS.md) file, so your AI coding tool already knows how to fill in `limitshift-queue.json` for you.
+>
+> Open **this LimitShift folder** in Codex (or Claude, or your editor's agent) and just ask, in plain words — for example:
+>
+> > *"Read this folder and create prompts for my project at `C:\Users\me\my-project` based on the draft below. Change only `limitshift-queue.json`. Suggest appropriate models and use codex.*
+> > *Draft: review the code and list the bugs, then fix them one by one, then double-check the fixes."*
+>
+> The agent reads `AGENTS.md`, writes a valid `limitshift-queue.json` with sensible models and the right permission flags, and validates it for you. Then you just run it (Steps 3–5 below). You never touch the JSON.
 
 ### Step 3 — Check it before running
 
@@ -187,6 +203,55 @@ Remember the expectations note up top: the first run is a draft. You shape the o
 
 ---
 
+## A real workflow: review → fix → verify
+
+Queues really shine when one task feeds the next. Here's a three-step pipeline — find problems, fix them, then check the fixes — that ships as [`limitshift-queue.example-workflow.json`](limitshift-queue.example-workflow.json):
+
+```json
+{
+  "settings": { "stopOnError": true, "completionCheck": true },
+  "tasks": [
+    {
+      "name": "Find bugs",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Review the code in src/ and write every bug or issue you find to bugs.md - one numbered item per bug, each with its file path and a short description. Do not fix anything yet."
+    },
+    {
+      "name": "Fix bugs",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Read bugs.md and fix each listed issue one by one. After fixing an item, append ' - FIXED' to its line in bugs.md."
+    },
+    {
+      "name": "Verify fixes",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Read bugs.md, review the current implementation against each item, and mark each line 'Verified fixed' or 'Still broken: <why>'."
+    }
+  ]
+}
+```
+
+The three tasks run in order, each in its own conversation:
+
+1. **Find** — review the code and write every bug to `bugs.md`.
+2. **Fix** — read `bugs.md` and fix each item, marking it `FIXED`.
+3. **Verify** — read `bugs.md`, check each fix really landed, and mark it `Verified fixed` or `Still broken`.
+
+`completionCheck: true` keeps LimitShift nudging each step until the AI signals it's finished. The `extraArgs` line gives Codex permission to edit files. And if you hit a usage limit anywhere in the middle, LimitShift waits and picks the pipeline back up — you don't lose your place. (Don't want to write this by hand? [Ask your agent](#-shortcut-let-your-agent-write-the-queue-for-you) to build it from a one-line draft.)
+
+---
+
 ## What happens when you hit your usage limit
 
 This is the whole reason LimitShift exists. AI tools cap how much you can use in a session or a week. Normally, hitting that cap mid-task means you stop and lose your place.
@@ -218,7 +283,7 @@ A full 3-task example using every option ships as [`limitshift-queue.example-adv
     {
       "name": "Implement fixes with Codex",
       "cli": "codex",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": "gpt-5.4",
       "effort": "medium",
       "extraArgs": ["--sandbox", "workspace-write"],
@@ -227,7 +292,7 @@ A full 3-task example using every option ships as [`limitshift-queue.example-adv
     {
       "name": "Write release notes with Gemini",
       "cli": "gemini",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"],
       "effort": null,
       "extraArgs": ["--approval-mode", "auto_edit"],
@@ -236,7 +301,7 @@ A full 3-task example using every option ships as [`limitshift-queue.example-adv
     {
       "name": "Audit the project with Claude",
       "cli": "claude",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": "sonnet",
       "extraArgs": ["--permission-mode", "acceptEdits"],
       "completionCheck": true,
@@ -269,6 +334,7 @@ Don't worry about memorizing these — the full list of options is in the [Refer
 - **Prompt** — your request to the AI, written in plain language.
 - **Task** — one item on your to-do list (one prompt for one tool in one folder).
 - **Queue** — your whole to-do list (the `.json` file).
+- **`AGENTS.md`** — a file in this folder that teaches AI coding tools how to fill in your queue, so you can *ask your agent* to write `limitshift-queue.json` for you instead of editing it by hand.
 - **Session** — one ongoing conversation with the AI. "Resuming the same session" means the AI still remembers the earlier part.
 - **Usage limit / quota** — the cap on how much you can use the AI in a window of time. It resets after a while.
 - **Git / version control** — a system that tracks every change to your files so you can review or undo them. Running only in a Git folder is your safety net.
@@ -333,17 +399,17 @@ The queue file is `limitshift-queue.json` by default. Copy one of the example fi
 - String form is split on whitespace.
 - The runner filters `-C` / `--cd`, `--sandbox`, and `--add-dir` from `codex exec resume` because current Codex resume commands reject them.
 
-Windows paths in JSON — the easy way is to use **forward slashes**, which work fine on Windows:
-
-```json
-{ "projectPath": "C:/Users/me/repo" }
-```
-
-If you prefer backslashes, you must double them (`\\`), because a single backslash has a special meaning in JSON:
+Windows paths in JSON — **double every backslash** (`\\`), because a single backslash has a special meaning in JSON:
 
 ```json
 { "projectPath": "C:\\Users\\me\\repo" }   // correct
 { "projectPath": "C:\Users\me\repo" }       // wrong — will fail to parse
+```
+
+If you'd rather not deal with escaping, **forward slashes also work** on Windows:
+
+```json
+{ "projectPath": "C:/Users/me/repo" }
 ```
 
 If your editor supports JSON Schema, keep the `$schema` line from the example file to get inline validation as you type.

@@ -1538,7 +1538,8 @@ run_shipped_examples_validate_test() {
   for example in \
     limitshift-queue.example.json \
     limitshift-queue.example-simple.json \
-    limitshift-queue.example-advanced.json; do
+    limitshift-queue.example-advanced.json \
+    limitshift-queue.example-workflow.json; do
     local src="$repo_root/$example"
     local dst="$root/$example"
     local desc="shipped example $example passes --validate-only"

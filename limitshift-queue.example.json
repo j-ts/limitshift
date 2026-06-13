@@ -4,7 +4,7 @@
     {
       "name": "Document install steps",
       "cli": "claude",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
       "completionCheck": false,
       "extraArgs": ["--permission-mode", "acceptEdits"]

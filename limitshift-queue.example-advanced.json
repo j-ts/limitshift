@@ -11,7 +11,7 @@
     {
       "name": "Implement fixes with Codex",
       "cli": "codex",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": "gpt-5.4",
       "effort": "medium",
       "extraArgs": ["--sandbox", "workspace-write"],
@@ -20,7 +20,7 @@
     {
       "name": "Write release notes with Gemini",
       "cli": "gemini",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"],
       "effort": null,
       "extraArgs": ["--approval-mode", "auto_edit"],
@@ -29,7 +29,7 @@
     {
       "name": "Audit the project with Claude",
       "cli": "claude",
-      "projectPath": "C:/Users/you/Documents/my-project",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": "sonnet",
       "extraArgs": ["--permission-mode", "acceptEdits"],
       "completionCheck": true,

@@ -1,0 +1,37 @@
+{
+  "$schema": "./limitshift-queue.schema.json",
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 20,
+    "completionCheck": true
+  },
+  "tasks": [
+    {
+      "name": "Find bugs",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Review the code in src/ and write every bug or issue you find to bugs.md - one numbered item per bug, each with its file path and a short description. Do not fix anything yet."
+    },
+    {
+      "name": "Fix bugs",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Read bugs.md and fix each listed issue one by one. After fixing an item, append ' - FIXED' to its line in bugs.md."
+    },
+    {
+      "name": "Verify fixes",
+      "cli": "codex",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "extraArgs": ["--sandbox", "workspace-write"],
+      "prompt": "Read bugs.md, review the current implementation against each item, and mark each line 'Verified fixed' or 'Still broken: <why>'."
+    }
+  ]
+}

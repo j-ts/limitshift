@@ -1752,6 +1752,7 @@ exit 0
             @{ Example = 'limitshift-queue.example.json' }
             @{ Example = 'limitshift-queue.example-simple.json' }
             @{ Example = 'limitshift-queue.example-advanced.json' }
+            @{ Example = 'limitshift-queue.example-workflow.json' }
         ) {
             $repoRoot = Split-Path -Parent $script:__limitshiftScriptPath
             $srcPath = Join-Path $repoRoot $Example
