@@ -123,6 +123,80 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'per-CLI effort rules (Read-QueueConfig, Task 6b)' {
+        BeforeAll {
+            function New-EffortQueue {
+                param([hashtable]$Task)
+
+                $root = New-TestRoot
+                $projectPath = Join-Path $root 'project'
+                New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+                $Task['projectPath'] = $projectPath
+                $queuePath = Join-Path $root 'queue.json'
+                Write-TestQueue -Path $queuePath -Config @{ tasks = @($Task) }
+                return $queuePath
+            }
+        }
+
+        # gemini: effort must be null/absent
+        It 'rejects gemini with an effort, naming the task and pointing at thinkingLevel/thinkingBudget' {
+            $queuePath = New-EffortQueue -Task @{ name = 'g'; cli = 'gemini'; prompt = 'p'; effort = 'high' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: gemini has no effort flag*'
+        }
+        It 'accepts gemini with effort null' {
+            $queuePath = New-EffortQueue -Task @{ name = 'g'; cli = 'gemini'; prompt = 'p'; effort = $null }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
+        }
+
+        # claude: ultracode is rejected explicitly
+        It 'rejects claude ultracode with an interactive-only hint, naming the task' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'ultracode' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw "*Task 1: 'ultracode' is only available from the interactive /effort menu*"
+        }
+        It 'accepts claude with effort xhigh (passthrough, no model-support block)' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'xhigh'; model = 'claude-opus-4-8' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -Be 'xhigh'
+        }
+        It 'rejects an out-of-set claude effort listing the allowed values' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'minimal' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: claude effort must be one of low, medium, high, xhigh, max*'
+        }
+
+        # claude + haiku: effort must be null
+        It 'rejects claude haiku with an effort, naming the task' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'high'; model = 'claude-haiku-4-5' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: claude model haiku does not support effort*'
+        }
+        It 'rejects claude haiku with an effort even when haiku is one of several models in the list' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'high'; model = @('claude-opus-4-8', 'claude-haiku-4-5') }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: claude model haiku does not support effort*'
+        }
+        It 'accepts claude haiku with effort null' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = 'claude-haiku-4-5' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
+        }
+
+        # codex: none is plan-mode only
+        It 'rejects codex effort none with a plan-mode-only hint, naming the task' {
+            $queuePath = New-EffortQueue -Task @{ name = 'x'; cli = 'codex'; prompt = 'p'; effort = 'none' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw "*Task 1: codex effort must be one of minimal, low, medium, high, xhigh*'none' is plan-mode only*"
+        }
+        It 'accepts codex with effort high' {
+            $queuePath = New-EffortQueue -Task @{ name = 'x'; cli = 'codex'; prompt = 'p'; effort = 'high' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -Be 'high'
+        }
+
+        It 'normalizes an empty-string effort to null (treated as no effort)' {
+            $queuePath = New-EffortQueue -Task @{ name = 'g'; cli = 'gemini'; prompt = 'p'; effort = '' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
+        }
+    }
+
     Context 'completionCheck flag (Read-QueueConfig)' {
         It 'defaults completionCheck to true when absent globally and per-task' {
             $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')
@@ -461,9 +535,10 @@ Describe 'limitshift.ps1' {
         }
 
         It 'builds a gemini command, omitting effort and the -p prompt pair' {
+            # gemini never carries effort (validation rejects gemini+effort, Task 6b), so Effort is null here.
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
-                Model = 'gemini-2.5-pro'; Effort = 'high'
+                Model = 'gemini-2.5-pro'; Effort = $null
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 
@@ -476,7 +551,7 @@ Describe 'limitshift.ps1' {
         It 'builds a gemini resume command when a session id exists' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
-                Model = 'gemini-2.5-pro'; Effort = 'high'
+                Model = 'gemini-2.5-pro'; Effort = $null
                 Prompt = 'do the thing'; ExtraArgs = @('--verbose')
             }
 

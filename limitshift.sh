@@ -115,12 +115,6 @@ get_task_models() {
   jq -r ".tasks[$idx].model | if type==\"array\" then .[] elif type==\"string\" then . else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
-# Task 6: number of models in the task's list (0 when absent).
-task_model_count() {
-  local idx="$1"
-  jq -r ".tasks[$idx].model | if type==\"array\" then length elif (type==\"string\") then 1 else 0 end" "$QUEUE_PATH" | tr -d '\r'
-}
-
 # Task 6: the task's model list joined by a single space — the canonical model contribution to the
 # fingerprint. A single-string model joins to exactly that string (stable vs the pre-Task-6 form).
 get_task_models_joined() {
@@ -238,6 +232,43 @@ read_queue_config() {
         echo "Task $n model array must contain only strings (got a non-string element)." >&2
         exit 2
       fi
+    fi
+
+    # Task 6b: enforce the SAME per-CLI effort rules the schema declares (editor-only), so a
+    # misconfigured queue fails at validation (exit 2) instead of mid-run. task_field maps both an
+    # absent field and JSON null/"" to "" (via `// empty` + tr), so a non-empty effort is a real value.
+    local effort
+    effort=$(task_field "$i" "effort")
+    if [ -n "$effort" ]; then
+      case "$cli" in
+        gemini)
+          echo "Task $n: gemini has no effort flag; set \"effort\": null (use thinkingLevel/thinkingBudget via gemini settings instead)." >&2
+          exit 2
+          ;;
+        claude)
+          if [ "$effort" = "ultracode" ]; then
+            echo "Task $n: 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max." >&2
+            exit 2
+          fi
+          case "$effort" in
+            low|medium|high|xhigh|max) ;;
+            *) echo "Task $n: claude effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
+          esac
+          # Haiku 4.5 supports no effort. Model may be a list (Task 6): reject if ANY model matches haiku.
+          local haiku_match
+          haiku_match=$(get_task_models "$i" | grep -ic 'haiku')
+          if [ "$haiku_match" -gt 0 ]; then
+            echo "Task $n: claude model haiku does not support effort; set \"effort\": null." >&2
+            exit 2
+          fi
+          ;;
+        codex)
+          case "$effort" in
+            minimal|low|medium|high|xhigh) ;;
+            *) echo "Task $n: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only." >&2; exit 2 ;;
+          esac
+          ;;
+      esac
     fi
     i=$((i + 1))
   done
@@ -819,9 +850,7 @@ build_cli_args() {
       fi
       ;;
     gemini)
-      if [ -n "$effort" ]; then
-        echo "Note: 'effort' is not supported by gemini and is ignored for task '$(task_field "$idx" "name")'."
-      fi
+      # gemini never carries effort here: read_queue_config rejects gemini+effort at validation (Task 6b).
       if [ "$mode" = "Resume" ] && [ -n "$session_id" ]; then
         CLI_ARGS+=("--resume" "$session_id")
       fi

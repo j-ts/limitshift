@@ -66,9 +66,15 @@ The queue file is `limitshift-queue.json` by default. Copy [`limitshift-queue.ex
 | `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside |
 | `tasks[].prompt` | string | yes | none | Task prompt |
 | `tasks[].model` | string or array of strings | no | none | Passed through where supported. An array lists models in preference order; on a usage limit the runner rotates to the next model (see below). Primarily useful for gemini |
-| `tasks[].effort` | string | no | none | `low`, `medium`, `high`; Gemini ignores it |
+| `tasks[].effort` | string or null | no | none | Reasoning effort, allowed values per CLI (enforced at validation): **claude** `low`, `medium`, `high`, `xhigh`, `max`; **codex** `minimal`, `low`, `medium`, `high`, `xhigh`; **gemini** must be `null` (it has no effort flag — use `thinkingLevel`/`thinkingBudget` via gemini settings instead). Claude Haiku supports no effort, so claude + a haiku model must also be `null`. `ultracode` (claude's interactive `/effort` menu) and codex `none` (plan-mode only) are rejected |
 | `tasks[].completionCheck` | boolean | no | inherits `settings.completionCheck` | Per-task override of completion checking |
 | `tasks[].extraArgs` | string or array | no | none | Extra CLI flags |
+
+`model` aliases (passed through to each CLI):
+
+- **claude**: `fable`, `opus`, `sonnet`, `haiku` (or the full ids, e.g. `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`).
+- **codex**: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`. (`gpt-5-codex` and `gpt-5.2` are deprecated.)
+- **gemini**: `gemini-3.*` (e.g. `gemini-3.1-pro-preview`, `gemini-3-flash-preview`) and `gemini-2.5-*` (e.g. `gemini-2.5-pro`, `gemini-2.5-flash`).
 
 `extraArgs` rules:
 

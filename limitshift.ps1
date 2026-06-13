@@ -261,8 +261,43 @@ function Read-QueueConfig {
         }
         $model = if ($models.Count -gt 0) { $models[0] } else { $null }
 
+        # Effort normalization: treat absent, JSON null, and "" all as "no effort" (null).
         $effort = $null
-        if ($t.PSObject.Properties['effort']) { $effort = [string]$t.effort }
+        if ($t.PSObject.Properties['effort'] -and $null -ne $t.effort) {
+            $effortText = ([string]$t.effort).Trim()
+            if ($effortText.Length -gt 0) { $effort = $effortText }
+        }
+
+        # Task 6b: enforce the SAME per-CLI effort rules the schema declares (editor-only), so a
+        # misconfigured queue fails at validation (exit 2) instead of mid-run. Runs AFTER the
+        # required-field checks above so a missing cli is reported first.
+        if ($null -ne $effort) {
+            switch ($cli) {
+                'gemini' {
+                    throw "Task ${n}: gemini has no effort flag; set `"effort`": null (use thinkingLevel/thinkingBudget via gemini settings instead)."
+                }
+                'claude' {
+                    $claudeEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+                    if ($effort -eq 'ultracode') {
+                        throw "Task ${n}: 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max."
+                    }
+                    if ($claudeEfforts -notcontains $effort) {
+                        throw "Task ${n}: claude effort must be one of low, medium, high, xhigh, max (or null)."
+                    }
+                    # Haiku 4.5 supports no effort. Model may be a list (Task 6): reject if ANY matches haiku.
+                    $haikuMatch = @($models | Where-Object { $_ -match '(?i)haiku' }).Count -gt 0
+                    if ($haikuMatch) {
+                        throw "Task ${n}: claude model haiku does not support effort; set `"effort`": null."
+                    }
+                }
+                'codex' {
+                    $codexEfforts = @('minimal', 'low', 'medium', 'high', 'xhigh')
+                    if ($codexEfforts -notcontains $effort) {
+                        throw "Task ${n}: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only."
+                    }
+                }
+            }
+        }
 
         # completionCheck: per-task override beats the global setting, which defaults to true.
         $completionCheck = [bool]$settings['CompletionCheck']
@@ -998,7 +1033,7 @@ function Get-CliArguments {
             return $cliArgs
         }
         'gemini' {
-            if ($Task.Effort) { Write-Host "Note: 'effort' is not supported by gemini and is ignored for task '$($Task.Name)'." }
+            # gemini never carries effort here: Read-QueueConfig rejects gemini+effort at validation (Task 6b).
             $cliArgs = @()
             if ($Mode -eq 'Resume' -and -not [string]::IsNullOrWhiteSpace($SessionId)) {
                 $cliArgs += @('--resume', $SessionId)

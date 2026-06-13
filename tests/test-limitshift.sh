@@ -1194,6 +1194,154 @@ $out"
   fi
 }
 
+# Task 6b: per-CLI effort rules enforced at config validation. Each helper writes a one-task queue
+# with the given cli/effort/model and asserts validate-only exits 2 with a task-numbered message.
+write_effort_queue() {
+  # write_effort_queue <queue_path> <project_dir> <cli> <effort-json> [model-json]
+  local queue_path="$1" project_dir="$2" cli="$3" effort="$4" model="${5:-}"
+  local model_line=""
+  if [ -n "$model" ]; then
+    model_line="\"model\": $model,"
+  fi
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ { "name": "t", "cli": "$cli", "projectPath": "$project_dir", $model_line "effort": $effort, "prompt": "p" } ]
+}
+EOF
+}
+
+run_effort_gemini_rejected_test() {
+  local desc="effort on gemini is rejected naming the task"
+  local root="$TMP_ROOT/effort-gemini"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "gemini" '"high"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: gemini has no effort flag'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_gemini_null_ok_test() {
+  local desc="gemini with effort null validates"
+  local root="$TMP_ROOT/effort-gemini-null"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "gemini" 'null'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_effort_claude_ultracode_rejected_test() {
+  local desc="claude ultracode is rejected with an interactive-only hint naming the task"
+  local root="$TMP_ROOT/effort-ultracode"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" '"ultracode"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qF "Task 1: 'ultracode' is only available from the interactive /effort menu"; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_claude_xhigh_ok_test() {
+  local desc="claude with effort xhigh validates (passthrough)"
+  local root="$TMP_ROOT/effort-xhigh"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" '"xhigh"' '"claude-opus-4-8"'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_effort_claude_outofset_rejected_test() {
+  local desc="out-of-set claude effort is rejected listing allowed values"
+  local root="$TMP_ROOT/effort-claude-bad"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" '"minimal"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: claude effort must be one of low, medium, high, xhigh, max'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_claude_haiku_rejected_test() {
+  local desc="claude haiku with effort is rejected naming the task"
+  local root="$TMP_ROOT/effort-haiku"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" '"high"' '"claude-haiku-4-5"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: claude model haiku does not support effort'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_claude_haiku_in_list_rejected_test() {
+  local desc="claude effort rejected when haiku is one of several models in the list"
+  local root="$TMP_ROOT/effort-haiku-list"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" '"high"' '["claude-opus-4-8", "claude-haiku-4-5"]'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: claude model haiku does not support effort'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_claude_haiku_null_ok_test() {
+  local desc="claude haiku with effort null validates"
+  local root="$TMP_ROOT/effort-haiku-null"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "claude" 'null' '"claude-haiku-4-5"'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_effort_codex_none_rejected_test() {
+  local desc="codex effort none is rejected with a plan-mode-only hint naming the task"
+  local root="$TMP_ROOT/effort-codex-none"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "codex" '"none"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && \
+     printf '%s' "$out" | grep -qE 'Task 1: codex effort must be one of minimal, low, medium, high, xhigh' && \
+     printf '%s' "$out" | grep -qF "'none' is plan-mode only"; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_codex_high_ok_test() {
+  local desc="codex with effort high validates"
+  local root="$TMP_ROOT/effort-codex-high"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "codex" '"high"'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_effort_empty_string_normalized_test() {
+  local desc="empty-string effort is treated as no effort (gemini validates)"
+  local root="$TMP_ROOT/effort-empty"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "gemini" '""'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
 write_rotation_gemini() {
   # A gemini stub that logs the -m model on each run. Runs whose model is in $1 (space-separated
   # list, e.g. "m-first") return a quota limit; all others succeed with the completion marker.
@@ -1406,6 +1554,17 @@ run_state_migration_test
 run_legacy_queue_fallback_test
 run_model_empty_array_rejected_test
 run_model_non_string_rejected_test
+run_effort_gemini_rejected_test
+run_effort_gemini_null_ok_test
+run_effort_claude_ultracode_rejected_test
+run_effort_claude_xhigh_ok_test
+run_effort_claude_outofset_rejected_test
+run_effort_claude_haiku_rejected_test
+run_effort_claude_haiku_in_list_rejected_test
+run_effort_claude_haiku_null_ok_test
+run_effort_codex_none_rejected_test
+run_effort_codex_high_ok_test
+run_effort_empty_string_normalized_test
 run_model_rotation_switch_test
 run_model_rotation_exhaust_test
 run_model_single_string_test
