@@ -1149,6 +1149,233 @@ $out"
   fi
 }
 
+# Task 6: model may be a non-empty array of strings. Reject an empty array / non-string element.
+run_model_empty_array_rejected_test() {
+  local desc="empty model array is rejected naming the task"
+  local root="$TMP_ROOT/model-empty"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ { "name": "g", "cli": "gemini", "projectPath": "$project_dir", "prompt": "p", "model": [] } ]
+}
+EOF
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1)
+  exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qiE 'Task 1.*model'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_non_string_rejected_test() {
+  local desc="non-string element in model array is rejected naming the task"
+  local root="$TMP_ROOT/model-nonstring"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ { "name": "g", "cli": "gemini", "projectPath": "$project_dir", "prompt": "p", "model": ["ok", 5] } ]
+}
+EOF
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1)
+  exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qiE 'Task 1.*model'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+write_rotation_gemini() {
+  # A gemini stub that logs the -m model on each run. Runs whose model is in $1 (space-separated
+  # list, e.g. "m-first") return a quota limit; all others succeed with the completion marker.
+  local bin_dir="$1" model_log="$2" limit_models="$3"
+  cat > "$bin_dir/gemini" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+model=""
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "-m" ]; then model="\$a"; fi
+  prev="\$a"
+done
+printf '%s\n' "\$model" >> "$model_log"
+for lm in $limit_models; do
+  if [ "\$model" = "\$lm" ]; then
+    printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+  fi
+done
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+EOF
+  chmod +x "$bin_dir/gemini"
+}
+
+run_model_rotation_switch_test() {
+  local desc="model rotation: limit on first model switches to the next immediately, no wait"
+  local root="$TMP_ROOT/rotate-switch"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local model_log="$root/models.txt"
+  local idx_file="$root/.limitshift-queue/sessions/task-01-model-index.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_rotation_gemini "$bin_dir" "$model_log" "m-first"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "rotate", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it", "model": ["m-first", "m-second"] } ]
+}
+EOF
+
+  local out exit_code first second saved_idx
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  first=$(sed -n '1p' "$model_log" 2>/dev/null)
+  second=$(sed -n '2p' "$model_log" 2>/dev/null)
+  saved_idx=$(cat "$idx_file" 2>/dev/null | tr -d ' \r\n')
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'switching to m-second' &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ "$first" = "m-first" ] &&
+     [ "$second" = "m-second" ] &&
+     [ "$saved_idx" = "1" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code first=[$first] second=[$second] idx=[$saved_idx]
+$out"
+  fi
+}
+
+run_model_rotation_exhaust_test() {
+  local desc="model rotation: after the last model limits, wait then restart from model #1"
+  local root="$TMP_ROOT/rotate-exhaust"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local model_log="$root/models.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  # Both models limit on the first pass; on the second pass (after the wait) model #1 succeeds.
+  cat > "$bin_dir/gemini" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+model=""
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "-m" ]; then model="\$a"; fi
+  prev="\$a"
+done
+printf '%s\n' "\$model" >> "$model_log"
+count_file="$root/counter"
+n=0
+if [ -f "\$count_file" ]; then n=\$(cat "\$count_file"); fi
+n=\$((n + 1))
+printf '%s' "\$n" > "\$count_file"
+if [ "\$n" -le 2 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+EOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "rotate-exhaust", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it", "model": ["m-first", "m-second"] } ]
+}
+EOF
+
+  local out exit_code m1 m2 m3
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  m1=$(sed -n '1p' "$model_log" 2>/dev/null)
+  m2=$(sed -n '2p' "$model_log" 2>/dev/null)
+  m3=$(sed -n '3p' "$model_log" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'paused by a usage limit' &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ "$m1" = "m-first" ] && [ "$m2" = "m-second" ] && [ "$m3" = "m-first" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code m1=[$m1] m2=[$m2] m3=[$m3]
+$out"
+  fi
+}
+
+run_model_single_string_test() {
+  local desc="single-string model: limit -> wait -> resume same model (no rotation)"
+  local root="$TMP_ROOT/single-model"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local model_log="$root/models.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  cat > "$bin_dir/gemini" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+model=""
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "-m" ]; then model="\$a"; fi
+  prev="\$a"
+done
+printf '%s\n' "\$model" >> "$model_log"
+count_file="$root/counter"
+n=0
+if [ -f "\$count_file" ]; then n=\$(cat "\$count_file"); fi
+n=\$((n + 1))
+printf '%s' "\$n" > "\$count_file"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+EOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "single", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it", "model": "only-model" } ]
+}
+EOF
+
+  local out exit_code m1 m2
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  m1=$(sed -n '1p' "$model_log" 2>/dev/null)
+  m2=$(sed -n '2p' "$model_log" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'paused by a usage limit' &&
+     ! printf '%s' "$out" | grep -q 'switching to' &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ "$m1" = "only-model" ] && [ "$m2" = "only-model" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code m1=[$m1] m2=[$m2]
+$out"
+  fi
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -1177,6 +1404,11 @@ run_legacy_done_reruns_test
 run_cli_change_reruns_test
 run_state_migration_test
 run_legacy_queue_fallback_test
+run_model_empty_array_rejected_test
+run_model_non_string_rejected_test
+run_model_rotation_switch_test
+run_model_rotation_exhaust_test
+run_model_single_string_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

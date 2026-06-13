@@ -234,9 +234,34 @@ function Read-QueueConfig {
             }
         }
 
-        $model  = $null
+        # Task 6: model may be a single string OR an ordered array of strings (preference order).
+        # Parse it into an ordered list (Models). A single string becomes a 1-element list; Model
+        # scalar stays = the first element for back-compat (fingerprint, .Model readers).
+        $models = [string[]]@()
+        $modelNode = $t.PSObject.Properties['model']
+        if ($null -ne $modelNode -and $null -ne $modelNode.Value) {
+            $modelValue = $modelNode.Value
+            if ($modelValue -is [string]) {
+                $models = [string[]]@($modelValue)
+            }
+            elseif ($modelValue -is [System.Array]) {
+                if (@($modelValue).Count -eq 0) {
+                    throw "Task $n model array must not be empty. Use a single string, or list one or more model names in preference order."
+                }
+                foreach ($element in $modelValue) {
+                    if ($null -eq $element -or -not ($element -is [string])) {
+                        throw "Task $n model array must contain only strings (got a non-string element)."
+                    }
+                }
+                $models = [string[]]@($modelValue | ForEach-Object { [string]$_ })
+            }
+            else {
+                throw "Task $n model must be a string or an array of strings."
+            }
+        }
+        $model = if ($models.Count -gt 0) { $models[0] } else { $null }
+
         $effort = $null
-        if ($t.PSObject.Properties['model'])  { $model  = [string]$t.model }
         if ($t.PSObject.Properties['effort']) { $effort = [string]$t.effort }
 
         # completionCheck: per-task override beats the global setting, which defaults to true.
@@ -251,6 +276,7 @@ function Read-QueueConfig {
             Cli             = $cli
             ProjectPath     = $projectPath
             Model           = $model
+            Models          = $models
             Effort          = $effort
             Prompt          = [string]$t.prompt
             ExtraArgs       = $extraArgs
@@ -310,6 +336,10 @@ function Get-TaskSlug {
 #   CANONICAL FORMAT:
 #   fields, in this exact order:  Name, Cli, ProjectPath, Model, Effort, Prompt, ExtraArgs-joined
 #   ExtraArgs-joined = the args joined by a single space (" ").
+#   Model (Task 6) = the task's model LIST joined by a single space (" "). A single-string model is
+#     a 1-element list, so it canonicalizes to exactly that string — identical to the pre-Task-6
+#     fingerprint of a plain-string model. limitshift.sh joins the model list the same way (space),
+#     so both runners agree on the model contribution for a given queue.
 #   null/empty Model/Effort contribute an empty string.
 #   joined with the ASCII unit separator U+001F (0x1F), which is unlikely to appear in any value.
 #   SHA256 of the UTF-8 bytes of that string, rendered as lowercase hex.
@@ -319,7 +349,18 @@ function Get-TaskFingerprint {
     $us = [char]0x1f
     $extraArgs = @($Task.ExtraArgs)
     $extraJoined = ($extraArgs -join ' ')
-    $model  = if ($null -ne $Task.Model)  { [string]$Task.Model }  else { '' }
+    # Task 6: the canonical model field is the space-joined model list. Fall back to the Model
+    # scalar for task objects that predate the Models property (e.g. older test fixtures).
+    $modelsProp = $Task.PSObject.Properties['Models']
+    if ($null -ne $modelsProp -and $null -ne $modelsProp.Value -and @($modelsProp.Value).Count -gt 0) {
+        $model = (@($modelsProp.Value) -join ' ')
+    }
+    elseif ($null -ne $Task.Model) {
+        $model = [string]$Task.Model
+    }
+    else {
+        $model = ''
+    }
     $effort = if ($null -ne $Task.Effort) { [string]$Task.Effort } else { '' }
 
     $canonical = @(
@@ -360,6 +401,33 @@ function Get-TaskSessionFilePath {
 
     $taskKey = Get-TaskKey -TaskIndex $TaskIndex
     return Join-Path $SessionStatePath "$taskKey-session-id.txt"
+}
+
+# Task 6: per-task model-rotation index, persisted so a restart keeps its place in the model list.
+function Get-TaskModelIndexFilePath {
+    param([int]$TaskIndex)
+
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    return Join-Path $SessionStatePath "$taskKey-model-index.txt"
+}
+
+function Get-SavedTaskModelIndex {
+    param([int]$TaskIndex)
+
+    $path = Get-TaskModelIndexFilePath -TaskIndex $TaskIndex
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Content -LiteralPath $path -Raw).Trim()
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) { return $parsed }
+    }
+    return 0
+}
+
+function Save-TaskModelIndex {
+    param([int]$TaskIndex, [int]$ModelIndex)
+
+    $path = Get-TaskModelIndexFilePath -TaskIndex $TaskIndex
+    [string]$ModelIndex | Set-Content -LiteralPath $path -Encoding UTF8
 }
 
 function Get-TaskOutputFilePath {
@@ -889,8 +957,18 @@ function Get-CliArguments {
     param(
         $Task,
         [ValidateSet('New', 'Resume')] [string]$Mode,
-        [string]$SessionId
+        [string]$SessionId,
+        # Task 6: the current rotation model. When omitted, fall back to $Task.Model (the first
+        # model in the list). The caller (the task loop) passes Models[currentModelIndex].
+        [string]$ModelOverride
     )
+
+    $model = if ($PSBoundParameters.ContainsKey('ModelOverride') -and -not [string]::IsNullOrWhiteSpace($ModelOverride)) {
+        $ModelOverride
+    }
+    else {
+        $Task.Model
+    }
 
     switch ($Task.Cli) {
         'claude' {
@@ -898,7 +976,7 @@ function Get-CliArguments {
             if ($Mode -eq 'New')    { $cliArgs += @('--session-id', $SessionId) }
             if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
             $cliArgs += @('--output-format', 'json')
-            if ($Task.Model)  { $cliArgs += @('--model', $Task.Model) }
+            if ($model)       { $cliArgs += @('--model', $model) }
             if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
@@ -914,7 +992,7 @@ function Get-CliArguments {
 
             if ($Mode -eq 'Resume') { $cliArgs += @('resume', $SessionId) }
             $cliArgs += @('--json')
-            if ($Task.Model)  { $cliArgs += @('-m', $Task.Model) }
+            if ($model)       { $cliArgs += @('-m', $model) }
             if ($Task.Effort) { $cliArgs += @('-c', "model_reasoning_effort=$($Task.Effort)") }
             $cliArgs += $codexExtraArgs
             return $cliArgs
@@ -926,7 +1004,7 @@ function Get-CliArguments {
                 $cliArgs += @('--resume', $SessionId)
             }
             $cliArgs += @('--output-format', 'json')
-            if ($Task.Model) { $cliArgs += @('-m', $Task.Model) }
+            if ($model) { $cliArgs += @('-m', $model) }
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
         }
@@ -1070,7 +1148,9 @@ function Invoke-CliTaskRun {
         [int]$TaskIndex,
         $Task,
         [ValidateSet('New','Resume')] [string]$Mode,
-        [string]$SessionId
+        [string]$SessionId,
+        # Task 6: the rotation model for this run (Models[currentModelIndex]). Defaults to $Task.Model.
+        [string]$ModelOverride
     )
 
     $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex -Task $Task
@@ -1085,7 +1165,9 @@ function Invoke-CliTaskRun {
         $prompt = Get-ResumePrompt -Task $Task
     }
 
-    $arguments = Get-CliArguments -Task $Task -Mode $Mode -SessionId $SessionId
+    $cliArgsParams = @{ Task = $Task; Mode = $Mode; SessionId = $SessionId }
+    if ($PSBoundParameters.ContainsKey('ModelOverride')) { $cliArgsParams['ModelOverride'] = $ModelOverride }
+    $arguments = Get-CliArguments @cliArgsParams
 
     Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
     Write-Host "Command: $(Format-CommandForDisplay -Command $Task.Cli -Arguments $arguments)"
@@ -1257,6 +1339,8 @@ try {
             Write-Host "Task $taskNumber changed since last run; previous done marker invalidated."
             Remove-Item -LiteralPath (Get-TaskDoneFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+            # Task 6: also drop the stale model-rotation index so a changed task starts at model #1.
+            Remove-Item -LiteralPath (Get-TaskModelIndexFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
         }
 
         $runCount = 0
@@ -1264,6 +1348,12 @@ try {
         $mustWaitForFreshSession = $false
         $stallCount = 0
         $previousNoMarkerText = $null
+
+        # Task 6: per-task model-rotation list and the persisted current index (kept across restarts).
+        $models = @($task.Models)
+        $modelCount = $models.Count
+        $currentModelIndex = if ($modelCount -gt 1) { Get-SavedTaskModelIndex -TaskIndex $i } else { 0 }
+        if ($currentModelIndex -ge $modelCount) { $currentModelIndex = 0 }
 
         while ($true) {
             $runCount++
@@ -1275,17 +1365,21 @@ try {
                 Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
             }
 
+            # Task 6: the model used for THIS run is Models[currentModelIndex]. Empty when the task
+            # set no model at all (then Get-CliArguments emits no -m/--model, exactly as before).
+            $currentModel = if ($modelCount -gt 0) { [string]$models[$currentModelIndex] } else { '' }
+
             $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
 
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
                 $runMode = 'New'
                 $sessionId = $null
                 if ($task.Cli -eq 'claude') { $sessionId = New-TaskSessionId -TaskIndex $i }
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel
             }
             else {
                 $runMode = 'Resume'
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel
             }
 
             if ($DryRun) {
@@ -1326,8 +1420,25 @@ try {
                 continue
             }
 
-            # A usage limit always pauses and resumes, in both simple and completion-check modes.
+            # A usage limit pauses and resumes, in both simple and completion-check modes.
             if ($result.IsLimit) {
+                # Task 6: model rotation. If another model remains in the list, switch to it and
+                # retry IMMEDIATELY (same session id — a resume) WITHOUT waiting. Only once every
+                # listed model is limit-exhausted do we reset to model #1 and wait for the reset.
+                if ($modelCount -gt 1 -and $currentModelIndex -lt ($modelCount - 1)) {
+                    $nextModelIndex = $currentModelIndex + 1
+                    Write-Step "Task $taskNumber`: limit on $($models[$currentModelIndex]); switching to $($models[$nextModelIndex])"
+                    $currentModelIndex = $nextModelIndex
+                    Save-TaskModelIndex -TaskIndex $i -ModelIndex $currentModelIndex
+                    continue
+                }
+
+                if ($modelCount -gt 1) {
+                    # Every model in the list is exhausted: reset to model #1, then wait for the reset.
+                    $currentModelIndex = 0
+                    Save-TaskModelIndex -TaskIndex $i -ModelIndex $currentModelIndex
+                }
+
                 $mustWaitForFreshSession = $true
                 Write-Step "Task $taskNumber paused by a usage limit on $($task.Cli)"
                 Wait-ForLimitReset -Task $task -Result $result -Settings $config.Settings

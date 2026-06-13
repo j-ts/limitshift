@@ -65,7 +65,7 @@ The queue file is `limitshift-queue.json` by default. Copy [`limitshift-queue.ex
 | `tasks[].cli` | string | yes | none | `claude`, `codex`, or `gemini` |
 | `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside |
 | `tasks[].prompt` | string | yes | none | Task prompt |
-| `tasks[].model` | string | no | none | Passed through where supported |
+| `tasks[].model` | string or array of strings | no | none | Passed through where supported. An array lists models in preference order; on a usage limit the runner rotates to the next model (see below). Primarily useful for gemini |
 | `tasks[].effort` | string | no | none | `low`, `medium`, `high`; Gemini ignores it |
 | `tasks[].completionCheck` | boolean | no | inherits `settings.completionCheck` | Per-task override of completion checking |
 | `tasks[].extraArgs` | string or array | no | none | Extra CLI flags |
@@ -101,6 +101,12 @@ If your editor supports JSON Schema, keep the `$schema` line from the example fi
 | Claude | `claude -p --output-format json` | Native `--resume <session-id>` | Parses `claude -p "/usage"` for session and weekly resets |
 | Codex | `codex exec --json` | `codex exec resume <thread-id> --json` | Parses JSONL error events and error text |
 | Gemini | `gemini -p --output-format json` | Uses `--resume <session-id>` when supported by the installed CLI, otherwise falls back to a continuation prompt | Parses JSON error text / 429s, then falls back to `limitWaitMinutes` |
+
+### Model rotation on usage limits
+
+Set `tasks[].model` to an array of model names in preference order (most useful for gemini, e.g. `["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]`). When a run hits a usage limit, LimitShift switches to the **next** model in the list and retries immediately in the same session (a resume) — no waiting. Only once **every** listed model has been limit-exhausted does it fall back to the normal wait-for-reset path, after which it restarts from model #1. The current position is remembered per task across restarts. A single-string `model` behaves exactly as before (limit → wait → resume the same model).
+
+Switching models mid-session relies on gemini/claude resume. If a CLI rejects a model mid-resume, the existing error-retry path covers it.
 
 ## Permissions warning
 

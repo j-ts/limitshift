@@ -108,6 +108,29 @@ get_task_extra_args() {
   jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
+# Task 6: emit the task's model list, one model per line. A single string is a 1-element list; an
+# array is that list in order; absent/null emits nothing. Mirrors limitshift.ps1's Models parsing.
+get_task_models() {
+  local idx="$1"
+  jq -r ".tasks[$idx].model | if type==\"array\" then .[] elif type==\"string\" then . else empty end" "$QUEUE_PATH" | tr -d '\r'
+}
+
+# Task 6: number of models in the task's list (0 when absent).
+task_model_count() {
+  local idx="$1"
+  jq -r ".tasks[$idx].model | if type==\"array\" then length elif (type==\"string\") then 1 else 0 end" "$QUEUE_PATH" | tr -d '\r'
+}
+
+# Task 6: the task's model list joined by a single space — the canonical model contribution to the
+# fingerprint. A single-string model joins to exactly that string (stable vs the pre-Task-6 form).
+get_task_models_joined() {
+  local idx="$1" joined="" first=1 m
+  while IFS= read -r m; do
+    if [ "$first" -eq 1 ]; then joined="$m"; first=0; else joined="$joined $m"; fi
+  done < <(get_task_models "$idx")
+  printf '%s' "$joined"
+}
+
 # Resolve completionCheck for a task: per-task override beats the global COMPLETION_CHECK,
 # which itself defaults to true. Echoes "true" or "false". (false // empty in jq would lose a
 # legitimate false, so the per-task value is read explicitly with has().)
@@ -200,6 +223,21 @@ read_queue_config() {
     if [ ! -d "$path" ]; then
       echo "Project path does not exist for task $n: $path" >&2
       exit 2
+    fi
+    # Task 6: model may be a string or a non-empty array of strings. Reject an empty array and any
+    # non-string element. (A string or absent value is fine.)
+    local model_type model_bad
+    model_type=$(jq -r ".tasks[$i].model | type" "$QUEUE_PATH" | tr -d '\r')
+    if [ "$model_type" = "array" ]; then
+      if [ "$(jq -r ".tasks[$i].model | length" "$QUEUE_PATH" | tr -d '\r')" = "0" ]; then
+        echo "Task $n model array must not be empty. Use a single string, or list one or more model names in preference order." >&2
+        exit 2
+      fi
+      model_bad=$(jq -r ".tasks[$i].model | map(select(type != \"string\")) | length" "$QUEUE_PATH" | tr -d '\r')
+      if [ "$model_bad" != "0" ]; then
+        echo "Task $n model array must contain only strings (got a non-string element)." >&2
+        exit 2
+      fi
     fi
     i=$((i + 1))
   done
@@ -556,6 +594,9 @@ sha256_hex() {
 #   CANONICAL FORMAT:
 #   fields, in this exact order:  name, cli, projectPath, model, effort, prompt, extraArgs-joined
 #   extraArgs-joined = the args joined by a single space (" ").
+#   model (Task 6) = the task's model LIST joined by a single space (" "). A single-string model is
+#     a 1-element list, so it joins to exactly that string — identical to the pre-Task-6 fingerprint
+#     of a plain-string model. limitshift.ps1 joins the model list the same way (space).
 #   empty model/effort contribute an empty string.
 #   joined with the ASCII unit separator U+001F (printf '\037'), unlikely to appear in any value.
 #   SHA-256 of the UTF-8 bytes of that string, rendered as lowercase hex.
@@ -566,7 +607,7 @@ get_task_fingerprint() {
   # cli is lowercased to match limitshift.ps1, which stores the cli already lowercased.
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
   project_path=$(task_field "$idx" "projectPath")
-  model=$(task_field "$idx" "model")
+  model=$(get_task_models_joined "$idx")
   effort=$(task_field "$idx" "effort")
   prompt=$(task_field "$idx" "prompt")
 
@@ -606,6 +647,33 @@ get_task_session_file_path() {
   local idx="$1" key
   key=$(get_task_key "$idx")
   printf '%s' "$SESSION_STATE_PATH/$key.session"
+}
+
+# Task 6: per-task model-rotation index file, persisted so a restart keeps its place in the list.
+get_task_model_index_file_path() {
+  local idx="$1" key
+  key=$(get_task_key "$idx")
+  printf '%s' "$SESSION_STATE_PATH/$key-model-index.txt"
+}
+
+get_saved_task_model_index() {
+  local path raw
+  path=$(get_task_model_index_file_path "$1")
+  if [ -f "$path" ]; then
+    raw=$(cat "$path" | tr -d '\r' | awk '{$1=$1;print}')
+    case "$raw" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$raw" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
+
+save_task_model_index() {
+  local path
+  path=$(get_task_model_index_file_path "$1")
+  printf '%s' "$2" > "$path"
 }
 
 get_task_output_file_path() {
@@ -693,10 +761,16 @@ save_task_failed_marker() {
 }
 
 build_cli_args() {
-  local idx="$1" mode="$2" session_id="$3"
+  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}"
   local cli model effort project_path
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
-  model=$(task_field "$idx" "model")
+  # Task 6: the -m/--model value is the current rotation model (Models[currentModelIndex]) when the
+  # caller passes one; otherwise fall back to the first model in the list.
+  if [ -n "$model_override" ]; then
+    model="$model_override"
+  else
+    model=$(get_task_models "$idx" | sed -n '1p')
+  fi
   effort=$(task_field "$idx" "effort")
   project_path=$(task_field "$idx" "projectPath")
 
@@ -902,7 +976,7 @@ get_marker_status() {
 }
 
 invoke_cli_task_run() {
-  local idx="$1" mode="$2" session_id="$3"
+  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}"
   local name cli project_path prompt
   name=$(task_field "$idx" "name")
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
@@ -941,7 +1015,7 @@ invoke_cli_task_run() {
     prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$prompt" "$marker_block")
   fi
 
-  build_cli_args "$idx" "$mode" "$session_id"
+  build_cli_args "$idx" "$mode" "$session_id" "$model_override"
 
   echo "==== $mode run for task $((idx + 1)): $name [$cli] ===="
   echo "Command: $cli ${CLI_ARGS[@]}"
@@ -1093,6 +1167,7 @@ run_queue() {
   local i=0 taskNumber runCount errorRetryCount mustWaitForFreshSession=0
   local savedSessionId sessionId result_ok result_is_limit result_text result_session_id result_error_text
   local taskCompletionCheck stallCount previousNoMarkerText hasPreviousNoMarker currentText
+  local taskModels modelCount currentModelIndex currentModel nextModelIndex m
 
   while [ "$i" -lt "$TASK_COUNT" ]; do
     taskNumber=$((i + 1))
@@ -1114,6 +1189,8 @@ run_queue() {
       echo "Task $taskNumber changed since last run; previous done marker invalidated."
       rm -f "$(get_task_done_file_path "$i")"
       rm -f "$(get_task_session_file_path "$i")"
+      # Task 6: also drop the stale model-rotation index so a changed task starts at model #1.
+      rm -f "$(get_task_model_index_file_path "$i")"
     fi
 
     runCount=0
@@ -1123,6 +1200,20 @@ run_queue() {
     previousNoMarkerText=""
     hasPreviousNoMarker=0
     taskCompletionCheck=$(task_completion_check "$i")
+
+    # Task 6: load the per-task model list (ordered) and the persisted current index. A restart
+    # keeps its place. Bash 3.2 has no mapfile, so read line-by-line into an indexed array.
+    taskModels=()
+    while IFS= read -r m; do
+      taskModels+=("$m")
+    done < <(get_task_models "$i")
+    modelCount=${#taskModels[@]}
+    if [ "$modelCount" -gt 1 ]; then
+      currentModelIndex=$(get_saved_task_model_index "$i")
+    else
+      currentModelIndex=0
+    fi
+    if [ "$currentModelIndex" -ge "$modelCount" ] 2>/dev/null; then currentModelIndex=0; fi
 
     while true; do
       runCount=$((runCount + 1))
@@ -1137,6 +1228,14 @@ run_queue() {
         wait_until_claude_ready "$mustWaitForFreshSession"
       fi
 
+      # Task 6: the model used for THIS run is Models[currentModelIndex]. Empty when the task set
+      # no model at all (then build_cli_args emits no -m/--model, exactly as before).
+      if [ "$modelCount" -gt 0 ]; then
+        currentModel="${taskModels[$currentModelIndex]}"
+      else
+        currentModel=""
+      fi
+
       savedSessionId=$(get_saved_task_session_id "$i")
 
       local runMode
@@ -1146,10 +1245,10 @@ run_queue() {
         if [ "$task_cli" = "claude" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
-        invoke_cli_task_run "$i" "New" "$sessionId"
+        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel"
       else
         runMode="Resume"
-        invoke_cli_task_run "$i" "Resume" "$savedSessionId"
+        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel"
       fi
 
       if [ "$DRY_RUN" -eq 1 ]; then
@@ -1199,8 +1298,25 @@ run_queue() {
         continue
       fi
 
-      # A usage limit always pauses and resumes, in both simple and completion-check modes.
+      # A usage limit pauses and resumes, in both simple and completion-check modes.
       if [ "$result_is_limit" -eq 1 ]; then
+        # Task 6: model rotation. If another model remains in the list, switch to it and retry
+        # IMMEDIATELY (same session id — a resume) WITHOUT waiting. Only once every listed model is
+        # limit-exhausted do we reset to model #1 and wait for the reset.
+        if [ "$modelCount" -gt 1 ] && [ "$currentModelIndex" -lt "$((modelCount - 1))" ]; then
+          nextModelIndex=$((currentModelIndex + 1))
+          write_step "Task $taskNumber: limit on ${taskModels[$currentModelIndex]}; switching to ${taskModels[$nextModelIndex]}"
+          currentModelIndex=$nextModelIndex
+          save_task_model_index "$i" "$currentModelIndex"
+          continue
+        fi
+
+        if [ "$modelCount" -gt 1 ]; then
+          # Every model in the list is exhausted: reset to model #1, then wait for the reset.
+          currentModelIndex=0
+          save_task_model_index "$i" "$currentModelIndex"
+        fi
+
         mustWaitForFreshSession=1
         write_step "Task $taskNumber paused by a usage limit on $task_cli"
         wait_for_limit_reset "$task_cli" "$result_error_text" "$LIMIT_WAIT_MINUTES"

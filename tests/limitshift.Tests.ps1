@@ -495,6 +495,262 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'Model rotation (Task 6) — config parsing and arg building' {
+        It 'parses a single-string model into a 1-element Models list and keeps Model scalar' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-full.json')
+            @($cfg.Tasks[0].Models) | Should -HaveCount 1
+            $cfg.Tasks[0].Models[0] | Should -Be 'claude-sonnet-4-6'
+            $cfg.Tasks[0].Model | Should -Be 'claude-sonnet-4-6'
+        }
+
+        It 'parses a model ARRAY into an ordered Models list (Model scalar = first element)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'g'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p'
+                       model = @('gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-pro') }
+                )
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            @($cfg.Tasks[0].Models) | Should -HaveCount 3
+            $cfg.Tasks[0].Models[0] | Should -Be 'gemini-3-flash-preview'
+            $cfg.Tasks[0].Models[1] | Should -Be 'gemini-2.5-flash'
+            $cfg.Tasks[0].Models[2] | Should -Be 'gemini-2.5-pro'
+            $cfg.Tasks[0].Model | Should -Be 'gemini-3-flash-preview'
+        }
+
+        It 'parses an absent model into an empty Models list and a null Model scalar' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')
+            @($cfg.Tasks[0].Models).Count | Should -Be 0
+            $cfg.Tasks[0].Model | Should -BeNullOrEmpty
+        }
+
+        It 'rejects an empty model array, naming the task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'g'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p'; model = @() }
+                )
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1*model*'
+        }
+
+        It 'rejects a non-string element in the model array, naming the task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            # ConvertTo-Json would render a nested hashtable as an object element.
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'g'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p'
+                       model = @('ok', @{ bad = 'object' }) }
+                )
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1*model*'
+        }
+
+        It 'Get-CliArguments honors a ModelOverride (the current rotation model)' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
+                Model = 'gemini-3-flash-preview'; Models = @('gemini-3-flash-preview','gemini-2.5-flash')
+                Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+            }
+            $args = Get-CliArguments -Task $task -Mode New -SessionId $null -ModelOverride 'gemini-2.5-flash'
+            ($args -join ' ') | Should -Be '--output-format json -m gemini-2.5-flash'
+        }
+
+        It 'Get-CliArguments falls back to Task.Model when no override is given' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'gemini'; ProjectPath = 'C:\proj'
+                Model = 'gemini-3-flash-preview'; Models = @('gemini-3-flash-preview','gemini-2.5-flash')
+                Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+            }
+            $args = Get-CliArguments -Task $task -Mode New -SessionId $null
+            ($args -join ' ') | Should -Be '--output-format json -m gemini-3-flash-preview'
+        }
+
+        It 'keeps the fingerprint identical between a 1-element list and a plain string model' {
+            $asString = [pscustomobject]@{ Name='a'; Cli='gemini'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $asList   = [pscustomobject]@{ Name='a'; Cli='gemini'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@() }
+            (Get-TaskFingerprint -Task $asString) | Should -Be (Get-TaskFingerprint -Task $asList)
+        }
+
+        It 'fingerprint differs when the model list differs (canonical = space-joined list)' {
+            $a = [pscustomobject]@{ Name='a'; Cli='gemini'; ProjectPath='C:\p'; Model='m1'; Models=@('m1','m2'); Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $b = [pscustomobject]@{ Name='a'; Cli='gemini'; ProjectPath='C:\p'; Model='m1'; Models=@('m1');      Effort=$null; Prompt='X'; ExtraArgs=@() }
+            (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
+        }
+    }
+
+    Context 'Model rotation (Task 6) — end-to-end' {
+        It 'switches to the next model on a usage limit, immediately, without waiting' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $modelLog = Join-Path $root 'models.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$modelLog = '$($modelLog -replace '\\','\\')'
+`$model = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) { if (`$args[`$i] -eq '-m') { `$model = `$args[`$i + 1] } }
+[System.IO.File]::AppendAllText(`$modelLog, `$model + [Environment]::NewLine)
+if (`$model -eq 'm-first') {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done on second model\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'rotate'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       model = @('m-first', 'm-second') }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to m-second'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
+                $models[0] | Should -Be 'm-first'
+                $models[1] | Should -Be 'm-second'
+
+                $idxPath = Join-Path $root '.limitshift-queue\sessions\task-01-model-index.txt'
+                Test-Path -LiteralPath $idxPath | Should -BeTrue
+                (Get-Content -LiteralPath $idxPath -Raw).Trim() | Should -Be '1'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'after the LAST model also limits, waits for reset and restarts from model #1 (index resets to 0)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $modelLog = Join-Path $root 'models.txt'
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            # Runs 1 & 2 (both models) limit; run 3 (back on model #1 after the wait) succeeds.
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$modelLog = '$($modelLog -replace '\\','\\')'
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$model = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) { if (`$args[`$i] -eq '-m') { `$model = `$args[`$i + 1] } }
+[System.IO.File]::AppendAllText(`$modelLog, `$model + [Environment]::NewLine)
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -le 2) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done after wait\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'rotate-exhaust'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       model = @('m-first', 'm-second') }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'paused by a usage limit'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
+                $models[0] | Should -Be 'm-first'
+                $models[1] | Should -Be 'm-second'
+                # After exhausting both and waiting, it restarts from model #1.
+                $models[2] | Should -Be 'm-first'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'a single-string model behaves exactly as today: limit -> wait -> resume same model' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $modelLog = Join-Path $root 'models.txt'
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$modelLog = '$($modelLog -replace '\\','\\')'
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$model = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) { if (`$args[`$i] -eq '-m') { `$model = `$args[`$i + 1] } }
+[System.IO.File]::AppendAllText(`$modelLog, `$model + [Environment]::NewLine)
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'single'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'; model = 'only-model' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'paused by a usage limit'
+                $run.Output | Should -Not -Match 'switching to'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
+                $models[0] | Should -Be 'only-model'
+                $models[1] | Should -Be 'only-model'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
     Context 'Invoke-NativeProcess stdin delivery' {
         It 'round-trips a multi-line prompt with quotes through stdin to a .cmd shim' {
             $root = New-TestRoot
