@@ -301,7 +301,7 @@ $out"
 
   local prompt expected received
   prompt=$(printf 'line one with "double quotes"\nline two\n[[TASK_COMPLETE]] should survive as literal text')
-  expected=$(printf '%s\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with exactly this as the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$prompt" "[[TASK_COMPLETE]]" "[[TASK_BLOCKED]]")
+  expected=$(printf '%s\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with %s as (or at the end of) the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as (or at the end of) the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$prompt" "[[TASK_COMPLETE]]" "[[TASK_COMPLETE]]" "[[TASK_BLOCKED]]")
   received=$(cat "$received_file")
 
   if [ "$received" = "$expected" ]; then
@@ -357,6 +357,311 @@ $out"
   fi
 }
 
+write_fake_claude_response() {
+  # Writes a claude stub that records the stdin prompt and replies with a fixed body.
+  local bin_dir="$1" received_file="$2" response_json="$3"
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used'
+  printf '%s\n' 'Current week (all models): 0% used'
+  exit 0
+fi
+cat > "$received_file"
+printf '%s\n' '$response_json'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+}
+
+run_simple_mode_verbatim_test() {
+  local desc="simple mode (completionCheck:false) sends prompt verbatim and completes in one run"
+  local root="$TMP_ROOT/simple-mode"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local status_dir="$root/.ai-runner-queue/status"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I did the thing, no marker","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0,
+    "completionCheck": false
+  },
+  "tasks": [
+    {
+      "name": "simple verbatim",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "just do this verbatim"
+    }
+  ]
+}
+EOF
+
+  local out exit_code received
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  received=$(cat "$received_file" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$status_dir/task-01.done" ] &&
+     [ "$received" = "just do this verbatim" ] &&
+     ! printf '%s' "$received" | grep -q 'IMPORTANT AUTOMATION INSTRUCTIONS'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+received=[$received]
+$out"
+  fi
+}
+
+run_simple_mode_override_test() {
+  local desc="per-task completionCheck:true override re-enables marker checking"
+  local root="$TMP_ROOT/simple-override"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local status_dir="$root/.ai-runner-queue/status"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  # Reply WITHOUT a marker so completion-check mode would NOT mark done on the first run.
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"ready, no marker here","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": false,
+    "maxRunsPerTask": 1,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0,
+    "completionCheck": false
+  },
+  "tasks": [
+    {
+      "name": "override true",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "do it",
+      "completionCheck": true
+    }
+  ]
+}
+EOF
+
+  local out exit_code received
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  received=$(cat "$received_file" 2>/dev/null)
+
+  # With completionCheck forced true, the prompt MUST carry the instruction block and the
+  # task must NOT be marked done after one no-marker run (it exhausts maxRunsPerTask=1 instead).
+  if printf '%s' "$received" | grep -q 'IMPORTANT AUTOMATION INSTRUCTIONS' &&
+     [ ! -f "$status_dir/task-01.done" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+received=[$received]
+$out"
+  fi
+}
+
+run_loose_marker_test() {
+  local desc="loosened marker detection: OK[[TASK_COMPLETE]] on the last line marks done"
+  local root="$TMP_ROOT/loose-marker"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local status_dir="$root/.ai-runner-queue/status"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"OK[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 2,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "loose marker",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "respond OK then the marker"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$status_dir/task-01.done" ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_stall_guard_test() {
+  local desc="stall guard fails the task after maxStalls identical no-marker responses"
+  local root="$TMP_ROOT/stall-guard"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local status_dir="$root/.ai-runner-queue/status"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I am ready to help. What would you like me to work on?","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 20,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0,
+    "maxStalls": 2
+  },
+  "tasks": [
+    {
+      "name": "stalling task",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "respond OK only"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 1 ] &&
+     printf '%s' "$out" | grep -q 'no progress: agent repeated the same response without a completion marker' &&
+     [ -f "$status_dir/task-01.failed" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_clean_output_test() {
+  local desc="console shows the agent response text, not raw JSON"
+  local root="$TMP_ROOT/clean-output"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local output_file="$root/.ai-runner-queue/outputs/task-01.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"Here is the clean answer\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 2,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "clean output",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "answer cleanly"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q -- '--- agent response ---' &&
+     printf '%s' "$out" | grep -q 'Here is the clean answer' &&
+     ! printf '%s' "$out" | grep -q '"session_id"' &&
+     [ -f "$output_file" ] &&
+     grep -q '"session_id"' "$output_file"; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_show_raw_test() {
+  local desc="--show-raw prints the raw JSON to the console"
+  local root="$TMP_ROOT/show-raw"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"answer\n[[TASK_COMPLETE]]","session_id":"s-raw","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 2,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "raw output",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "answer"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" --show-raw 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q '"session_id"'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -369,6 +674,12 @@ run_codex_limit_resume_test
 run_duplicate_name_test
 run_stdin_prompt_roundtrip_test
 run_exit_code_propagation_test
+run_simple_mode_verbatim_test
+run_simple_mode_override_test
+run_loose_marker_test
+run_stall_guard_test
+run_clean_output_test
+run_show_raw_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

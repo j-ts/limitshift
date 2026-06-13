@@ -123,6 +123,175 @@ Describe 'run-ai.ps1' {
         }
     }
 
+    Context 'completionCheck flag (Read-QueueConfig)' {
+        It 'defaults completionCheck to true when absent globally and per-task' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')
+            $cfg.Settings.CompletionCheck | Should -Be $true
+            $cfg.Tasks[0].CompletionCheck | Should -Be $true
+        }
+
+        It 'defaults maxStalls to 2 when absent' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')
+            $cfg.Settings.MaxStalls | Should -Be 2
+        }
+
+        It 'honors a global completionCheck:false setting' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ completionCheck = $false }
+                tasks = @(
+                    @{ name = 'a'; cli = 'claude'; projectPath = $projectPath; prompt = 'p' }
+                )
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Settings.CompletionCheck | Should -Be $false
+            $cfg.Tasks[0].CompletionCheck | Should -Be $false
+        }
+
+        It 'lets a per-task completionCheck override beat the global setting' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ completionCheck = $true }
+                tasks = @(
+                    @{ name = 'a'; cli = 'claude'; projectPath = $projectPath; prompt = 'p'; completionCheck = $false }
+                    @{ name = 'b'; cli = 'claude'; projectPath = $projectPath; prompt = 'q' }
+                )
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].CompletionCheck | Should -Be $false
+            $cfg.Tasks[1].CompletionCheck | Should -Be $true
+        }
+
+        It 'lets a per-task completionCheck:true override a global false' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ completionCheck = $false }
+                tasks = @(
+                    @{ name = 'a'; cli = 'claude'; projectPath = $projectPath; prompt = 'p'; completionCheck = $true }
+                )
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].CompletionCheck | Should -Be $true
+        }
+    }
+
+    Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
+        It 'appends the marker block when completionCheck is true' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+                CompletionCheck = $true
+            }
+            $prompt = Get-TaskPromptWithCompletionMarker -Task $task
+            $prompt | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+            $prompt | Should -Match '\[\[TASK_COMPLETE\]\]'
+        }
+
+        It 'sends the prompt byte-identical (verbatim) when completionCheck is false' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = "do the thing`nsecond line"; ExtraArgs = @()
+                CompletionCheck = $false
+            }
+            $prompt = Get-TaskPromptWithCompletionMarker -Task $task
+            $prompt | Should -BeExactly "do the thing`nsecond line"
+            $prompt | Should -Not -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+        }
+
+        It 'omits the marker block from the resume prompt when completionCheck is false' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+                CompletionCheck = $false
+            }
+            $prompt = Get-ResumePrompt -Task $task
+            $prompt | Should -Not -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+            $prompt | Should -Not -Match '\[\[TASK_COMPLETE\]\]'
+        }
+
+        It 'keeps the marker block in the resume prompt when completionCheck is true' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = 'do the thing'; ExtraArgs = @()
+                CompletionCheck = $true
+            }
+            $prompt = Get-ResumePrompt -Task $task
+            $prompt | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+        }
+    }
+
+    Context 'Get-MarkerStatus (loosened detection)' {
+        It 'returns Done for an exact last line marker' {
+            (Get-MarkerStatus -Text "work`n[[TASK_COMPLETE]]").Status | Should -Be 'Done'
+        }
+
+        It 'returns Done when the last line is OK[[TASK_COMPLETE]]' {
+            (Get-MarkerStatus -Text "OK[[TASK_COMPLETE]]").Status | Should -Be 'Done'
+        }
+
+        It 'returns Done when the marker has trailing whitespace' {
+            (Get-MarkerStatus -Text "all done`n[[TASK_COMPLETE]]   ").Status | Should -Be 'Done'
+        }
+
+        It 'returns Done when the marker is on the last non-empty line with text before it' {
+            (Get-MarkerStatus -Text "Finished the task. [[TASK_COMPLETE]]`n`n").Status | Should -Be 'Done'
+        }
+
+        It 'returns Blocked with reason for a leading blocked marker' {
+            $m = Get-MarkerStatus -Text "[[TASK_BLOCKED]] reason here"
+            $m.Status | Should -Be 'Blocked'
+            $m.Reason | Should -Be 'reason here'
+        }
+
+        It 'returns Blocked with reason when text precedes the blocked marker' {
+            $m = Get-MarkerStatus -Text "Sorry --- [[TASK_BLOCKED]] no API key"
+            $m.Status | Should -Be 'Blocked'
+            $m.Reason | Should -Be 'no API key'
+        }
+
+        It 'returns None when the marker only appears mid-response, not on the last non-empty line' {
+            $text = "Here is the plan: [[TASK_COMPLETE]] is what I will print.`nStill working on step 2."
+            (Get-MarkerStatus -Text $text).Status | Should -Be 'None'
+        }
+    }
+
+    Context 'Get-ConsoleOutputText (clean console output)' {
+        It 'prints the parsed response text for a successful run' {
+            $result = New-CliResult -Ok $true -IsLimit $false -Text 'pong [[TASK_COMPLETE]]' -SessionId 's' -ErrorText $null
+            $text = Get-ConsoleOutputText -Result $result -RawOutput '{"result":"pong [[TASK_COMPLETE]]","session_id":"s"}'
+            $text | Should -Be 'pong [[TASK_COMPLETE]]'
+            $text | Should -Not -Match '"result"'
+        }
+
+        It 'prints the error text when the run failed' {
+            $result = New-CliResult -Ok $false -IsLimit $false -Text '' -SessionId $null -ErrorText 'boom 500'
+            $text = Get-ConsoleOutputText -Result $result -RawOutput '{"is_error":true,"result":"boom 500"}'
+            $text | Should -Be 'boom 500'
+        }
+
+        It 'falls back to the raw output when there is no parsed text' {
+            $result = New-CliResult -Ok $false -IsLimit $false -Text '' -SessionId $null -ErrorText ''
+            $text = Get-ConsoleOutputText -Result $result -RawOutput 'node: command not found'
+            $text | Should -Be 'node: command not found'
+        }
+
+        It 'returns the raw output when -ShowRawOutput is requested' {
+            $result = New-CliResult -Ok $true -IsLimit $false -Text 'pong' -SessionId 's' -ErrorText $null
+            $raw = '{"result":"pong","session_id":"s"}'
+            $text = Get-ConsoleOutputText -Result $result -RawOutput $raw -ShowRawOutput
+            $text | Should -Be $raw
+        }
+    }
+
     Context 'Get-CliArguments' {
         It 'builds a claude new-session command without the prompt in the args' {
             $task = [pscustomobject]@{
@@ -491,6 +660,317 @@ exit 0
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match 'say hi'
                 $outputFileText | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'simple mode (completionCheck:false) sends the prompt verbatim and completes in one run' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $receivedFile = Join-Path $root 'received.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$stdinText = [Console]::In.ReadToEnd()
+[System.IO.File]::WriteAllText('$($receivedFile -replace '\\','\\')', `$stdinText)
+Write-Output '{"result":"I did the thing, no marker here","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 5
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                    completionCheck    = $false
+                }
+                tasks = @(
+                    @{
+                        name        = 'simple mode task'
+                        cli         = 'claude'
+                        projectPath = $projectPath
+                        prompt      = 'just do this verbatim'
+                    }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile',
+                    '-File', $script:__limitshiftScriptPath,
+                    '-QueuePath', $queuePath
+                )
+
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $donePath = Join-Path $root '.ai-runner-queue\status\task-01.done'
+                Test-Path -LiteralPath $donePath | Should -BeTrue
+
+                $received = [System.IO.File]::ReadAllText($receivedFile)
+                $received | Should -BeExactly 'just do this verbatim'
+                $received | Should -Not -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'simple mode resumes after a usage limit and marks done on the resumed OK run' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$stdinText = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-lim","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-lim","response":"finished after resume, no marker"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 5
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                    completionCheck    = $false
+                }
+                tasks = @(
+                    @{
+                        name        = 'simple gemini limit'
+                        cli         = 'gemini'
+                        projectPath = $projectPath
+                        model       = 'gemini-2.5-flash'
+                        prompt      = 'do it verbatim'
+                    }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile',
+                    '-File', $script:__limitshiftScriptPath,
+                    '-QueuePath', $queuePath
+                )
+
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'paused by a usage limit'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $donePath = Join-Path $root '.ai-runner-queue\status\task-01.done'
+                Test-Path -LiteralPath $donePath | Should -BeTrue
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'stall guard fails the task after maxStalls identical no-marker responses' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"I am ready to help. What would you like me to work on?","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 20
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                    maxStalls          = 2
+                }
+                tasks = @(
+                    @{
+                        name        = 'stalling task'
+                        cli         = 'claude'
+                        projectPath = $projectPath
+                        prompt      = 'respond OK only'
+                    }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile',
+                    '-File', $script:__limitshiftScriptPath,
+                    '-QueuePath', $queuePath
+                )
+
+                $run.ExitCode | Should -Be 1
+                $run.Output | Should -Match 'no progress'
+
+                $failedPath = Join-Path $root '.ai-runner-queue\status\task-01.failed'
+                Test-Path -LiteralPath $failedPath | Should -BeTrue
+                $failedText = [System.IO.File]::ReadAllText($failedPath)
+                $failedText | Should -Match 'no progress: agent repeated the same response without a completion marker'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'prints the clean agent response text to the console, not raw JSON' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"Here is the clean answer\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 2
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                }
+                tasks = @(
+                    @{
+                        name        = 'clean output task'
+                        cli         = 'claude'
+                        projectPath = $projectPath
+                        prompt      = 'answer cleanly'
+                    }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile',
+                    '-File', $script:__limitshiftScriptPath,
+                    '-QueuePath', $queuePath
+                )
+
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match '--- agent response ---'
+                $run.Output | Should -Match 'Here is the clean answer'
+                $run.Output | Should -Not -Match '"session_id"'
+                $run.Output | Should -Not -Match '"result"'
+
+                # The raw JSON still lands in the per-task output file.
+                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-output.txt'
+                $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
+                $outputFileText | Should -Match '"session_id"'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'honors -ShowRawOutput by printing the raw JSON to the console' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"answer\n[[TASK_COMPLETE]]","session_id":"s-raw","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 2
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                }
+                tasks = @(
+                    @{
+                        name        = 'raw output task'
+                        cli         = 'claude'
+                        projectPath = $projectPath
+                        prompt      = 'answer'
+                    }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile',
+                    '-File', $script:__limitshiftScriptPath,
+                    '-ShowRawOutput',
+                    '-QueuePath', $queuePath
+                )
+
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match '"session_id"'
             }
             finally {
                 $env:PATH = $oldPath

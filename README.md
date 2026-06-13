@@ -57,12 +57,15 @@ The queue file is `ai-run-queue.json` by default. Copy [`ai-run-queue.example.js
 | `settings.maxRetriesOnError` | integer | no | `2` | Retries for non-limit failures |
 | `settings.limitWaitMinutes` | integer | no | `30` | Fallback wait when reset time cannot be parsed |
 | `settings.resetBufferMinutes` | integer | no | `2` | Extra buffer added after parsed reset time |
+| `settings.completionCheck` | boolean | no | `true` | `true` injects the `[[TASK_COMPLETE]]` instructions and resumes until the marker appears; `false` ("simple mode") sends the prompt verbatim and marks the task done after the first OK run (only a usage limit triggers a resume) |
+| `settings.maxStalls` | integer | no | `2` | When `completionCheck` is `true`, fail the task after this many identical no-marker responses in a row |
 | `tasks[].name` | string | yes | none | Human-readable task name |
 | `tasks[].cli` | string | yes | none | `claude`, `codex`, or `gemini` |
 | `tasks[].projectPath` | string | yes | none | Folder the CLI runs inside |
 | `tasks[].prompt` | string | yes | none | Task prompt |
 | `tasks[].model` | string | no | none | Passed through where supported |
 | `tasks[].effort` | string | no | none | `low`, `medium`, `high`; Gemini ignores it |
+| `tasks[].completionCheck` | boolean | no | inherits `settings.completionCheck` | Per-task override of completion checking |
 | `tasks[].extraArgs` | string or array | no | none | Extra CLI flags |
 
 `extraArgs` rules:
@@ -149,6 +152,16 @@ Use a custom queue path:
 
 ```bash
 ./run-ai.sh --queue ./my-queue.json
+```
+
+The console shows only the agent's response text (under a `--- agent response ---` header); the full raw CLI JSON is still written to `outputs/task-NN-*.txt`. To print the raw JSON to the console instead (useful for debugging), use:
+
+```powershell
+.\run-ai.ps1 -ShowRawOutput
+```
+
+```bash
+./run-ai.sh --show-raw
 ```
 
 Keep the machine awake for long runs:

@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QUEUE_PATH="$SCRIPT_DIR/ai-run-queue.json"
 VALIDATE_ONLY=0
 DRY_RUN=0
+SHOW_RAW=0
 
 TASK_COMPLETE_MARKER="[[TASK_COMPLETE]]"
 TASK_BLOCKED_MARKER="[[TASK_BLOCKED]]"
@@ -19,6 +20,7 @@ usage() {
   echo "  --queue <path>       Path to queue JSON file (default: ai-run-queue.json next to script)"
   echo "  --validate-only      Validate configuration syntax, paths, and binaries, then exit"
   echo "  --dry-run            Simulate execution by printing commands without running them"
+  echo "  --show-raw           Print the raw CLI JSON to the console (default: only the response text)"
   echo "  -h, --help           Show this help message"
 }
 
@@ -27,6 +29,7 @@ while [ $# -gt 0 ]; do
     --queue) QUEUE_PATH="$2"; shift 2 ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
+    --show-raw) SHOW_RAW=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -83,6 +86,21 @@ get_task_extra_args() {
   jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
+# Resolve completionCheck for a task: per-task override beats the global COMPLETION_CHECK,
+# which itself defaults to true. Echoes "true" or "false". (false // empty in jq would lose a
+# legitimate false, so the per-task value is read explicitly with has().)
+task_completion_check() {
+  local idx="$1" per_task
+  per_task=$(jq -r ".tasks[$idx] | if has(\"completionCheck\") then .completionCheck else \"\" end" "$QUEUE_PATH" | tr -d '\r')
+  if [ "$per_task" = "true" ] || [ "$per_task" = "false" ]; then
+    printf '%s' "$per_task"
+  elif [ "${COMPLETION_CHECK:-true}" = "false" ]; then
+    printf 'false'
+  else
+    printf 'true'
+  fi
+}
+
 get_codex_resume_extra_args() {
   local idx="$1"
   local raw_args=()
@@ -135,6 +153,10 @@ read_queue_config() {
   MAX_RETRIES_ON_ERROR=$(jq -r '.settings.maxRetriesOnError // 2' "$QUEUE_PATH" | tr -d '\r')
   LIMIT_WAIT_MINUTES=$(jq -r '.settings.limitWaitMinutes // 30' "$QUEUE_PATH" | tr -d '\r')
   RESET_BUFFER_MINUTES=$(jq -r '.settings.resetBufferMinutes // 2' "$QUEUE_PATH" | tr -d '\r')
+  # Note: jq's `// true` would turn a legitimate `false` into `true` (it treats false as empty),
+  # so completionCheck is read with has() to preserve an explicit false.
+  COMPLETION_CHECK=$(jq -r '(.settings // {}) | if has("completionCheck") then .completionCheck else true end' "$QUEUE_PATH" | tr -d '\r')
+  MAX_STALLS=$(jq -r '.settings.maxStalls // 2' "$QUEUE_PATH" | tr -d '\r')
 
   local i=0 n cli path
   while [ "$i" -lt "$TASK_COUNT" ]; do
@@ -739,17 +761,25 @@ get_marker_status() {
   last=$(printf '%s' "$text" | awk 'NF{last=$0} END{print last}')
   last=$(printf '%s' "$last" | awk '{$1=$1;print}')
 
-  if [ "$last" = "$TASK_COMPLETE_MARKER" ]; then
-    M_STATUS="Done"
-    M_REASON=""
-  elif [[ "$last" == "$TASK_BLOCKED_MARKER"* ]]; then
-    M_STATUS="Blocked"
-    M_REASON=$(printf '%s' "$last" | sed "s/^$(printf '%s' "$TASK_BLOCKED_MARKER" | sed 's/[^^$*.[\]]/\\&/g')//")
-    M_REASON=$(printf '%s' "$M_REASON" | awk '{$1=$1;print}')
-  else
-    M_STATUS="None"
-    M_REASON=""
-  fi
+  # Loosened detection (Task 2.2): the marker only has to be CONTAINED in the last
+  # non-empty line. Blocked is checked first so a line mentioning both is treated as blocked.
+  # The markers contain glob-special characters ([[ ]]), so quoted case patterns are used to
+  # match them literally; the reason is extracted with awk index/substr (not parameter
+  # expansion, which would treat the marker as a glob pattern).
+  case "$last" in
+    *"$TASK_BLOCKED_MARKER"*)
+      M_STATUS="Blocked"
+      M_REASON=$(awk -v line="$last" -v marker="$TASK_BLOCKED_MARKER" 'BEGIN{p=index(line,marker); r=substr(line,p+length(marker)); gsub(/^[[:space:]]+|[[:space:]]+$/,"",r); print r}')
+      ;;
+    *"$TASK_COMPLETE_MARKER"*)
+      M_STATUS="Done"
+      M_REASON=""
+      ;;
+    *)
+      M_STATUS="None"
+      M_REASON=""
+      ;;
+  esac
 }
 
 invoke_cli_task_run() {
@@ -768,14 +798,28 @@ invoke_cli_task_run() {
     rm -f "$output_file_path"
   fi
 
+  local completion_check
+  completion_check=$(task_completion_check "$idx")
+
+  # The marker instruction block (Task 2.3 wording). Empty in simple mode (completionCheck:false).
+  local marker_block=""
+  if [ "$completion_check" = "true" ]; then
+    marker_block=$(printf '\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with %s as (or at the end of) the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as (or at the end of) the very last line instead, plus a one-line reason:\n%s <one-line reason>' "$TASK_COMPLETE_MARKER" "$TASK_COMPLETE_MARKER" "$TASK_BLOCKED_MARKER")
+  fi
+
   local prompt_with_marker
   if [ "$mode" = "New" ]; then
-    prompt_with_marker=$(printf '%s\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with exactly this as the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$prompt" "$TASK_COMPLETE_MARKER" "$TASK_BLOCKED_MARKER")
+    if [ "$completion_check" = "true" ]; then
+      prompt_with_marker=$(printf '%s%s\n' "$prompt" "$marker_block")
+    else
+      # Simple mode: send the prompt verbatim, nothing appended.
+      prompt_with_marker=$(printf '%s' "$prompt")
+    fi
   else
     if [ "$cli" = "gemini" ]; then
-      prompt_with_marker=$(printf 'You were interrupted partway through the following task. Inspect the current state of the working directory to see what is already done. Do not redo completed work; continue from where things stand.\n\nOriginal task:\n%s\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with exactly this as the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$prompt" "$TASK_COMPLETE_MARKER" "$TASK_BLOCKED_MARKER")
+      prompt_with_marker=$(printf 'You were interrupted partway through the following task. Inspect the current state of the working directory to see what is already done. Do not redo completed work; continue from where things stand.\n\nOriginal task:\n%s%s\n' "$prompt" "$marker_block")
     else
-      prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with exactly this as the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:\n%s <one-line reason>\n' "$TASK_COMPLETE_MARKER" "$TASK_BLOCKED_MARKER")
+      prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.%s\n' "$marker_block")
     fi
   fi
 
@@ -806,12 +850,31 @@ invoke_cli_task_run() {
   output_text=$(cat "$tmp_out")
   rm -f "$tmp_out"
 
+  # The FULL raw output always goes to the per-task output file.
   if [ -n "$output_text" ]; then
     printf '%s\n' "$output_text" >> "$output_file_path"
-    printf '%s\n' "$output_text"
   fi
 
+  # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
   parse_cli_output "$cli" "$output_text" "$exit_code"
+
+  local console_text=""
+  if [ "$SHOW_RAW" -eq 1 ]; then
+    console_text="$output_text"
+  elif [ "$R_OK" -eq 1 ] && [ -n "$R_TEXT" ]; then
+    console_text="$R_TEXT"
+  elif [ "$R_OK" -eq 0 ] && [ -n "$R_ERROR_TEXT" ]; then
+    console_text="$R_ERROR_TEXT"
+  elif [ "$R_OK" -eq 0 ] && [ -n "$R_TEXT" ]; then
+    console_text="$R_TEXT"
+  else
+    console_text="$output_text"
+  fi
+
+  if [ -n "$console_text" ]; then
+    echo "--- agent response ---"
+    printf '%s\n' "$console_text"
+  fi
 }
 
 initialize_runner_state() {
@@ -860,10 +923,11 @@ run_queue() {
 
   local i=0 taskNumber runCount errorRetryCount mustWaitForFreshSession=0
   local savedSessionId sessionId result_ok result_is_limit result_text result_session_id result_error_text
-  
+  local taskCompletionCheck stallCount previousNoMarkerText hasPreviousNoMarker currentText
+
   while [ "$i" -lt "$TASK_COUNT" ]; do
     taskNumber=$((i + 1))
-    
+
     if test_task_already_done "$i"; then
       write_step "Skipping task $taskNumber of $TASK_COUNT: $(task_field "$i" "name")"
       echo "Task is already marked as done."
@@ -874,6 +938,10 @@ run_queue() {
     runCount=0
     errorRetryCount=0
     mustWaitForFreshSession=0
+    stallCount=0
+    previousNoMarkerText=""
+    hasPreviousNoMarker=0
+    taskCompletionCheck=$(task_completion_check "$i")
 
     while true; do
       runCount=$((runCount + 1))
@@ -916,23 +984,6 @@ run_queue() {
         printf '%s' "$result_session_id" > "$(get_task_session_file_path "$i")"
       fi
 
-      get_marker_status "$result_text"
-      if [ "$M_STATUS" = "Done" ]; then
-        save_task_done_marker "$i"
-        write_step "Task $taskNumber completed"
-        break
-      fi
-      if [ "$M_STATUS" = "Blocked" ]; then
-        save_task_failed_marker "$i" "$M_REASON"
-        write_step "Task $taskNumber reported itself BLOCKED: $M_REASON"
-        if [ "$STOP_ON_ERROR" = "true" ]; then
-          echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
-          exit 1
-        fi
-        echo "stopOnError=false; moving to the next task."
-        break
-      fi
-
       # Gemini-only: --resume rejection fallback
       if [ "$task_cli" = "gemini" ] && [ "$result_ok" -eq 0 ] && \
          printf '%s' "$result_error_text" | grep -qiE 'unknown option.*resume|not supported in non-interactive|unexpected argument|too many arguments|invalid.*resume'; then
@@ -941,6 +992,7 @@ run_queue() {
         continue
       fi
 
+      # A usage limit always pauses and resumes, in both simple and completion-check modes.
       if [ "$result_is_limit" -eq 1 ]; then
         mustWaitForFreshSession=1
         write_step "Task $taskNumber paused by a usage limit on $task_cli"
@@ -962,6 +1014,50 @@ run_queue() {
         echo "stopOnError=false; abandoning this task and moving to the next one."
         break
       fi
+
+      # Simple mode (completionCheck:false): the first OK run (no limit, no error) is done.
+      if [ "$taskCompletionCheck" != "true" ]; then
+        save_task_done_marker "$i"
+        write_step "Task $taskNumber completed"
+        break
+      fi
+
+      get_marker_status "$result_text"
+      if [ "$M_STATUS" = "Done" ]; then
+        save_task_done_marker "$i"
+        write_step "Task $taskNumber completed"
+        break
+      fi
+      if [ "$M_STATUS" = "Blocked" ]; then
+        save_task_failed_marker "$i" "$M_REASON"
+        write_step "Task $taskNumber reported itself BLOCKED: $M_REASON"
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+          exit 1
+        fi
+        echo "stopOnError=false; moving to the next task."
+        break
+      fi
+
+      # No-progress guard: an OK run with no marker whose text repeats the previous no-marker
+      # response counts as a stall. After maxStalls stalls, fail the task. Identical responses
+      # produce identical text, so a direct string comparison is sufficient.
+      currentText="$result_text"
+      if [ "$hasPreviousNoMarker" -eq 1 ] && [ "$currentText" = "$previousNoMarkerText" ]; then
+        stallCount=$((stallCount + 1))
+        if [ "$stallCount" -ge "$MAX_STALLS" ]; then
+          save_task_failed_marker "$i" "no progress: agent repeated the same response without a completion marker"
+          write_step "Task $taskNumber failed: no progress: agent repeated the same response without a completion marker"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber failed: no progress: agent repeated the same response without a completion marker" >&2
+            exit 1
+          fi
+          echo "stopOnError=false; abandoning this task and moving to the next one."
+          break
+        fi
+      fi
+      previousNoMarkerText="$currentText"
+      hasPreviousNoMarker=1
 
       mustWaitForFreshSession=0
       write_step "Task $taskNumber is not complete yet; resuming the same session."

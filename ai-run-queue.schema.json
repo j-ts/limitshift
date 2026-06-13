@@ -14,7 +14,18 @@
         "maxRunsPerTask": { "type": "integer", "minimum": 1, "default": 20 },
         "maxRetriesOnError": { "type": "integer", "minimum": 0, "default": 2 },
         "limitWaitMinutes": { "type": "integer", "minimum": 1, "default": 30 },
-        "resetBufferMinutes": { "type": "integer", "minimum": 0, "default": 2 }
+        "resetBufferMinutes": { "type": "integer", "minimum": 0, "default": 2 },
+        "completionCheck": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), inject the [[TASK_COMPLETE]] / [[TASK_BLOCKED]] instructions and resume the session until a marker appears (stall guard applies). When false ('simple mode'), send the prompt verbatim and mark the task done after the first run that exits OK; only a usage limit triggers a resume. Overridable per task via tasks[].completionCheck."
+        },
+        "maxStalls": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Only used when completionCheck is true. After this many consecutive OK runs that repeat the same response without a completion marker, the task fails with a 'no progress' reason."
+        }
       }
     },
     "tasks": {
@@ -37,6 +48,10 @@
             "description": "Reasoning effort. Allowed values depend on cli (see the per-cli rules below). Use null or omit the field when the CLI/model does not support effort."
           },
           "prompt": { "type": "string", "minLength": 1 },
+          "completionCheck": {
+            "type": "boolean",
+            "description": "Per-task override of settings.completionCheck. true keeps the [[TASK_COMPLETE]] marker workflow; false sends this task's prompt verbatim and marks it done after the first OK run (only a usage limit resumes it)."
+          },
           "extraArgs": {
             "oneOf": [
               { "type": "string" },

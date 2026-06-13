@@ -2,6 +2,7 @@ param(
     [string]$QueuePath = (Join-Path $PSScriptRoot 'ai-run-queue.json'),
     [switch]$ValidateOnly,
     [switch]$DryRun,
+    [switch]$ShowRawOutput,
     [switch]$LoadFunctionsOnly
 )
 
@@ -79,6 +80,8 @@ function Read-QueueConfig {
         MaxRetriesOnError = 2
         LimitWaitMinutes  = 30
         ResetBufferMinutes = 2
+        CompletionCheck   = $true
+        MaxStalls         = 2
     }
     $settings = $defaults.Clone()
     $settingsNode = $parsed.PSObject.Properties['settings']
@@ -140,14 +143,22 @@ function Read-QueueConfig {
         if ($t.PSObject.Properties['model'])  { $model  = [string]$t.model }
         if ($t.PSObject.Properties['effort']) { $effort = [string]$t.effort }
 
+        # completionCheck: per-task override beats the global setting, which defaults to true.
+        $completionCheck = [bool]$settings['CompletionCheck']
+        $completionCheckNode = $t.PSObject.Properties['completionCheck']
+        if ($null -ne $completionCheckNode -and $null -ne $completionCheckNode.Value) {
+            $completionCheck = [bool]$completionCheckNode.Value
+        }
+
         $tasks += [pscustomobject]@{
-            Name        = [string]$t.name
-            Cli         = $cli
-            ProjectPath = $projectPath
-            Model       = $model
-            Effort      = $effort
-            Prompt      = [string]$t.prompt
-            ExtraArgs   = $extraArgs
+            Name            = [string]$t.name
+            Cli             = $cli
+            ProjectPath     = $projectPath
+            Model           = $model
+            Effort          = $effort
+            Prompt          = [string]$t.prompt
+            ExtraArgs       = $extraArgs
+            CompletionCheck = $completionCheck
         }
     }
 
@@ -420,46 +431,48 @@ function Wait-UntilClaudeUsageReady {
     }
 }
 
+function Get-CompletionMarkerInstructions {
+    return @"
+IMPORTANT AUTOMATION INSTRUCTIONS:
+1. When and only when this task is fully complete, end your final response with $TaskCompleteMarker as (or at the end of) the very last line:
+$TaskCompleteMarker
+2. If and only if you cannot complete this task, end your final response with this as (or at the end of) the very last line instead, plus a one-line reason:
+$TaskBlockedMarker <one-line reason>
+"@
+}
+
 function Get-TaskPromptWithCompletionMarker {
     param($Task)
+
+    # Simple mode: send the prompt verbatim, nothing appended.
+    if (-not $Task.CompletionCheck) {
+        return [string]$Task.Prompt
+    }
 
     return @"
 $($Task.Prompt)
 
-IMPORTANT AUTOMATION INSTRUCTIONS:
-1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
-$TaskCompleteMarker
-2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
-$TaskBlockedMarker <one-line reason>
+$(Get-CompletionMarkerInstructions)
 "@
 }
 
 function Get-ResumePrompt {
     param($Task)
 
+    # The marker block is only appended when completion checking is on (Task 2).
+    $markerBlock = if ($Task.CompletionCheck) { "`n`n" + (Get-CompletionMarkerInstructions) } else { '' }
+
     if ($Task.Cli -eq 'gemini') {
         return @"
 You were interrupted partway through the following task. Inspect the current state of the working directory to see what is already done. Do not redo completed work; continue from where things stand.
 
 Original task:
-$($Task.Prompt)
-
-IMPORTANT AUTOMATION INSTRUCTIONS:
-1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
-$TaskCompleteMarker
-2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
-$TaskBlockedMarker <one-line reason>
+$($Task.Prompt)$markerBlock
 "@
     }
 
     return @"
-Continue the previous task in this same session from where you stopped. Do not restart from scratch.
-
-IMPORTANT AUTOMATION INSTRUCTIONS:
-1. When and only when this task is fully complete, end your final response with exactly this as the very last line:
-$TaskCompleteMarker
-2. If and only if you cannot complete this task, end your final response with this as the very last line instead, plus a one-line reason:
-$TaskBlockedMarker <one-line reason>
+Continue the previous task in this same session from where you stopped. Do not restart from scratch.$markerBlock
 "@
 }
 
@@ -663,10 +676,15 @@ function Get-MarkerStatus {
     if ($lines.Count -eq 0) { return @{ Status = 'None'; Reason = $null } }
     $last = [string]$lines[-1]
 
-    if ($last -eq $TaskCompleteMarker) { return @{ Status = 'Done'; Reason = $null } }
-    if ($last.StartsWith($TaskBlockedMarker)) {
-        return @{ Status = 'Blocked'; Reason = $last.Substring($TaskBlockedMarker.Length).Trim() }
+    # Loosened detection (Task 2.2): the marker only has to be CONTAINED in the last
+    # non-empty line, not be the whole line. Blocked is checked first so a line that
+    # mentions both markers is treated as blocked.
+    $blockedIndex = $last.IndexOf($TaskBlockedMarker)
+    if ($blockedIndex -ge 0) {
+        $reason = $last.Substring($blockedIndex + $TaskBlockedMarker.Length).Trim()
+        return @{ Status = 'Blocked'; Reason = $reason }
     }
+    if ($last.Contains($TaskCompleteMarker)) { return @{ Status = 'Done'; Reason = $null } }
     return @{ Status = 'None'; Reason = $null }
 }
 
@@ -733,6 +751,29 @@ function Get-CliArguments {
 function New-CliResult {
     param([bool]$Ok, [bool]$IsLimit, [string]$Text, [string]$SessionId, [string]$ErrorText)
     return @{ Ok = $Ok; IsLimit = $IsLimit; Text = $Text; SessionId = $SessionId; ErrorText = $ErrorText }
+}
+
+# Decide what to show on the console for a run (Task 2b). The full raw output still goes to
+# the per-task output file; the console shows only the agent's parsed response (or the error),
+# falling back to the raw output when there is nothing parsed (so failures stay debuggable).
+function Get-ConsoleOutputText {
+    param(
+        $Result,
+        [string]$RawOutput,
+        [switch]$ShowRawOutput
+    )
+
+    if ($ShowRawOutput) { return $RawOutput }
+
+    if ($Result.Ok) {
+        if (-not [string]::IsNullOrEmpty($Result.Text)) { return $Result.Text }
+    }
+    else {
+        if (-not [string]::IsNullOrEmpty($Result.ErrorText)) { return $Result.ErrorText }
+        if (-not [string]::IsNullOrEmpty($Result.Text)) { return $Result.Text }
+    }
+
+    return $RawOutput
 }
 
 function ConvertFrom-JsonTolerant {
@@ -876,12 +917,22 @@ function Invoke-CliTaskRun {
     $processResult = Invoke-NativeProcess -Command $Task.Cli -Arguments $arguments -WorkingDirectory $Task.ProjectPath -StdinText $prompt
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
+
+    # The FULL raw output always goes to the per-task output file (UTF-8, no BOM).
     if (-not [string]::IsNullOrWhiteSpace($outputText)) {
         [System.IO.File]::AppendAllText($outputFilePath, $outputText + [Environment]::NewLine, $utf8NoBom)
-        Write-Host $outputText
     }
 
-    return ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode
+    # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
+    $result = ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode
+
+    $consoleText = Get-ConsoleOutputText -Result $result -RawOutput $outputText -ShowRawOutput:$ShowRawOutput
+    if (-not [string]::IsNullOrWhiteSpace($consoleText)) {
+        Write-Host "--- agent response ---"
+        Write-Host $consoleText
+    }
+
+    return $result
 }
 
 function Get-ResetTimeFromErrorText {
@@ -1014,6 +1065,8 @@ try {
         $runCount = 0
         $errorRetryCount = 0
         $mustWaitForFreshSession = $false
+        $stallCount = 0
+        $previousNoMarkerText = $null
 
         while ($true) {
             $runCount++
@@ -1046,22 +1099,6 @@ try {
                 $result.SessionId | Set-Content -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Encoding UTF8
             }
 
-            $marker = Get-MarkerStatus -Text $result.Text
-            if ($marker.Status -eq 'Done') {
-                Save-TaskDoneMarker -TaskIndex $i
-                Write-Step "Task $taskNumber completed"
-                break
-            }
-            if ($marker.Status -eq 'Blocked') {
-                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason
-                Write-Step "Task $taskNumber reported itself BLOCKED: $($marker.Reason)"
-                if ($config.Settings.StopOnError) {
-                    throw "Task $taskNumber is blocked: $($marker.Reason)"
-                }
-                Write-Host "stopOnError=false; moving to the next task."
-                break
-            }
-
             # Gemini-only: the installed CLI version rejected --resume — drop the session and retry without it.
             if ($task.Cli -eq 'gemini' -and -not $result.Ok -and
                 $result.ErrorText -match '(?i)unknown option.*resume|not supported in non-interactive|unexpected argument|too many arguments|invalid.*resume') {
@@ -1070,6 +1107,7 @@ try {
                 continue
             }
 
+            # A usage limit always pauses and resumes, in both simple and completion-check modes.
             if ($result.IsLimit) {
                 $mustWaitForFreshSession = $true
                 Write-Step "Task $taskNumber paused by a usage limit on $($task.Cli)"
@@ -1090,6 +1128,48 @@ try {
                 Write-Host "stopOnError=false; abandoning this task and moving to the next one."
                 break
             }
+
+            # Simple mode (completionCheck:false): the first OK run (no limit, no error) is done.
+            # No marker parsing, no stall guard.
+            if (-not $task.CompletionCheck) {
+                Save-TaskDoneMarker -TaskIndex $i
+                Write-Step "Task $taskNumber completed"
+                break
+            }
+
+            $marker = Get-MarkerStatus -Text $result.Text
+            if ($marker.Status -eq 'Done') {
+                Save-TaskDoneMarker -TaskIndex $i
+                Write-Step "Task $taskNumber completed"
+                break
+            }
+            if ($marker.Status -eq 'Blocked') {
+                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason
+                Write-Step "Task $taskNumber reported itself BLOCKED: $($marker.Reason)"
+                if ($config.Settings.StopOnError) {
+                    throw "Task $taskNumber is blocked: $($marker.Reason)"
+                }
+                Write-Host "stopOnError=false; moving to the next task."
+                break
+            }
+
+            # No-progress guard: an OK run with no marker whose text repeats the previous
+            # no-marker response counts as a stall. After maxStalls stalls, fail the task.
+            $currentText = if ($null -ne $result.Text) { ([string]$result.Text).Trim() } else { '' }
+            if ($null -ne $previousNoMarkerText -and $currentText -eq $previousNoMarkerText) {
+                $stallCount++
+                if ($stallCount -ge $config.Settings.MaxStalls) {
+                    $stallReason = 'no progress: agent repeated the same response without a completion marker'
+                    Save-TaskFailedMarker -TaskIndex $i -Reason $stallReason
+                    Write-Step "Task $taskNumber failed: $stallReason"
+                    if ($config.Settings.StopOnError) {
+                        throw "Task $taskNumber failed: $stallReason"
+                    }
+                    Write-Host "stopOnError=false; abandoning this task and moving to the next one."
+                    break
+                }
+            }
+            $previousNoMarkerText = $currentText
 
             # Ran fine, no marker: the agent stopped early. Resume to push it onward.
             $mustWaitForFreshSession = $false
