@@ -747,11 +747,9 @@ run_resume_simple_mode_test() {
 
   mkdir -p "$bin_dir" "$project_dir" "$received_dir"
 
-  # In simple mode the first OK run completes the task, so a resume would never happen via the
-  # main loop. To exercise the simple-mode RESUME prompt directly, seed a saved session id so the
-  # very first invocation is a Resume, and force a limit on run 1 so a second (resume) run records
-  # the prompt. Simpler: drive Get-ResumePrompt-equivalent by making run 1 hit a usage limit so the
-  # runner pauses and resumes; the resume run then records its prompt. We keep completionCheck:false.
+  # In simple mode the first OK run completes the task, so a resume only happens after a pause.
+  # Force run 1 to hit a usage limit so the runner pauses and resumes; the resume run then records
+  # its prompt, letting us assert the simple-mode resume prompt. We keep completionCheck:false.
   cat > "$bin_dir/claude" <<EOF
 #!/usr/bin/env bash
 if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
