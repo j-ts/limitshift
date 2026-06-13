@@ -317,7 +317,7 @@ To re-run **one** finished task by hand, delete its `status/task-NN.done` file. 
 
 ## Completion marker
 
-When `completionCheck` is `true`, the runner appends `[[TASK_COMPLETE]]` instructions to every prompt automatically. A task is only marked done when the final non-empty line is exactly `[[TASK_COMPLETE]]`.
+When `completionCheck` is `true`, the runner appends `[[TASK_COMPLETE]]` instructions to every prompt automatically. A task is marked done when the **last non-empty line of the response contains** `[[TASK_COMPLETE]]` — so a line like `OK[[TASK_COMPLETE]]` or the marker on its own both count. The marker only counts on that final line, so the agent can mention it earlier in its reply without accidentally completing the task.
 
 If the agent cannot finish, it should end with:
 
