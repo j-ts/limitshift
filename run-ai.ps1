@@ -24,6 +24,9 @@ $OutputStatePath = Join-Path $RunnerStatePath "outputs"
 $StatusStatePath = Join-Path $RunnerStatePath "status"
 $LogPath = Join-Path $RunnerStatePath "ai-run-log.txt"
 $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
+$RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
+$StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
+$RunsCsvHeader = "timestamp,task,run,mode,exit,status"
 
 $FreshSessionThresholdPercent = 0
 $PollSecondsAfterResetPassed = 60
@@ -52,6 +55,63 @@ function Initialize-RunnerState {
     New-DirectoryIfMissing -Path $SessionStatePath
     New-DirectoryIfMissing -Path $OutputStatePath
     New-DirectoryIfMissing -Path $StatusStatePath
+
+    # Task 4: drop a self-explaining README inside the state folder (overwritten every init),
+    # and make sure runs.csv has its header row.
+    Write-StateReadme
+    Initialize-RunsCsv
+}
+
+function Write-StateReadme {
+    $readme = @"
+This folder holds LimitShift's saved state for one queue file.
+It is created and maintained automatically. You can delete it at any time.
+
+What is in here:
+  sessions/   Saved CLI session / thread ids so a task can resume the SAME conversation.
+  outputs/    The full raw output of every run (one file per task: task-NN-<slug>-output.txt).
+  status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
+  runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
+  ai-run-log.txt        The full runner transcript.
+  claude-usage-last.txt The last Claude /usage report.
+
+Re-running:
+  Delete this whole folder to start completely from scratch.
+  Delete status/task-NN.done to force ONE task to run again.
+  Editing a task's prompt, cli, projectPath, model, effort, or extraArgs now AUTO-INVALIDATES
+  its done marker: the runner notices the change and re-runs that task with a fresh session.
+"@
+    Set-Content -LiteralPath $StateReadmePath -Value $readme -Encoding UTF8
+}
+
+function Initialize-RunsCsv {
+    if (-not (Test-Path -LiteralPath $RunsCsvPath)) {
+        Set-Content -LiteralPath $RunsCsvPath -Value $RunsCsvHeader -Encoding UTF8
+    }
+}
+
+# Task 4: append one CSV row per CLI run. Fields are escaped with ConvertTo-CsvField so a task
+# name containing commas or quotes cannot break the column layout.
+function Add-RunsCsvRow {
+    param(
+        [string]$Task,
+        [int]$Run,
+        [string]$Mode,
+        $Exit,
+        [string]$Status
+    )
+
+    $row = @(
+        (ConvertTo-CsvField -Value ((Get-Date).ToString('s'))),
+        (ConvertTo-CsvField -Value $Task),
+        (ConvertTo-CsvField -Value ([string]$Run)),
+        (ConvertTo-CsvField -Value $Mode),
+        (ConvertTo-CsvField -Value ([string]$Exit)),
+        (ConvertTo-CsvField -Value $Status)
+    ) -join ','
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::AppendAllText($RunsCsvPath, $row + [Environment]::NewLine, $utf8NoBom)
 }
 
 $AllowedClis = @('claude', 'codex', 'gemini')
@@ -190,6 +250,69 @@ function Get-TaskKey {
     return ("task-{0:d2}" -f ($TaskIndex + 1))
 }
 
+# Task 4: slugify a task name for the output filename. Keep the original case, replace any
+# run of characters outside [A-Za-z0-9._-] with a single dash, trim leading/trailing dashes,
+# and cap the length at 40. Mirrored byte-for-byte in run-ai.sh (get_task_slug).
+function Get-TaskSlug {
+    param([string]$Name)
+
+    if ($null -eq $Name) { $Name = '' }
+    $slug = [regex]::Replace($Name, '[^A-Za-z0-9._-]+', '-')
+    $slug = $slug.Trim('-')
+    if ($slug.Length -gt 40) { $slug = $slug.Substring(0, 40).Trim('-') }
+    if ([string]::IsNullOrEmpty($slug)) { $slug = 'task' }
+    return $slug
+}
+
+# Task 4 canonical task fingerprint.
+# CANONICAL FORMAT (must match run-ai.sh get_task_fingerprint exactly so a queue is portable):
+#   fields, in this exact order:  Name, Cli, ProjectPath, Model, Effort, Prompt, ExtraArgs-joined
+#   ExtraArgs-joined = the args joined by a single space (" ").
+#   null/empty Model/Effort contribute an empty string.
+#   joined with the ASCII unit separator U+001F (0x1F), which is unlikely to appear in any value.
+#   SHA256 of the UTF-8 bytes of that string, rendered as lowercase hex.
+function Get-TaskFingerprint {
+    param($Task)
+
+    $us = [char]0x1f
+    $extraArgs = @($Task.ExtraArgs)
+    $extraJoined = ($extraArgs -join ' ')
+    $model  = if ($null -ne $Task.Model)  { [string]$Task.Model }  else { '' }
+    $effort = if ($null -ne $Task.Effort) { [string]$Task.Effort } else { '' }
+
+    $canonical = @(
+        [string]$Task.Name,
+        [string]$Task.Cli,
+        [string]$Task.ProjectPath,
+        $model,
+        $effort,
+        [string]$Task.Prompt,
+        $extraJoined
+    ) -join $us
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonical)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash($bytes)
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return (([System.BitConverter]::ToString($hash)) -replace '-', '').ToLowerInvariant()
+}
+
+# Task 4: minimal RFC-4180-style CSV field quoting. A field is wrapped in double quotes (and
+# its embedded quotes doubled) only when it contains a comma, a quote, or a newline.
+function ConvertTo-CsvField {
+    param([string]$Value)
+
+    if ($null -eq $Value) { $Value = '' }
+    if ($Value -match '[",\r\n]') {
+        return '"' + ($Value -replace '"', '""') + '"'
+    }
+    return $Value
+}
+
 function Get-TaskSessionFilePath {
     param([int]$TaskIndex)
 
@@ -198,10 +321,16 @@ function Get-TaskSessionFilePath {
 }
 
 function Get-TaskOutputFilePath {
-    param([int]$TaskIndex)
+    param(
+        [int]$TaskIndex,
+        $Task
+    )
 
+    # Task 4: name the output file with the zero-padded index AND a slug of the task name,
+    # e.g. task-03-fix-the-thing-output.txt. Identical pattern in run-ai.sh.
     $taskKey = Get-TaskKey -TaskIndex $TaskIndex
-    return Join-Path $OutputStatePath "$taskKey-output.txt"
+    $slug = if ($null -ne $Task) { Get-TaskSlug -Name $Task.Name } else { 'task' }
+    return Join-Path $OutputStatePath "$taskKey-$slug-output.txt"
 }
 
 function Get-TaskDoneFilePath {
@@ -241,11 +370,25 @@ function Test-TaskAlreadyDone {
     return (Test-Path -LiteralPath $doneFilePath)
 }
 
-function Save-TaskDoneMarker {
+# Task 4: read the fingerprint line out of a .done file (line 2 of the timestamp/fingerprint
+# pair). Returns $null when the file is missing or has no fingerprint line (older markers).
+function Get-SavedDoneFingerprint {
     param([int]$TaskIndex)
 
     $doneFilePath = Get-TaskDoneFilePath -TaskIndex $TaskIndex
-    (Get-Date).ToString("s") | Set-Content -LiteralPath $doneFilePath -Encoding UTF8
+    if (-not (Test-Path -LiteralPath $doneFilePath)) { return $null }
+    $lines = @(Get-Content -LiteralPath $doneFilePath)
+    if ($lines.Count -ge 2) { return ([string]$lines[1]).Trim() }
+    return $null
+}
+
+function Save-TaskDoneMarker {
+    param([int]$TaskIndex, $Task)
+
+    # Task 4: the .done file stores two lines — an ISO timestamp then the task fingerprint.
+    $doneFilePath = Get-TaskDoneFilePath -TaskIndex $TaskIndex
+    $fingerprint = Get-TaskFingerprint -Task $Task
+    @((Get-Date).ToString("s"), $fingerprint) | Set-Content -LiteralPath $doneFilePath -Encoding UTF8
 }
 
 function Convert-ClaudeResetTextToDateTime {
@@ -687,10 +830,13 @@ function Get-MarkerStatus {
 }
 
 function Save-TaskFailedMarker {
-    param([int]$TaskIndex, [string]$Reason)
+    param([int]$TaskIndex, [string]$Reason, $Task)
 
+    # Task 4: store timestamp<TAB>fingerprint<TAB>reason. The reason keeps its own column so the
+    # existing reason text is preserved verbatim. The fingerprint is empty when no task is given.
     $taskKey = Get-TaskKey -TaskIndex $TaskIndex
-    "$((Get-Date).ToString('s'))  $Reason" |
+    $fingerprint = if ($null -ne $Task) { Get-TaskFingerprint -Task $Task } else { '' }
+    "$((Get-Date).ToString('s'))`t$fingerprint`t$Reason" |
         Set-Content -LiteralPath (Join-Path $StatusStatePath "$taskKey.failed") -Encoding UTF8
 }
 
@@ -885,7 +1031,7 @@ function Invoke-CliTaskRun {
         [string]$SessionId
     )
 
-    $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex
+    $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex -Task $Task
     if ($Mode -eq 'New' -and (Test-Path -LiteralPath $outputFilePath)) {
         Remove-Item -LiteralPath $outputFilePath -Force
     }
@@ -1055,9 +1201,20 @@ try {
         $taskNumber = $i + 1
 
         if (Test-TaskAlreadyDone -TaskIndex $i) {
-            Write-Step "Skipping task $taskNumber of $($Tasks.Count): $($task.Name)"
-            Write-Host "Task is already marked as done."
-            continue
+            # Task 4: a done marker only counts when its stored fingerprint still matches the
+            # current task. If the task's prompt/cli/projectPath/model/effort/extraArgs changed,
+            # invalidate the marker (re-run) and drop the stale session id so it starts fresh.
+            $savedFingerprint = Get-SavedDoneFingerprint -TaskIndex $i
+            $currentFingerprint = Get-TaskFingerprint -Task $task
+            if ($savedFingerprint -eq $currentFingerprint) {
+                Write-Step "Skipping task $taskNumber of $($Tasks.Count): $($task.Name)"
+                Write-Host "Task is already marked as done."
+                continue
+            }
+            Write-Step "Re-running task $taskNumber of $($Tasks.Count): $($task.Name)"
+            Write-Host "Task $taskNumber changed since last run; previous done marker invalidated."
+            Remove-Item -LiteralPath (Get-TaskDoneFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
         }
 
         $runCount = 0
@@ -1079,11 +1236,13 @@ try {
             $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
 
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
+                $runMode = 'New'
                 $sessionId = $null
                 if ($task.Cli -eq 'claude') { $sessionId = New-TaskSessionId -TaskIndex $i }
                 $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId
             }
             else {
+                $runMode = 'Resume'
                 $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId
             }
 
@@ -1091,6 +1250,26 @@ try {
                 Write-Step "Dry run for task $taskNumber recorded the command only"
                 break
             }
+
+            # Task 4: classify this run's outcome and append one runs.csv row. The status maps the
+            # parsed result to a short label (Limit/Error/Done/Blocked/NoMarker) consistently with
+            # run-ai.sh. In simple mode an OK run is Done.
+            if ($result.IsLimit) {
+                $runStatus = 'Limit'
+            }
+            elseif (-not $result.Ok) {
+                $runStatus = 'Error'
+            }
+            elseif (-not $task.CompletionCheck) {
+                $runStatus = 'Done'
+            }
+            else {
+                $runMarker = Get-MarkerStatus -Text $result.Text
+                if ($runMarker.Status -eq 'Done')        { $runStatus = 'Done' }
+                elseif ($runMarker.Status -eq 'Blocked') { $runStatus = 'Blocked' }
+                else                                     { $runStatus = 'NoMarker' }
+            }
+            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus
 
             # Persist the session id the CLI reported (this is how codex thread ids get captured)
             if (-not [string]::IsNullOrWhiteSpace($result.SessionId)) {
@@ -1130,19 +1309,19 @@ try {
             # Simple mode (completionCheck:false): the first OK run (no limit, no error) is done.
             # No marker parsing, no stall guard.
             if (-not $task.CompletionCheck) {
-                Save-TaskDoneMarker -TaskIndex $i
+                Save-TaskDoneMarker -TaskIndex $i -Task $task
                 Write-Step "Task $taskNumber completed"
                 break
             }
 
             $marker = Get-MarkerStatus -Text $result.Text
             if ($marker.Status -eq 'Done') {
-                Save-TaskDoneMarker -TaskIndex $i
+                Save-TaskDoneMarker -TaskIndex $i -Task $task
                 Write-Step "Task $taskNumber completed"
                 break
             }
             if ($marker.Status -eq 'Blocked') {
-                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason
+                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
                 Write-Step "Task $taskNumber reported itself BLOCKED: $($marker.Reason)"
                 if ($config.Settings.StopOnError) {
                     throw "Task $taskNumber is blocked: $($marker.Reason)"
@@ -1158,7 +1337,7 @@ try {
                 $stallCount++
                 if ($stallCount -ge $config.Settings.MaxStalls) {
                     $stallReason = 'no progress: agent repeated the same response without a completion marker'
-                    Save-TaskFailedMarker -TaskIndex $i -Reason $stallReason
+                    Save-TaskFailedMarker -TaskIndex $i -Reason $stallReason -Task $task
                     Write-Step "Task $taskNumber failed: $stallReason"
                     if ($config.Settings.StopOnError) {
                         throw "Task $taskNumber failed: $stallReason"

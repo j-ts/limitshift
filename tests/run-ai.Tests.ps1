@@ -331,6 +331,80 @@ Describe 'run-ai.ps1' {
         }
     }
 
+    Context 'Get-TaskSlug (Task 4 output naming)' {
+        It 'lowercases nothing but replaces non [A-Za-z0-9._-] runs with single dashes and trims' {
+            Get-TaskSlug -Name 'Clean Output Task' | Should -Be 'Clean-Output-Task'
+        }
+
+        It 'collapses punctuation and whitespace to single dashes' {
+            Get-TaskSlug -Name 'fix: the, thing!!' | Should -Be 'fix-the-thing'
+        }
+
+        It 'keeps dots, underscores and hyphens' {
+            Get-TaskSlug -Name 'a.b_c-d' | Should -Be 'a.b_c-d'
+        }
+
+        It 'caps the slug length at 40 characters' {
+            $name = ('x' * 80)
+            (Get-TaskSlug -Name $name).Length | Should -BeLessOrEqual 40
+        }
+
+        It 'falls back to "task" when the name has no usable characters' {
+            Get-TaskSlug -Name '   ***   ' | Should -Be 'task'
+        }
+    }
+
+    Context 'Get-TaskFingerprint (Task 4 canonical fingerprint)' {
+        It 'is stable for identical task content' {
+            $task = [pscustomobject]@{
+                Name = 'a'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = 'm'; Effort = 'high'; Prompt = 'do it'; ExtraArgs = @('--x', '--y')
+            }
+            $fp1 = Get-TaskFingerprint -Task $task
+            $fp2 = Get-TaskFingerprint -Task $task
+            $fp1 | Should -Be $fp2
+            $fp1 | Should -Match '^[0-9a-f]{64}$'
+        }
+
+        It 'changes when the prompt changes' {
+            $a = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $b = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='Y'; ExtraArgs=@() }
+            (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
+        }
+
+        It 'changes when the cli changes' {
+            $a = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $b = [pscustomobject]@{ Name='a'; Cli='codex';  ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@() }
+            (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
+        }
+
+        It 'changes when the projectPath changes' {
+            $a = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p1'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $b = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p2'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@() }
+            (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
+        }
+
+        It 'changes when extraArgs change but ignores how the fields are ordered internally' {
+            $a = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@('--a') }
+            $b = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@('--a','--b') }
+            (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
+        }
+    }
+
+    Context 'CSV escaping (Task 4 runs.csv)' {
+        It 'quotes a field containing a comma' {
+            ConvertTo-CsvField -Value 'a,b' | Should -Be '"a,b"'
+        }
+
+        It 'doubles embedded double-quotes and wraps in quotes' {
+            ConvertTo-CsvField -Value 'say "hi"' | Should -Be '"say ""hi"""'
+        }
+
+        It 'leaves a plain field unquoted' {
+            ConvertTo-CsvField -Value 'plain' | Should -Be 'plain'
+        }
+    }
+
     Context 'Get-CliArguments' {
         It 'builds a claude new-session command without the prompt in the args' {
             $task = [pscustomobject]@{
@@ -694,7 +768,7 @@ exit 0
                 $statusPath = Join-Path $root '.ai-runner-queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
 
-                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-output.txt'
+                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-gemini-warning-output.txt'
                 Test-Path -LiteralPath $outputFilePath | Should -BeTrue
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match 'say hi'
@@ -951,7 +1025,7 @@ exit 0
                 $run.Output | Should -Not -Match '"result"'
 
                 # The raw JSON still lands in the per-task output file.
-                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-output.txt'
+                $outputFilePath = Join-Path $root '.ai-runner-queue\outputs\task-01-clean-output-task-output.txt'
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match '"session_id"'
             }
@@ -1010,6 +1084,167 @@ exit 0
 
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match '"session_id"'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+    }
+
+    Context 'State lifecycle (Task 4)' {
+        BeforeAll {
+            function New-FingerprintFixture {
+                param([string]$Prompt = 'just do this verbatim')
+
+                $root = New-TestRoot
+                $projectPath = Join-Path $root 'project'
+                $binPath = Join-Path $root 'bin'
+                New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+                New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+                $claudePath = Join-Path $binPath 'claude.ps1'
+                @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+                $queuePath = Join-Path $root 'queue.json'
+                Write-TestQueue -Path $queuePath -Config @{
+                    settings = @{
+                        stopOnError        = $true
+                        maxRunsPerTask     = 3
+                        maxRetriesOnError  = 0
+                        limitWaitMinutes   = 1
+                        resetBufferMinutes = 0
+                    }
+                    tasks = @(
+                        @{ name = 'fp task'; cli = 'claude'; projectPath = $projectPath; prompt = $Prompt }
+                    )
+                }
+
+                return [pscustomobject]@{ Root = $root; BinPath = $binPath; QueuePath = $queuePath }
+            }
+        }
+
+        It 'writes a fingerprint into the .done file and a runs.csv row and a state _README.txt' {
+            $fx = New-FingerprintFixture
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$($fx.BinPath);$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $run.ExitCode | Should -Be 0
+
+                $donePath = Join-Path $fx.Root '.ai-runner-queue\status\task-01.done'
+                Test-Path -LiteralPath $donePath | Should -BeTrue
+                $doneLines = @(Get-Content -LiteralPath $donePath)
+                # Two lines: timestamp then a 64-hex fingerprint.
+                $doneLines.Count | Should -Be 2
+                $doneLines[1] | Should -Match '^[0-9a-f]{64}$'
+
+                $readmePath = Join-Path $fx.Root '.ai-runner-queue\_README.txt'
+                Test-Path -LiteralPath $readmePath | Should -BeTrue
+                (Get-Content -LiteralPath $readmePath -Raw) | Should -Match 'delete this whole folder'
+
+                $csvPath = Join-Path $fx.Root '.ai-runner-queue\runs.csv'
+                Test-Path -LiteralPath $csvPath | Should -BeTrue
+                $csvLines = @(Get-Content -LiteralPath $csvPath)
+                $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status'
+                @($csvLines | Where-Object { $_ -match 'Done' }).Count | Should -BeGreaterThan 0
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 're-runs a done task when the prompt changed (stale fingerprint), invalidating the done marker and the session id' {
+            $fx = New-FingerprintFixture -Prompt 'original prompt'
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$($fx.BinPath);$oldPath"
+                $first = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $first.ExitCode | Should -Be 0
+                $donePath = Join-Path $fx.Root '.ai-runner-queue\status\task-01.done'
+                Test-Path -LiteralPath $donePath | Should -BeTrue
+                $sessionPath = Join-Path $fx.Root '.ai-runner-queue\sessions\task-01-session-id.txt'
+                Test-Path -LiteralPath $sessionPath | Should -BeTrue
+
+                # Change the prompt in the queue, then re-run.
+                $cfg = Get-Content -LiteralPath $fx.QueuePath -Raw | ConvertFrom-Json
+                $cfg.tasks[0].prompt = 'a completely different prompt'
+                $cfg | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $fx.QueuePath -Encoding UTF8
+
+                $second = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $second.ExitCode | Should -Be 0
+                $second.Output | Should -Match 'changed since last run'
+                $second.Output | Should -Not -Match 'already marked as done'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 'skips a done task when nothing changed (fingerprint matches)' {
+            $fx = New-FingerprintFixture -Prompt 'unchanged prompt'
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$($fx.BinPath);$oldPath"
+                $first = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $first.ExitCode | Should -Be 0
+
+                $second = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $second.ExitCode | Should -Be 0
+                $second.Output | Should -Match 'already marked as done'
+                $second.Output | Should -Not -Match 'changed since last run'
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+
+        It 're-runs a done task when the cli changed' {
+            # Stub both claude and codex so either cli completes the run.
+            $fx = New-FingerprintFixture -Prompt 'same prompt'
+            $codexPath = Join-Path $fx.BinPath 'codex.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"thr-1"}'
+Write-Output '{"type":"item.completed","item":{"type":"agent_message","text":"did it\n[[TASK_COMPLETE]]"}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$($fx.BinPath);$oldPath"
+                $first = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $first.ExitCode | Should -Be 0
+
+                $cfg = Get-Content -LiteralPath $fx.QueuePath -Raw | ConvertFrom-Json
+                $cfg.tasks[0].cli = 'codex'
+                $cfg | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $fx.QueuePath -Encoding UTF8
+
+                $second = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
+                )
+                $second.ExitCode | Should -Be 0
+                $second.Output | Should -Match 'changed since last run'
             }
             finally {
                 $env:PATH = $oldPath

@@ -154,7 +154,7 @@ Use a custom queue path:
 ./run-ai.sh --queue ./my-queue.json
 ```
 
-The console shows only the agent's response text (under a `--- agent response ---` header); the full raw CLI JSON is still written to `outputs/task-NN-*.txt`. To print the raw JSON to the console instead (useful for debugging), use:
+The console shows only the agent's response text (under a `--- agent response ---` header); the full raw CLI JSON is still written to `outputs/task-NN-<slug>-output.txt`. To print the raw JSON to the console instead (useful for debugging), use:
 
 ```powershell
 .\run-ai.ps1 -ShowRawOutput
@@ -170,16 +170,22 @@ Keep the machine awake for long runs:
 - macOS: `caffeinate -i ./run-ai.sh`
 - Linux: `systemd-inhibit ./run-ai.sh`
 
-## State, logs, and re-running
+## State & re-running
 
-LimitShift creates `.ai-runner-<queue-name>/` next to the queue file:
+LimitShift keeps everything it remembers in one folder, `.ai-runner-<queue-name>/`, created next to your queue file. It is built and maintained automatically, and a plain-language `_README.txt` explaining the layout is dropped inside it on every run.
 
-- `sessions/` stores session or thread ids
-- `outputs/` stores captured CLI output
-- `status/` stores `.done` and `.failed` markers
-- `ai-run-log.txt` stores the runner transcript
+Where state lives and what is in it:
 
-To re-run one finished task, delete its `.done` file. To start over completely, delete the whole `.ai-runner-<queue-name>/` folder.
+- `sessions/` — saved CLI session / thread ids so a task can resume the **same** conversation.
+- `outputs/` — the full raw output of every run, one file per task named `task-NN-<slug>-output.txt` (zero-padded task number plus a slug of the task name).
+- `status/` — per-task markers: `task-NN.done` when a task finished, `task-NN.failed` when it blocked or failed.
+- `runs.csv` — one row per CLI run with `timestamp, task, run, mode (New/Resume), exit, status`. Open it in any spreadsheet to see what happened across the whole queue.
+- `ai-run-log.txt` — the full runner transcript.
+- `_README.txt` — the same explanation, right next to the data.
+
+Editing a task auto-invalidates its done marker. When you change a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` and run again, LimitShift notices the change (it stores a fingerprint of those fields inside the `.done` file), throws away the stale `.done` marker and the old session id, and **re-runs that task with a fresh session**. Tasks you did not touch keep being skipped.
+
+To re-run **one** finished task by hand, delete its `status/task-NN.done` file. To start **completely over**, delete the whole `.ai-runner-<queue-name>/` folder. The entire state folder is safe to delete at any time — LimitShift recreates whatever it needs on the next run.
 
 ## Completion marker
 

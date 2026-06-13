@@ -13,4 +13,11 @@
 
 Keep the machine awake for long runs. On macOS, for example: `caffeinate -i ./run-ai.sh`.
 
-Logs, session ids, outputs, and task markers land in `.ai-runner-ai-run-queue/` next to your queue file.
+## State & re-running
+
+All of LimitShift's memory lives in one folder, `.ai-runner-ai-run-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `ai-run-log.txt`, and a `_README.txt` describing it all.
+
+- Editing a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` **auto-invalidates** its done marker, so that task re-runs with a fresh session next time.
+- To re-run one finished task, delete its `status/task-NN.done` file.
+- To start over completely, delete the whole `.ai-runner-ai-run-queue/` folder.
+- The entire state folder is **safe to delete at any time** — it is rebuilt on the next run.

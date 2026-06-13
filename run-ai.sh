@@ -65,6 +65,9 @@ OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"
 STATUS_STATE_PATH="$RUNNER_STATE_PATH/status"
 LOG_PATH="$RUNNER_STATE_PATH/ai-run-log.txt"
 USAGE_PATH="$RUNNER_STATE_PATH/claude-usage-last.txt"
+RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
+STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
+RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status"
 
 FRESH_SESSION_THRESHOLD_PERCENT=0
 POLL_SECONDS_AFTER_RESET_PASSED=60
@@ -501,6 +504,79 @@ get_task_key() {
   printf 'task-%02d' $((idx + 1))
 }
 
+# Task 4: slugify a task name for the output filename. Keep the original case, replace any run
+# of characters outside [A-Za-z0-9._-] with a single dash, trim leading/trailing dashes, and cap
+# the length at 40. Mirrors run-ai.ps1 Get-TaskSlug byte-for-byte.
+get_task_slug() {
+  local name="$1" slug
+  slug=$(printf '%s' "$name" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')
+  slug=${slug:0:40}
+  slug=$(printf '%s' "$slug" | sed -E 's/-+$//')
+  if [ -z "$slug" ]; then
+    slug="task"
+  fi
+  printf '%s' "$slug"
+}
+
+# Task 4: pick whichever SHA-256 tool exists (sha256sum on Linux/Git-Bash, shasum -a 256 on macOS).
+sha256_hex() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# Task 4 canonical task fingerprint.
+# CANONICAL FORMAT (must match run-ai.ps1 Get-TaskFingerprint exactly so a queue is portable):
+#   fields, in this exact order:  name, cli, projectPath, model, effort, prompt, extraArgs-joined
+#   extraArgs-joined = the args joined by a single space (" ").
+#   empty model/effort contribute an empty string.
+#   joined with the ASCII unit separator U+001F (printf '\037'), unlikely to appear in any value.
+#   SHA-256 of the UTF-8 bytes of that string, rendered as lowercase hex.
+get_task_fingerprint() {
+  local idx="$1"
+  local name cli project_path model effort prompt extra_joined us first arg
+  name=$(task_field "$idx" "name")
+  # cli is lowercased to match run-ai.ps1, which stores the cli already lowercased.
+  cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
+  project_path=$(task_field "$idx" "projectPath")
+  model=$(task_field "$idx" "model")
+  effort=$(task_field "$idx" "effort")
+  prompt=$(task_field "$idx" "prompt")
+
+  extra_joined=""
+  first=1
+  while IFS= read -r arg; do
+    if [ "$first" -eq 1 ]; then
+      extra_joined="$arg"
+      first=0
+    else
+      extra_joined="$extra_joined $arg"
+    fi
+  done < <(get_task_extra_args "$idx")
+
+  us=$(printf '\037')
+  printf '%s%s%s%s%s%s%s%s%s%s%s%s%s' \
+    "$name" "$us" "$cli" "$us" "$project_path" "$us" "$model" "$us" "$effort" "$us" "$prompt" "$us" "$extra_joined" \
+    | sha256_hex
+}
+
+# Task 4: minimal RFC-4180-style CSV field quoting. Wrap in double quotes (doubling embedded
+# quotes) only when the value contains a comma, a quote, or a newline. Mirrors ConvertTo-CsvField.
+csv_field() {
+  local value="$1"
+  case "$value" in
+    *,*|*\"*|*$'\n'*)
+      value=${value//\"/\"\"}
+      printf '"%s"' "$value"
+      ;;
+    *)
+      printf '%s' "$value"
+      ;;
+  esac
+}
+
 get_task_session_file_path() {
   local idx="$1" key
   key=$(get_task_key "$idx")
@@ -508,9 +584,12 @@ get_task_session_file_path() {
 }
 
 get_task_output_file_path() {
-  local idx="$1" key
+  local idx="$1" key slug
   key=$(get_task_key "$idx")
-  printf '%s' "$OUTPUT_STATE_PATH/$key.txt"
+  # Task 4: include a slug of the task name, e.g. task-03-fix-the-thing-output.txt.
+  # Identical pattern to run-ai.ps1 Get-TaskOutputFilePath.
+  slug=$(get_task_slug "$(task_field "$idx" "name")")
+  printf '%s' "$OUTPUT_STATE_PATH/$key-$slug-output.txt"
 }
 
 get_task_done_file_path() {
@@ -561,16 +640,31 @@ test_task_already_done() {
 }
 
 save_task_done_marker() {
+  # Task 4: the .done file stores two lines — an ISO timestamp then the task fingerprint.
+  local path fp
+  path=$(get_task_done_file_path "$1")
+  fp=$(get_task_fingerprint "$1")
+  printf '%s\n%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$fp" > "$path"
+}
+
+# Task 4: read the fingerprint line (line 2) out of a .done file. Empty when missing or older.
+get_saved_done_fingerprint() {
   local path
   path=$(get_task_done_file_path "$1")
-  date -u +"%Y-%m-%dT%H:%M:%SZ" > "$path"
+  if [ -f "$path" ]; then
+    sed -n '2p' "$path" | tr -d '\r' | awk '{$1=$1;print}'
+  else
+    printf ''
+  fi
 }
 
 save_task_failed_marker() {
-  local path reason
+  # Task 4: store timestamp<TAB>fingerprint<TAB>reason so the reason text is preserved verbatim.
+  local path reason fp
   path=$(get_task_failed_file_path "$1")
   reason="$2"
-  printf '%s  %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$reason" > "$path"
+  fp=$(get_task_fingerprint "$1")
+  printf '%s\t%s\t%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$fp" "$reason" > "$path"
 }
 
 build_cli_args() {
@@ -881,6 +975,50 @@ initialize_runner_state() {
   mkdir -p "$SESSION_STATE_PATH"
   mkdir -p "$OUTPUT_STATE_PATH"
   mkdir -p "$STATUS_STATE_PATH"
+
+  # Task 4: self-explaining README (overwritten every init) and a runs.csv with its header.
+  write_state_readme
+  initialize_runs_csv
+}
+
+write_state_readme() {
+  cat > "$STATE_README_PATH" <<'EOF'
+This folder holds LimitShift's saved state for one queue file.
+It is created and maintained automatically. You can delete it at any time.
+
+What is in here:
+  sessions/   Saved CLI session / thread ids so a task can resume the SAME conversation.
+  outputs/    The full raw output of every run (one file per task: task-NN-<slug>-output.txt).
+  status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
+  runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
+  ai-run-log.txt        The full runner transcript.
+  claude-usage-last.txt The last Claude /usage report.
+
+Re-running:
+  Delete this whole folder to start completely from scratch.
+  Delete status/task-NN.done to force ONE task to run again.
+  Editing a task's prompt, cli, projectPath, model, effort, or extraArgs now AUTO-INVALIDATES
+  its done marker: the runner notices the change and re-runs that task with a fresh session.
+EOF
+}
+
+initialize_runs_csv() {
+  if [ ! -f "$RUNS_CSV_PATH" ]; then
+    printf '%s\n' "$RUNS_CSV_HEADER" > "$RUNS_CSV_PATH"
+  fi
+}
+
+# Task 4: append one CSV row per CLI run. Fields are escaped with csv_field so a task name with
+# commas or quotes cannot break the column layout. Mirrors run-ai.ps1 Add-RunsCsvRow.
+add_runs_csv_row() {
+  local task="$1" run="$2" mode="$3" exit_code="$4" status="$5"
+  printf '%s,%s,%s,%s,%s,%s\n' \
+    "$(csv_field "$(date '+%Y-%m-%dT%H:%M:%S')")" \
+    "$(csv_field "$task")" \
+    "$(csv_field "$run")" \
+    "$(csv_field "$mode")" \
+    "$(csv_field "$exit_code")" \
+    "$(csv_field "$status")" >> "$RUNS_CSV_PATH"
 }
 
 # MAIN EXECUTION
@@ -928,10 +1066,22 @@ run_queue() {
     taskNumber=$((i + 1))
 
     if test_task_already_done "$i"; then
-      write_step "Skipping task $taskNumber of $TASK_COUNT: $(task_field "$i" "name")"
-      echo "Task is already marked as done."
-      i=$((i + 1))
-      continue
+      # Task 4: a done marker only counts when its stored fingerprint still matches the current
+      # task. If the task's prompt/cli/projectPath/model/effort/extraArgs changed, invalidate the
+      # marker (re-run) and drop the stale session id so it starts a fresh session.
+      local savedFp currentFp
+      savedFp=$(get_saved_done_fingerprint "$i")
+      currentFp=$(get_task_fingerprint "$i")
+      if [ "$savedFp" = "$currentFp" ]; then
+        write_step "Skipping task $taskNumber of $TASK_COUNT: $(task_field "$i" "name")"
+        echo "Task is already marked as done."
+        i=$((i + 1))
+        continue
+      fi
+      write_step "Re-running task $taskNumber of $TASK_COUNT: $(task_field "$i" "name")"
+      echo "Task $taskNumber changed since last run; previous done marker invalidated."
+      rm -f "$(get_task_done_file_path "$i")"
+      rm -f "$(get_task_session_file_path "$i")"
     fi
 
     runCount=0
@@ -957,13 +1107,16 @@ run_queue() {
 
       savedSessionId=$(get_saved_task_session_id "$i")
 
+      local runMode
       if [ -z "$savedSessionId" ]; then
+        runMode="New"
         sessionId=""
         if [ "$task_cli" = "claude" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
         invoke_cli_task_run "$i" "New" "$sessionId"
       else
+        runMode="Resume"
         invoke_cli_task_run "$i" "Resume" "$savedSessionId"
       fi
 
@@ -978,6 +1131,29 @@ run_queue() {
       result_text="$R_TEXT"
       result_session_id="$R_SESSION_ID"
       result_error_text="$R_ERROR_TEXT"
+
+      # Task 4: classify this run's outcome and append one runs.csv row. The status maps the
+      # parsed result to a short label (Limit/Error/Done/Blocked/NoMarker) consistently with
+      # run-ai.ps1. In simple mode an OK run is Done.
+      local runStatus runExit
+      if [ "$result_is_limit" -eq 1 ]; then
+        runStatus="Limit"
+      elif [ "$result_ok" -eq 0 ]; then
+        runStatus="Error"
+      elif [ "$taskCompletionCheck" != "true" ]; then
+        runStatus="Done"
+      else
+        get_marker_status "$result_text"
+        if [ "$M_STATUS" = "Done" ]; then
+          runStatus="Done"
+        elif [ "$M_STATUS" = "Blocked" ]; then
+          runStatus="Blocked"
+        else
+          runStatus="NoMarker"
+        fi
+      fi
+      if [ "$result_ok" -eq 0 ]; then runExit=1; else runExit=0; fi
+      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus"
 
       if [ -n "$result_session_id" ]; then
         printf '%s' "$result_session_id" > "$(get_task_session_file_path "$i")"

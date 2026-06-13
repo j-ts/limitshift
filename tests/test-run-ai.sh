@@ -576,7 +576,7 @@ run_clean_output_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local output_file="$root/.ai-runner-queue/outputs/task-01.txt"
+  local output_file="$root/.ai-runner-queue/outputs/task-01-clean-output-output.txt"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"Here is the clean answer\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -813,6 +813,225 @@ $out"
   fi
 }
 
+write_fake_codex_success() {
+  local bin_dir="$1"
+  cat > "$bin_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"thr-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"did it\n\n[[TASK_COMPLETE]]"}}'
+exit 0
+EOF
+  chmod +x "$bin_dir/codex"
+}
+
+run_state_layout_test() {
+  local desc="state dir gets _README.txt, runs.csv (with header + a Done row), and slugged output file"
+  local root="$TMP_ROOT/state-layout"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local state_dir="$root/.ai-runner-queue"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 2,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "Layout Task",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "do the layout work"
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$state_dir/_README.txt" ] &&
+     grep -qi 'delete this whole folder' "$state_dir/_README.txt" &&
+     [ -f "$state_dir/runs.csv" ] &&
+     [ "$(sed -n '1p' "$state_dir/runs.csv")" = "timestamp,task,run,mode,exit,status" ] &&
+     grep -q ',Done$' "$state_dir/runs.csv" &&
+     [ -f "$state_dir/outputs/task-01-Layout-Task-output.txt" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out
+--- runs.csv ---
+$(cat "$state_dir/runs.csv" 2>/dev/null)
+--- outputs ---
+$(ls "$state_dir/outputs" 2>/dev/null)"
+  fi
+}
+
+run_done_marker_format_test() {
+  local desc=".done file stores two lines: timestamp then a 64-hex fingerprint"
+  local root="$TMP_ROOT/done-format"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+  local done_file="$root/.ai-runner-queue/status/task-01.done"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  local out exit_code line_count fp_line
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  line_count=$(wc -l < "$done_file" 2>/dev/null | tr -d ' ')
+  fp_line=$(sed -n '2p' "$done_file" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ "$line_count" = "2" ] &&
+     printf '%s' "$fp_line" | grep -qE '^[0-9a-f]{64}$'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code line_count=$line_count fp=[$fp_line]
+$out"
+  fi
+}
+
+run_stale_done_reruns_test() {
+  local desc="changing the prompt invalidates the done marker (task re-runs)"
+  local root="$TMP_ROOT/stale-done"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "original prompt" } ]
+}
+EOF
+
+  PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" >/dev/null 2>&1
+
+  # Change the prompt, then re-run.
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "a completely different prompt" } ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'changed since last run' &&
+     ! printf '%s' "$out" | grep -q 'already marked as done'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_unchanged_done_skips_test() {
+  local desc="unchanged task keeps skipping when the fingerprint matches"
+  local root="$TMP_ROOT/unchanged-done"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "unchanged prompt" } ]
+}
+EOF
+
+  PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" >/dev/null 2>&1
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'already marked as done' &&
+     ! printf '%s' "$out" | grep -q 'changed since last run'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_cli_change_reruns_test() {
+  local desc="changing the cli invalidates the done marker (task re-runs)"
+  local root="$TMP_ROOT/cli-change"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local received_file="$root/received.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+  write_fake_codex_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "claude", "projectPath": "$project_dir", "prompt": "same prompt" } ]
+}
+EOF
+
+  PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" >/dev/null 2>&1
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "fp", "cli": "codex", "projectPath": "$project_dir", "prompt": "same prompt", "extraArgs": ["--skip-git-repo-check"] } ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'changed since last run'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -833,6 +1052,11 @@ run_clean_output_test
 run_show_raw_test
 run_resume_repeats_prompt_test
 run_resume_simple_mode_test
+run_state_layout_test
+run_done_marker_format_test
+run_stale_done_reruns_test
+run_unchanged_done_skips_test
+run_cli_change_reruns_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"
