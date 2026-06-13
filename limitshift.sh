@@ -82,7 +82,7 @@ LEGACY_RUNNER_STATE_PATH="$QUEUE_DIR/.ai-runner-$RUNNER_NAME"
 SESSION_STATE_PATH="$RUNNER_STATE_PATH/sessions"
 OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"
 STATUS_STATE_PATH="$RUNNER_STATE_PATH/status"
-LOG_PATH="$RUNNER_STATE_PATH/ai-run-log.txt"
+LOG_PATH="$RUNNER_STATE_PATH/limitshift-log.txt"
 USAGE_PATH="$RUNNER_STATE_PATH/claude-usage-last.txt"
 RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
 STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
@@ -1023,7 +1023,7 @@ What is in here:
   outputs/    The full raw output of every run (one file per task: task-NN-<slug>-output.txt).
   status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
   runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
-  ai-run-log.txt        The full runner transcript.
+  limitshift-log.txt    The full runner transcript.
   claude-usage-last.txt The last Claude /usage report.
 
 Re-running:

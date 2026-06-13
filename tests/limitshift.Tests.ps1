@@ -1284,4 +1284,131 @@ exit 0
             }
         }
     }
+
+    Context 'State-folder migration (Task 5.3)' {
+        It 'migrates an old .ai-runner state folder to the .limitshift name, preserving contents' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            # The queue file is queue.json, so RunnerName = 'queue' and the legacy state folder the
+            # runner migrates is .ai-runner-queue (next to the queue file).
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 2
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                }
+                tasks = @(
+                    @{ name = 'migrate task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it' }
+                )
+            }
+
+            # Seed an OLD-named state folder with a marker file whose contents must survive.
+            $legacyStatePath = Join-Path $root '.ai-runner-queue'
+            New-Item -ItemType Directory -Path $legacyStatePath -Force | Out-Null
+            $markerPath = Join-Path $legacyStatePath 'marker.txt'
+            $markerContents = 'preserve me 123'
+            Set-Content -LiteralPath $markerPath -Value $markerContents -Encoding UTF8
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath
+                )
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Migrated state folder \.ai-runner-queue -> \.limitshift-queue'
+
+                $newStatePath = Join-Path $root '.limitshift-queue'
+                Test-Path -LiteralPath $newStatePath | Should -BeTrue
+                Test-Path -LiteralPath $legacyStatePath | Should -BeFalse
+
+                $migratedMarkerPath = Join-Path $newStatePath 'marker.txt'
+                Test-Path -LiteralPath $migratedMarkerPath | Should -BeTrue
+                (Get-Content -LiteralPath $migratedMarkerPath -Raw).TrimEnd("`r", "`n") | Should -Be $markerContents
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+    }
+
+    Context 'Legacy-queue filename fallback (Task 5.2)' {
+        It 'falls back to ai-run-queue.json (with a warning) when no new-name queue and no explicit path' {
+            # The default-queue resolution keys off the SCRIPT directory ($PSScriptRoot), not the
+            # working directory, so we run a COPY of the runner placed in a temp dir that contains
+            # ONLY ai-run-queue.json (no limitshift-queue.json) and pass no -QueuePath.
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $scriptCopyPath = Join-Path $root 'limitshift.ps1'
+            Copy-Item -LiteralPath $script:__limitshiftScriptPath -Destination $scriptCopyPath
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $legacyQueuePath = Join-Path $root 'ai-run-queue.json'
+            Write-TestQueue -Path $legacyQueuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 2
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                }
+                tasks = @(
+                    @{ name = 'legacy queue task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                # No -QueuePath: the runner must resolve the default and fall back to the legacy name.
+                $run = Invoke-RunnerProcess -Arguments @(
+                    '-NoProfile', '-File', $scriptCopyPath
+                )
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Using legacy queue filename ai-run-queue.json'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                # The legacy queue was actually used: its state folder (.ai-run-queue) was created.
+                $donePath = Join-Path $root '.limitshift-ai-run-queue\status\task-01.done'
+                Test-Path -LiteralPath $donePath | Should -BeTrue
+            }
+            finally {
+                $env:PATH = $oldPath
+            }
+        }
+    }
 }

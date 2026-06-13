@@ -182,7 +182,7 @@ Where state lives and what is in it:
 - `outputs/` — the full raw output of every run, one file per task named `task-NN-<slug>-output.txt` (zero-padded task number plus a slug of the task name).
 - `status/` — per-task markers: `task-NN.done` when a task finished, `task-NN.failed` when it blocked or failed.
 - `runs.csv` — one row per CLI run with `timestamp, task, run, mode (New/Resume), exit, status`. Open it in any spreadsheet to see what happened across the whole queue.
-- `ai-run-log.txt` — the full runner transcript.
+- `limitshift-log.txt` — the full runner transcript.
 - `_README.txt` — the same explanation, right next to the data.
 
 Editing a task auto-invalidates its done marker. When you change a task's `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` and run again, LimitShift notices the change (it stores a fingerprint of those fields inside the `.done` file), throws away the stale `.done` marker and the old session id, and **re-runs that task with a fresh session**. Tasks you did not touch keep being skipped.

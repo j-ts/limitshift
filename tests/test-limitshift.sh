@@ -1073,6 +1073,82 @@ $out"
   fi
 }
 
+run_state_migration_test() {
+  local desc="old .ai-runner-<name> state folder migrates to .limitshift-<name>, preserving contents"
+  local root="$TMP_ROOT/state-migration"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local legacy_state_dir="$root/.ai-runner-queue"
+  local new_state_dir="$root/.limitshift-queue"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "migrate task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  # Seed an OLD-named state folder with a marker file whose contents must survive the migration.
+  mkdir -p "$legacy_state_dir"
+  printf '%s' 'preserve me 123' > "$legacy_state_dir/marker.txt"
+
+  local out exit_code marker
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  marker=$(cat "$new_state_dir/marker.txt" 2>/dev/null)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Migrated state folder .ai-runner-queue -> .limitshift-queue' &&
+     [ -d "$new_state_dir" ] &&
+     [ ! -d "$legacy_state_dir" ] &&
+     [ "$marker" = "preserve me 123" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code marker=[$marker]
+$out"
+  fi
+}
+
+run_legacy_queue_fallback_test() {
+  local desc="legacy ai-run-queue.json is used (with a warning) when no new-name queue and no --queue"
+  local root="$TMP_ROOT/legacy-queue-fallback"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  # Default-queue resolution keys off the SCRIPT dir, so run a COPY of the runner from a temp dir
+  # that contains ONLY ai-run-queue.json (no limitshift-queue.json) and pass no --queue.
+  local script_copy="$root/limitshift.sh"
+  local legacy_queue="$root/ai-run-queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  cp "$SCRIPT" "$script_copy"
+  write_fake_claude_success "$bin_dir"
+
+  cat > "$legacy_queue" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "legacy queue task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$script_copy" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Using legacy queue filename ai-run-queue.json' &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ -f "$root/.limitshift-ai-run-queue/status/task-01.done" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
@@ -1099,6 +1175,8 @@ run_stale_done_reruns_test
 run_unchanged_done_skips_test
 run_legacy_done_reruns_test
 run_cli_change_reruns_test
+run_state_migration_test
+run_legacy_queue_fallback_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

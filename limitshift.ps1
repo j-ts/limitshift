@@ -14,40 +14,47 @@ $Utf8Encoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = $Utf8Encoding
 $OutputEncoding = $Utf8Encoding
 
-# Task 5.2: the default queue file is limitshift-queue.json; the old ai-run-queue.json is still
-# accepted as a fallback for one release. When no explicit -QueuePath is given, look for the new
-# name first, then the old one (warning if the legacy name is used). If neither exists, default to
-# the new name so the "not found / copy the example" message references the current filename.
-if ([string]::IsNullOrWhiteSpace($QueuePath)) {
-    $newDefaultQueue = Join-Path $PSScriptRoot 'limitshift-queue.json'
-    $legacyDefaultQueue = Join-Path $PSScriptRoot 'ai-run-queue.json'
-    if (Test-Path -LiteralPath $newDefaultQueue) {
-        $QueuePath = $newDefaultQueue
+# Default-queue resolution and the state-path derivations below touch the filesystem (Test-Path)
+# and can emit the legacy-queue warning. Skip the whole block when only loading functions for tests
+# so dot-sourcing with -LoadFunctionsOnly has zero filesystem side effects. These script-level path
+# variables are only consumed on a real run, which never happens under -LoadFunctionsOnly.
+if (-not $LoadFunctionsOnly) {
+    # Task 5.2: the default queue file is limitshift-queue.json; the old ai-run-queue.json is still
+    # accepted as a fallback for one release. When no explicit -QueuePath is given, look for the new
+    # name first, then the old one (warning if the legacy name is used). If neither exists, default
+    # to the new name so the "not found / copy the example" message references the current filename.
+    if ([string]::IsNullOrWhiteSpace($QueuePath)) {
+        $newDefaultQueue = Join-Path $PSScriptRoot 'limitshift-queue.json'
+        $legacyDefaultQueue = Join-Path $PSScriptRoot 'ai-run-queue.json'
+        if (Test-Path -LiteralPath $newDefaultQueue) {
+            $QueuePath = $newDefaultQueue
+        }
+        elseif (Test-Path -LiteralPath $legacyDefaultQueue) {
+            $QueuePath = $legacyDefaultQueue
+            [Console]::Error.WriteLine('Using legacy queue filename ai-run-queue.json; rename to limitshift-queue.json')
+        }
+        else {
+            $QueuePath = $newDefaultQueue
+        }
     }
-    elseif (Test-Path -LiteralPath $legacyDefaultQueue) {
-        $QueuePath = $legacyDefaultQueue
-        [Console]::Error.WriteLine('Using legacy queue filename ai-run-queue.json; rename to limitshift-queue.json')
-    }
-    else {
-        $QueuePath = $newDefaultQueue
-    }
+
+    $QueuePath = [System.IO.Path]::GetFullPath($QueuePath)
+    $QueueRootPath = Split-Path -Parent $QueuePath
+    $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
+    $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
+    # Task 5.3: state folder is now .limitshift-<name>; the old .ai-runner-<name> folder is migrated
+    # (renamed) automatically on startup when it exists and the new one does not.
+    $RunnerStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
+    $LegacyRunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
+    $SessionStatePath = Join-Path $RunnerStatePath "sessions"
+    $OutputStatePath = Join-Path $RunnerStatePath "outputs"
+    $StatusStatePath = Join-Path $RunnerStatePath "status"
+    $LogPath = Join-Path $RunnerStatePath "limitshift-log.txt"
+    $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
+    $RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
+    $StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
 }
 
-$QueuePath = [System.IO.Path]::GetFullPath($QueuePath)
-$QueueRootPath = Split-Path -Parent $QueuePath
-$QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
-$RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
-# Task 5.3: state folder is now .limitshift-<name>; the old .ai-runner-<name> folder is migrated
-# (renamed) automatically on startup when it exists and the new one does not.
-$RunnerStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
-$LegacyRunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
-$SessionStatePath = Join-Path $RunnerStatePath "sessions"
-$OutputStatePath = Join-Path $RunnerStatePath "outputs"
-$StatusStatePath = Join-Path $RunnerStatePath "status"
-$LogPath = Join-Path $RunnerStatePath "ai-run-log.txt"
-$UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
-$RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
-$StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
 $RunsCsvHeader = "timestamp,task,run,mode,exit,status"
 
 $FreshSessionThresholdPercent = 0
@@ -101,7 +108,7 @@ What is in here:
   outputs/    The full raw output of every run (one file per task: task-NN-<slug>-output.txt).
   status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
   runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
-  ai-run-log.txt        The full runner transcript.
+  limitshift-log.txt    The full runner transcript.
   claude-usage-last.txt The last Claude /usage report.
 
 Re-running:
