@@ -15,7 +15,7 @@
       "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "prompt": "Audit the codebase for security issues and write findings to security-audit.md.",
       "completionCheck": false,
-      "extraArgs": ["--allow-tool=read,write"]
+      "extraArgs": ["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]
     }
   ]
 }

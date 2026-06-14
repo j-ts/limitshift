@@ -80,7 +80,7 @@ Useful optional fields:
   conversation transcript.
 - GitHub Copilot CLI (`copilot`): run `copilot models` to see what your account can use; pass the
   chosen name as `model`. Effort: `low`, `medium`, `high`, `xhigh`, `max`. Copilot delivers prompts
-  via `-p` and returns structured JSONL.
+  via `-p`, uses `--name` / `--resume` for session identity, and returns structured JSONL.
 
 ## Permission Flags
 
@@ -91,7 +91,7 @@ Headless CLI runs cannot answer permission prompts. If a task should edit files,
 - Gemini: `["--approval-mode", "auto_edit"]`
 - Antigravity (`agy`): `["--dangerously-skip-permissions"]` (agy's only headless auto-approve; it
   has no softer "accept edits only" mode).
-- Copilot: `["--allow-tool=read,write,shell(*)"]` (or `["--allow-all"]` for YOLO mode).
+- Copilot: `["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]` (automation mode: `["--allow-all", "--no-ask-user"]`).
 
 Without these flags, the agent may run read-only and leave the project unchanged.
 

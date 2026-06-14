@@ -44,11 +44,11 @@
               { "type": "string" },
               { "type": "array", "items": { "type": "string" }, "minItems": 1 }
             ],
-            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: fable, opus, sonnet, haiku, claude-fable-5, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash; agy (Antigravity CLI) / copilot: run 'agy models' or 'copilot models' to list what your account can use — passed through as '--model'. Local Ollama models (e.g. qwen3.5:9b, nemotron-3-nano:4b) are also accepted; pair them with extraArgs [\"--oss\", \"--local-provider\", \"ollama\"] to run locally. A local claude task requires a model (it is passed to 'ollama launch --model')."
+            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: opus, sonnet, haiku, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash; agy (Antigravity CLI) / copilot (GitHub Copilot CLI): run 'agy models' or 'copilot models' to list what your account can use — passed through as '--model'. Copilot also supports session naming/resume, JSONL output, and reasoning-effort flags. Local Ollama models (e.g. qwen3.5:9b, nemotron-3-nano:4b) are also accepted; pair them with extraArgs [\"--oss\", \"--local-provider\", \"ollama\"] to run locally. A local claude task requires a model (it is passed to 'ollama launch --model')."
           },
           "effort": {
             "enum": [null, "minimal", "low", "medium", "high", "xhigh", "max"],
-            "description": "Reasoning effort. Allowed values depend on cli (see the per-cli rules below). Use null or omit the field when the CLI/model does not support effort."
+            "description": "Reasoning effort. Allowed values depend on cli (see the per-cli rules below). Use null or omit the field when the CLI/model does not support effort. Copilot supports low, medium, high, xhigh, and max; it also accepts --effort / --reasoning-effort in its CLI."
           },
           "prompt": { "type": "string", "minLength": 1 },
           "completionCheck": {
@@ -60,7 +60,7 @@
               { "type": "string" },
               { "type": "array", "items": { "type": "string" } }
             ],
-            "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions, copilot --allow-tool=read,write,shell(*)). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy/copilot have no Ollama path.)"
+            "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions, copilot --allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*), copilot --deny-tool=shell(git push), copilot --no-ask-user, or full automation with copilot --allow-all --no-ask-user). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy/copilot have no Ollama path.)"
           }
         },
         "allOf": [
@@ -88,6 +88,20 @@
                 "effort": {
                   "enum": [null],
                   "description": "Antigravity CLI (agy) has no --effort flag. Must be null (or omitted)."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "cli": { "const": "copilot" } },
+              "required": ["cli"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null, "low", "medium", "high", "xhigh", "max"],
+                  "description": "GitHub Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI along with --model, --name / --resume, -p, --output-format=json, and --no-ask-user."
                 }
               }
             }
@@ -133,20 +147,6 @@
                 "effort": {
                   "enum": [null, "minimal", "low", "medium", "high", "xhigh"],
                   "description": "Codex model_reasoning_effort accepts minimal, low, medium, high, xhigh ('none' is plan-mode only and not valid for exec runs). xhigh availability is model-dependent."
-                }
-              }
-            }
-          },
-          {
-            "if": {
-              "properties": { "cli": { "const": "copilot" } },
-              "required": ["cli"]
-            },
-            "then": {
-              "properties": {
-                "effort": {
-                  "enum": [null, "low", "medium", "high", "xhigh", "max"],
-                  "description": "Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI."
                 }
               }
             }

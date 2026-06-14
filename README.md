@@ -54,7 +54,7 @@ You don't need to be a programmer. You do need to open a terminal once or twice 
 
 ## Get started
 
-You need a **Windows, Mac, or Linux** computer, at least one AI CLI (`claude`, `codex`, `gemini`, or `agy`), and a project folder tracked by **Git**. Pick the path that sounds like you:
+You need a **Windows, Mac, or Linux** computer, at least one AI CLI (`claude`, `codex`, `gemini`, `agy`, or `copilot`), and a project folder tracked by **Git**. Pick the path that sounds like you:
 
 ### 🐣 New to the terminal
 
@@ -143,7 +143,7 @@ Edit it in a plain-text editor (Notepad, or TextEdit in *plain text* mode) — *
 Four fields are required:
 
 - **`name`** — a short label, for you.
-- **`cli`** — `claude`, `codex`, `gemini`, or `agy`.
+- **`cli`** — `claude`, `codex`, `gemini`, `agy`, or `copilot`.
 - **`projectPath`** — the folder to work in. On Windows, **double every backslash** (`C:\\Users\\you\\my-project`) or use forward slashes (`C:/Users/you/my-project`).
 - **`prompt`** — what you're asking for, in plain words. The clearer and more specific, the closer the result lands.
 
@@ -293,7 +293,7 @@ Windows paths in JSON need **doubled backslashes** (`"C:\\Users\\me\\repo"`) or 
 
 Model aliases passed through to each CLI:
 
-- **claude:** `opus`, `sonnet`, `haiku` (or full ids like `claude-opus-4-8`). *(`fable` is currently disabled.)*
+- **claude:** `opus`, `sonnet`, `haiku` (or full ids like `claude-opus-4-8`).
 - **codex:** `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`.
 - **gemini:** `gemini-3.*` (e.g. `gemini-3.1-pro-preview`, `gemini-3-flash-preview`), `gemini-2.5-*`.
 - **agy:** run `agy models` to see what your account can use (e.g. `gemini-3.1-pro`, `gemini-3.5-flash`, `claude-sonnet`, `gpt-oss-120b`). agy has no headless output mode (it draws its reply on screen), so LimitShift reads agy's answer back from its own local conversation history; and it resumes only its most recent conversation, so keep agy work to one linear chain of tasks — LimitShift handles the rest. Just have agy installed and signed in.
@@ -309,7 +309,7 @@ Headless runs can't answer permission prompts — set your choice in `extraArgs`
 - Codex: `--sandbox workspace-write` (or `--dangerously-bypass-approvals-and-sandbox`)
 - Gemini: `--approval-mode auto_edit` (or `--approval-mode yolo`)
 - Antigravity (`agy`): `--dangerously-skip-permissions` (its only headless auto-approve)
-- Copilot: `--allow-tool=read,write,shell(*)` (or `--allow-all` for YOLO mode)
+- Copilot: recommended edit flags are `--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*) --deny-tool=shell(git push) --no-ask-user`; automation mode is `--allow-all --no-ask-user` and should be used only when you fully trust the task.
 
 More autonomy means more risk — run only against Git-backed folders.
 

@@ -969,13 +969,13 @@ build_cli_args() {
       done < <(get_task_extra_args "$idx")
       ;;
     copilot)
-      # GitHub Copilot CLI: prompt via -p, JSONL output.
-      CLI_ARGS+=("--output-format" "json" "--stream" "off" "--no-ask-user")
+      # GitHub Copilot CLI: prompt via -p, JSONL output. New runs use --name; resumes use --resume.
       if [ "$mode" = "New" ]; then
         CLI_ARGS+=("--name" "$session_id")
       elif [ "$mode" = "Resume" ]; then
         CLI_ARGS+=("--resume" "$session_id")
       fi
+      CLI_ARGS+=("--output-format" "json" "--stream" "off" "--no-ask-user")
       CLI_ARGS+=("-p" "$prompt")
       if [ -n "$model" ]; then
         CLI_ARGS+=("--model" "$model")
@@ -1168,9 +1168,9 @@ parse_cli_output() {
         return
       fi
 
-      R_SESSION_ID=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.interactionId // empty) | last // empty')
-      R_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(select(.type=="assistant.message") | .content // "") | join("")')
-      R_ERROR_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.error.message // select(.type=="error").message // empty) | last // empty')
+      R_SESSION_ID=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.interactionId // .session_id // .sessionId // .conversation_id // .conversationId // .thread_id // .threadId // empty) | last // empty')
+      R_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(select(.type=="assistant.message") | (.content // .text // .message // empty)) | join("")')
+      R_ERROR_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.error.message // .error.text // .error.detail // select(.type=="error").message // select(.type=="error").text // select(.type=="error").detail // empty) | last // empty')
 
       if [ -n "$R_ERROR_TEXT" ] || [ "$exit_code" -ne 0 ]; then
         R_OK=0
@@ -1517,10 +1517,9 @@ run_queue() {
       if [ -z "$savedSessionId" ]; then
         runMode="New"
         sessionId=""
-        # claude is given a session id up front (passed as --session-id). agy has no id to pass, but
-        # we still mint a sentinel marker file so the NEXT run resumes (agy -c continues the most
-        # recent conversation); the value itself is never sent to agy.
-        if [ "$task_cli" = "claude" ] || [ "$task_cli" = "agy" ]; then
+        # claude is given a session id up front (passed as --session-id). agy/copilot need a stable
+        # session id so the NEXT run resumes the same conversation.
+        if [ "$task_cli" = "claude" ] || [ "$task_cli" = "agy" ] || [ "$task_cli" = "copilot" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
         invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel"

@@ -104,9 +104,16 @@ Describe 'limitshift.ps1' {
         }
 
         It 'rejects an unknown cli value, listing the allowed values' {
-            {
-                Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'broken-bad-cli.json')
-            } | Should -Throw '*claude, codex, gemini*'
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'bad'; cli = 'unknown-cli'; projectPath = $projectPath; prompt = 'p' }
+                )
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*claude, codex, gemini, agy, copilot*'
         }
 
         It 'rejects a non-existent projectPath, printing the path' {
@@ -210,7 +217,6 @@ Describe 'limitshift.ps1' {
         It 'rejects an out-of-set copilot effort listing the allowed values' {
             $queuePath = New-EffortQueue -Task @{ name = 'cp'; cli = 'copilot'; prompt = 'p'; effort = 'minimal' }
             { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: copilot effort must be one of low, medium, high, xhigh, max*'
-        }
         }
         It 'normalizes an empty-string effort to null (treated as no effort)' {
             $queuePath = New-EffortQueue -Task @{ name = 'g'; cli = 'gemini'; prompt = 'p'; effort = '' }
@@ -675,7 +681,7 @@ Describe 'limitshift.ps1' {
                 Model = $null; Effort = $null; Prompt = 'unused'; ExtraArgs = @()
             }
 
-            args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'hi there'
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'hi there'
             ($args -join ' ') | Should -Be '-p hi there'
         }
 
@@ -686,7 +692,7 @@ Describe 'limitshift.ps1' {
             }
 
             $args = Get-CliArguments -Task $task -Mode New -SessionId 'sid-123' -Prompt 'do it'
-            ($args -join ' ') | Should -Be '--output-format json --stream off --no-ask-user --name sid-123 -p do it --model m --effort high --verbose'
+            ($args -join ' ') | Should -Be '--name sid-123 --output-format json --stream off --no-ask-user -p do it --model m --effort high --verbose'
         }
 
         It 'builds a copilot resume command with session id as --resume' {
@@ -696,7 +702,7 @@ Describe 'limitshift.ps1' {
             }
 
             $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'sid-123' -Prompt 'continue'
-            ($args -join ' ') | Should -Be '--output-format json --stream off --no-ask-user --resume sid-123 -p continue'
+            ($args -join ' ') | Should -Be '--resume sid-123 --output-format json --stream off --no-ask-user -p continue'
         }
     }
 
@@ -977,7 +983,7 @@ exit 0
             New-Item -ItemType Directory -Path $binPath -Force | Out-Null
 
             $stubPath = Join-Path $binPath 'echo-stdin.cmd'
-            '@
+            '@echo off
 powershell -NoProfile -Command "[Console]::In.ReadToEnd() | Write-Output"' |
                 Set-Content -LiteralPath $stubPath -Encoding Ascii
 
@@ -1106,6 +1112,16 @@ powershell -NoProfile -Command "[Console]::In.ReadToEnd() | Write-Output"' |
             $result.Ok | Should -Be $false
             $result.IsLimit | Should -Be $true
         }
+
+        It 'falls back to trimmed raw Copilot output when the JSONL shape is unknown' {
+            $out = @'
+{"type":"unexpected.event","message":"something happened","sessionId":"cp-raw"}
+plain trailing text
+'@
+            $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 1
+            $result.Ok | Should -Be $false
+            $result.Text | Should -Match 'unexpected.event'
+            $result.SessionId | Should -Be 'cp-raw'
         }
         It 'parses an agy plain-text success from stdout and exposes the completion marker' {
             $out = "Antigravity did the work.`nOK [[TASK_COMPLETE]]"
@@ -1371,6 +1387,47 @@ exit 0
             finally {
                 $env:PATH = $oldPath
             }
+        }
+
+        It 'Invoke-CliTaskRun delivers copilot prompt via -p and hands it an empty stdin' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $logFile = Join-Path $root 'copilot.log'
+            $copilotPath = Join-Path $binPath 'copilot.ps1'
+            @"
+`$stdinText = [Console]::In.ReadToEnd()
+`$logFile = '$($logFile -replace '\\','\\')'
+`$p = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) { if (`$args[`$i] -eq '-p') { `$p = `$args[`$i + 1] } }
+`$sid = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) { if (`$args[`$i] -eq '--name') { `$sid = `$args[`$i + 1] } }
+[System.IO.File]::WriteAllText(`$logFile, "sid=`$sid`np=`$p`nsin_len=`$(`$stdinText.Length)")
+Write-Output "{`"type`":`"assistant.message`",`"content`":`"done [[TASK_COMPLETE]]`",`"interactionId`":`"`$sid`"}"
+exit 0
+"@ | Set-Content -LiteralPath $copilotPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'cp-stdin'; cli = 'copilot'; projectPath = $projectPath; prompt = 'say hi'; completionCheck = $false }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+
+                $log = Get-Content -LiteralPath $logFile -Raw
+                $log | Should -Match 'p=say hi'
+                $log | Should -Match 'sin_len=0'
+            }
+            finally { $env:PATH = $oldPath }
         }
 
         It 'simple mode (completionCheck:false) sends the prompt verbatim and completes in one run' {

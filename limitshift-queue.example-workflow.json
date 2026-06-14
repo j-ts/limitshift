@@ -20,7 +20,7 @@
       "cli": "copilot",
       "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "prompt": "Read bugs.md and fix each listed issue one by one. After fixing an item, append ' - FIXED' to its line in bugs.md.",
-      "extraArgs": ["--allow-tool=read,write"]
+      "extraArgs": ["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]
     },
     {
       "name": "Verify fixes",

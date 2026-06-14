@@ -1119,7 +1119,7 @@ function Get-CliArguments {
         # Task 6: the current rotation model. When omitted, fall back to $Task.Model (the first
         # model in the list). The caller (the task loop) passes Models[currentModelIndex].
         [string]$ModelOverride,
-        # agy only: the prompt becomes the value of -p (the other CLIs receive it on stdin).
+        # agy/copilot only: the prompt becomes the value of -p (the other CLIs receive it on stdin).
         [string]$Prompt
     )
 
@@ -1192,10 +1192,11 @@ function Get-CliArguments {
             return $cliArgs
         }
         'copilot' {
-            # GitHub Copilot CLI: prompt via -p, JSONL output.
-            $cliArgs = @('--output-format', 'json', '--stream', 'off', '--no-ask-user')
+            # GitHub Copilot CLI: prompt via -p, JSONL output. New runs use --name; resumes use --resume.
+            $cliArgs = @()
             if ($Mode -eq 'New')    { $cliArgs += @('--name', $SessionId) }
             if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
+            $cliArgs += @('--output-format', 'json', '--stream', 'off', '--no-ask-user')
             $cliArgs += @('-p', $Prompt)
             if ($model)       { $cliArgs += @('--model', $model) }
             if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
@@ -1423,20 +1424,30 @@ function ConvertFrom-CliOutput {
                 try { $evt = $line | ConvertFrom-Json } catch { continue }
                 $eventType = [string](Get-ObjectPropertyValue -Object $evt -Name 'type' -Default $null)
                 if ($eventType -eq 'assistant.message') {
-                    $content = [string](Get-ObjectPropertyValue -Object $evt -Name 'content' -Default '')
-                    if (-not [string]::IsNullOrEmpty($content)) { $textParts += $content }
+                    foreach ($contentName in @('content', 'text', 'message')) {
+                        $content = [string](Get-ObjectPropertyValue -Object $evt -Name $contentName -Default $null)
+                        if (-not [string]::IsNullOrEmpty($content)) { $textParts += $content; break }
+                    }
                 }
-                $sid = [string](Get-ObjectPropertyValue -Object $evt -Name 'interactionId' -Default $null)
-                if ($null -ne $sid) { $sessionId = $sid }
+                foreach ($sidName in @('interactionId', 'session_id', 'sessionId', 'conversation_id', 'conversationId', 'thread_id', 'threadId')) {
+                    $sid = [string](Get-ObjectPropertyValue -Object $evt -Name $sidName -Default $null)
+                    if (-not [string]::IsNullOrWhiteSpace($sid)) { $sessionId = $sid; break }
+                }
                 $err = Get-ObjectPropertyValue -Object $evt -Name 'error' -Default $null
                 if ($null -ne $err) {
-                    $errorText = [string](Get-ObjectPropertyValue -Object $err -Name 'message' -Default $errorText)
+                    foreach ($errName in @('message', 'text', 'detail')) {
+                        $candidateError = [string](Get-ObjectPropertyValue -Object $err -Name $errName -Default $null)
+                        if (-not [string]::IsNullOrWhiteSpace($candidateError)) { $errorText = $candidateError; break }
+                    }
                 }
                 elseif ($eventType -eq 'error') {
-                    $errorText = [string](Get-ObjectPropertyValue -Object $evt -Name 'message' -Default $errorText)
+                    foreach ($errName in @('message', 'text', 'detail')) {
+                        $candidateError = [string](Get-ObjectPropertyValue -Object $evt -Name $errName -Default $null)
+                        if (-not [string]::IsNullOrWhiteSpace($candidateError)) { $errorText = $candidateError; break }
+                    }
                 }
             }
-            $text = $textParts -join ''
+            $text = if ($textParts.Count -gt 0) { $textParts -join '' } else { $OutputText.Trim() }
             $isError = ($null -ne $errorText) -or ($ExitCode -ne 0)
             $isLimit = $isError -and (("$errorText $OutputText") -match $limitRegex)
             return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
@@ -1699,10 +1710,9 @@ try {
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
                 $runMode = 'New'
                 $sessionId = $null
-                # claude is given a session id up front (passed as --session-id). agy has no id to
-                # pass, but we still mint a sentinel marker file so the NEXT run resumes (agy -c
-                # continues the most recent conversation); the value itself is never sent to agy.
-                if ($task.Cli -eq 'claude' -or $task.Cli -eq 'agy') { $sessionId = New-TaskSessionId -TaskIndex $i }
+                # claude is given a session id up front (passed as --session-id). agy/copilot need a
+                # stable session id so the NEXT run can resume the same conversation.
+                if ($task.Cli -eq 'claude' -or $task.Cli -eq 'agy' -or $task.Cli -eq 'copilot') { $sessionId = New-TaskSessionId -TaskIndex $i }
                 $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel
             }
             else {

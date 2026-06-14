@@ -120,7 +120,7 @@ run_codex_limit_resume_test() {
       "name": "codex limit task",
       "cli": "codex",
       "projectPath": "$project_dir",
-      "model": "gpt-5-codex",
+      "model": "gpt-5.4",
       "effort": "high",
       "extraArgs": ["--sandbox", "workspace-write", "--skip-git-repo-check"],
       "prompt": "finish the work"
@@ -130,7 +130,7 @@ run_codex_limit_resume_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -ne 0 ]; then
@@ -146,7 +146,7 @@ EOF
      printf '%s' "$out" | grep -q 'Task 1 completed' &&
      printf '%s' "$first_call" | grep -q -- '--sandbox workspace-write' &&
      ! printf '%s' "$first_call" | grep -q -- ' -C ' &&
-     printf '%s' "$second_call" | grep -q '^exec resume thr-limit --json -m gpt-5-codex -c model_reasoning_effort=high --skip-git-repo-check ' &&
+     printf '%s' "$second_call" | grep -q '^exec resume thr-limit --json -m gpt-5.4 -c model_reasoning_effort=high --skip-git-repo-check ' &&
      ! printf '%s' "$second_call" | grep -q -- '--sandbox' &&
      ! printf '%s' "$second_call" | grep -q -- ' -C '; then
     pass "$desc"
@@ -218,7 +218,7 @@ run_duplicate_name_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -290,7 +290,7 @@ EOF
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -ne 0 ] || [ ! -f "$received_file" ]; then
@@ -345,7 +345,7 @@ run_exit_code_propagation_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 1 ] &&
@@ -408,7 +408,7 @@ run_simple_mode_verbatim_test() {
 EOF
 
   local out exit_code received
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   received=$(cat "$received_file" 2>/dev/null)
 
@@ -460,7 +460,7 @@ run_simple_mode_override_test() {
 EOF
 
   local out exit_code received
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   received=$(cat "$received_file" 2>/dev/null)
 
@@ -509,7 +509,7 @@ run_loose_marker_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -556,7 +556,7 @@ run_stall_guard_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 1 ] &&
@@ -602,7 +602,7 @@ run_clean_output_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -650,7 +650,7 @@ run_show_raw_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" --show-raw 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --show-raw 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -719,7 +719,7 @@ EOF
 EOF
 
   local out exit_code resume_prompt
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   resume_prompt=$(cat "$received_dir/run-2.txt" 2>/dev/null)
 
@@ -794,7 +794,7 @@ EOF
 EOF
 
   local out exit_code resume_prompt
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   resume_prompt=$(cat "$received_dir/run-2.txt" 2>/dev/null)
 
@@ -859,7 +859,7 @@ run_state_layout_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -900,7 +900,7 @@ run_done_marker_format_test() {
 EOF
 
   local out exit_code line_count fp_line
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   line_count=$(wc -l < "$done_file" 2>/dev/null | tr -d ' ')
   fp_line=$(sed -n '2p' "$done_file" 2>/dev/null)
@@ -944,7 +944,7 @@ EOF
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -978,7 +978,7 @@ EOF
   PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" >/dev/null 2>&1
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -1015,7 +1015,7 @@ EOF
   printf '%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$done_file"
 
   local out exit_code line_count fp_line
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   line_count=$(wc -l < "$done_file" 2>/dev/null | tr -d ' ')
   fp_line=$(sed -n '2p' "$done_file" 2>/dev/null)
@@ -1061,7 +1061,7 @@ EOF
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -1097,7 +1097,7 @@ EOF
   printf '%s' 'preserve me 123' > "$legacy_state_dir/marker.txt"
 
   local out exit_code marker
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   marker=$(cat "$new_state_dir/marker.txt" 2>/dev/null)
 
@@ -1135,7 +1135,7 @@ run_legacy_queue_fallback_test() {
 EOF
 
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$script_copy" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$script_copy" 2>&1)
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
@@ -1257,7 +1257,7 @@ run_effort_agy_null_ok_test() {
   printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/agy"; chmod +x "$bin_dir/agy"
   write_effort_queue "$queue_path" "$project_dir" "agy" 'null'
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -qE 'Config OK'; then
     pass "$desc"
   else
@@ -1311,7 +1311,7 @@ run_agy_prompt_as_arg_test() {
 } ] }
 EOF
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Task 1 completed' &&
      printf '%s' "$out" | grep -q 'Antigravity did the work.' &&
@@ -1373,7 +1373,7 @@ run_agy_resume_continue_test() {
 } ] }
 EOF
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Task 1 completed' &&
      [ "$(grep -c 'RUN cont=0' "$log_file")" = "1" ] &&
@@ -1410,7 +1410,7 @@ EOF
   "tasks": [ { "name": "agy 429", "cli": "agy", "projectPath": "$project_dir", "prompt": "fix retries", "extraArgs": ["--dangerously-skip-permissions"] } ] }
 EOF
   local out exit_code runs
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   runs=$(grep -c '^run$' "$log_file")
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Task 1 completed' &&
@@ -1611,9 +1611,9 @@ while [ \$# -gt 0 ]; do
     *) shift ;;
   esac
 done
-cat >/dev/null
+sin=\$(cat)
 {
-  printf 'RUN mode=%s sid=%s\n' "\$mode" "\$sid"
+  printf 'RUN mode=%s sid=%s stdin_len=%s\n' "\$mode" "\$sid" "\${#sin}"
   printf 'PROMPT1=%s\n' "\$(printf '%s' "\$prompt" | head -1)"
 } >> "$log_file"
 printf '{"type":"assistant.message","content":"Copilot reply.","interactionId":"%s"}\n' "\$sid"
@@ -1641,11 +1641,11 @@ run_copilot_prompt_as_arg_test() {
 } ] }
 EOF
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Task 1 completed' &&
-     printf '%s' "$out" | grep -q 'Copilot reply. [[TASK_COMPLETE]]' &&
-     grep -q 'RUN mode=new sid=' "$log_file" &&
+     printf '%s' "$out" | grep -qF 'Copilot reply. [[TASK_COMPLETE]]' &&
+     grep -q 'RUN mode=new sid=.* stdin_len=0' "$log_file" &&
      grep -q 'PROMPT1=Hello Copilot' "$log_file"; then
     pass "$desc"
   else
@@ -1673,13 +1673,27 @@ EOF
   "tasks": [ { "name": "copilot limit", "cli": "copilot", "projectPath": "$project_dir", "prompt": "p" } ] }
 EOF
   local out exit_code
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if printf '%s' "$out" | grep -qi 'paused by a usage limit on copilot'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
 $out"
   fi
+}
+
+run_unknown_cli_rejected_test() {
+  local desc="unknown cli rejected listing allowed"
+  local root="$TMP_ROOT/unknown-cli"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "bad", "cli": "unknown-cli", "projectPath": "$project_dir", "prompt": "p" }
+  ]
+}
+EOF
+  check "$desc" 2 "claude, codex, gemini, agy, copilot" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
 }
 
 # Local-model (Ollama) support.
@@ -1829,7 +1843,7 @@ run_model_rotation_switch_test() {
 EOF
 
   local out exit_code first second saved_idx
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   first=$(sed -n '1p' "$model_log" 2>/dev/null)
   second=$(sed -n '2p' "$model_log" 2>/dev/null)
@@ -1890,7 +1904,7 @@ EOF
 EOF
 
   local out exit_code m1 m2 m3
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   m1=$(sed -n '1p' "$model_log" 2>/dev/null)
   m2=$(sed -n '2p' "$model_log" 2>/dev/null)
@@ -1948,7 +1962,7 @@ EOF
 EOF
 
   local out exit_code m1 m2
-  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
   exit_code=$?
   m1=$(sed -n '1p' "$model_log" 2>/dev/null)
   m2=$(sed -n '2p' "$model_log" 2>/dev/null)
@@ -1997,7 +2011,6 @@ check "valid minimal config validates"           0 "Config OK"             -- ba
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
 check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-field.json" --validate-only
-check "unknown cli rejected listing allowed"     2 "claude, codex, gemini, agy, copilot" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
 check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
 run_dry_run_state_test
@@ -2051,6 +2064,7 @@ run_agy_limit_keyword_not_misread_test
 run_agy_transcript_capture_test
 run_copilot_prompt_as_arg_test
 run_copilot_limit_detection_test
+run_unknown_cli_rejected_test
 run_shipped_examples_validate_test
 
 echo
