@@ -25,6 +25,23 @@
           "minimum": 1,
           "default": 2,
           "description": "Only used when completionCheck is true. After this many consecutive OK runs that repeat the same response without a completion marker, the task fails with a 'no progress' reason."
+        },
+        "modelValidation": {
+          "type": "string",
+          "enum": ["strictWhenDiscoverable", "warn", "off"],
+          "default": "strictWhenDiscoverable",
+          "description": "Controls runtime model-name validation. 'strictWhenDiscoverable': fail validation when a CLI exposes a model list and the configured model is absent (default). 'warn': warn but continue. 'off': skip model-name checks. When a CLI has no scriptable model list, an INFO message is printed and validation never fails regardless of this setting."
+        },
+        "capabilityCacheHours": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 24,
+          "description": "How many hours to cache the discovered model list under .limitshift-<queue>/capabilities/<cli>.json before re-querying. Set 0 to disable caching. Override with --refresh-capabilities / -RefreshCapabilities."
+        },
+        "probeModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true AND --validate-only / -ValidateOnly is active, run a cheap non-editing prompt for each unique CLI to verify model connectivity. Not triggered during normal queue execution. Enable per-run with --probe-models / -ProbeModels."
         }
       }
     },
@@ -60,7 +77,7 @@
               { "type": "string" },
               { "type": "array", "items": { "type": "string" } }
             ],
-            "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions, copilot --allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*), copilot --deny-tool=shell(git push), copilot --no-ask-user, or full automation with copilot --allow-all --no-ask-user). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy/copilot have no Ollama path.)"
+            "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions, copilot recommended edit mode: --allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*) --deny-tool=shell(git push) --no-ask-user; full automation: --allow-all --no-ask-user). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy/copilot have no Ollama path.)"
           }
         },
         "allOf": [
@@ -101,7 +118,7 @@
               "properties": {
                 "effort": {
                   "enum": [null, "low", "medium", "high", "xhigh", "max"],
-                  "description": "GitHub Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI along with --model, --name / --resume, -p, --output-format=json, and --no-ask-user."
+                  "description": "GitHub Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI along with --model, --name / --resume, -p, --output-format=json, --stream=off, and --no-ask-user."
                 }
               }
             }
