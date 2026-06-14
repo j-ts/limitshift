@@ -1979,6 +1979,356 @@ $out"
   fi
 }
 
+run_levenshtein_test() {
+  local desc="levenshtein distance helper returns correct distances"
+  local func; func=$(sed -n '/^_levenshtein()/,/^}/p' "$SCRIPT")
+  eval "$func"
+
+  local ok=1
+  [ "$(_levenshtein "gpt-5" "gpt-5")" = "0" ]   || { echo "same string should be 0"; ok=0; }
+  [ "$(_levenshtein "got-5" "gpt-5")" = "1" ]    || { echo "one substitution should be 1"; ok=0; }
+  [ "$(_levenshtein "" "abc")" = "3" ]            || { echo "empty vs abc should be 3"; ok=0; }
+  [ "$(_levenshtein "abc" "")" = "3" ]            || { echo "abc vs empty should be 3"; ok=0; }
+
+  if [ "$ok" -eq 1 ]; then pass "$desc"; else fail "$desc"; fi
+}
+
+run_capability_discovery_test() {
+  local desc="capability discovery: agy with model-list command returns supportsModelDiscovery true"
+  local root="$TMP_ROOT/cap-discovery"
+  local bin_dir="$root/bin"
+  local caps_dir="$root/caps"
+  mkdir -p "$bin_dir" "$caps_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then
+  printf 'gemini-3.1-pro\ngemini-3.5-flash\nclaude-sonnet\n'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  eval "$(sed -n '/^_levenshtein()/,/^}/p' "$SCRIPT")"
+  eval "$(sed -n '/^suggest_model_corrections()/,/^}/p' "$SCRIPT")"
+  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
+  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
+  local disc_func; disc_func=$(sed -n '/^discover_cli_models()/,/^}/p' "$SCRIPT")
+  if [ -z "$disc_func" ]; then fail "$desc" "discover_cli_models not found in script"; return; fi
+  eval "$disc_func"
+
+  local caps; caps=$(PATH="$bin_dir:$PATH" discover_cli_models "agy")
+  local supports; supports=$(printf '%s' "$caps" | jq -r '.supportsModelDiscovery')
+  local model_count; model_count=$(printf '%s' "$caps" | jq '.models | length')
+
+  if [ "$supports" = "true" ] && [ "$model_count" -eq 3 ]; then
+    pass "$desc"
+  else
+    fail "$desc" "supports=$supports model_count=$model_count caps=$caps"
+  fi
+}
+
+run_capability_cache_test() {
+  local desc="capability cache: write then read back within TTL returns cached data"
+  local root="$TMP_ROOT/cap-cache"
+  local caps_dir="$root/caps"
+  mkdir -p "$caps_dir"
+
+  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
+  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
+
+  local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+  local caps_json; caps_json=$(jq -n --arg ts "$ts" \
+    '{cli:"agy",supportsModelDiscovery:true,models:["m-1","m-2"],source:"agy models",discoveredAt:$ts,error:""}')
+
+  save_capability_cache "agy" "$caps_dir" "$caps_json"
+  local loaded; loaded=$(load_capability_cache "agy" "$caps_dir" 24)
+  local loaded_count; loaded_count=$(printf '%s' "$loaded" | jq '.models | length')
+
+  if [ "$loaded_count" = "2" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "loaded_count=$loaded_count loaded=$loaded"
+  fi
+}
+
+run_capability_cache_stale_test() {
+  local desc="capability cache: stale cache (0h TTL) is ignored"
+  local root="$TMP_ROOT/cap-stale"
+  local caps_dir="$root/caps"
+  mkdir -p "$caps_dir"
+
+  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
+  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
+
+  local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+  local caps_json; caps_json=$(jq -n --arg ts "$ts" \
+    '{cli:"agy",supportsModelDiscovery:true,models:["m-1"],source:"agy models",discoveredAt:$ts,error:""}')
+
+  save_capability_cache "agy" "$caps_dir" "$caps_json"
+  local loaded; loaded=$(load_capability_cache "agy" "$caps_dir" 0)
+
+  if [ -z "$loaded" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "expected empty (stale) but got: $loaded"
+  fi
+}
+
+run_model_validation_strict_test() {
+  local desc="model validation: strict mode fails when discovered model is absent"
+  local root="$TMP_ROOT/model-strict"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'real-model-1\nreal-model-2\n'; exit 0; fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "modelValidation": "strictWhenDiscoverable" },
+  "tasks": [ {
+    "name": "t",
+    "cli": "agy",
+    "projectPath": "$project_dir",
+    "model": "typo-model",
+    "prompt": "p",
+    "extraArgs": ["--dangerously-skip-permissions"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qi 'not available'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_validation_suggestion_test() {
+  local desc="model validation: typo suggestion appears in strict-mode error"
+  local root="$TMP_ROOT/model-suggest"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'gpt-5.4\ngpt-5.5\n'; exit 0; fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ {
+    "name": "t", "cli": "agy", "projectPath": "$project_dir",
+    "model": "gpt-5", "prompt": "p",
+    "extraArgs": ["--dangerously-skip-permissions"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if printf '%s' "$out" | grep -q 'did you mean'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_validation_warn_test() {
+  local desc="model validation: warn mode continues despite unknown model"
+  local root="$TMP_ROOT/model-warn"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'known-model\n'; exit 0; fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "modelValidation": "warn" },
+  "tasks": [ {
+    "name": "t", "cli": "agy", "projectPath": "$project_dir",
+    "model": "unknown-model", "prompt": "p",
+    "extraArgs": ["--dangerously-skip-permissions"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -qi 'warning' && printf '%s' "$out" | grep -q 'Config OK'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_validation_off_test() {
+  local desc="model validation: off mode skips model checks entirely"
+  local root="$TMP_ROOT/model-off"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'known-model\n'; exit 0; fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "modelValidation": "off" },
+  "tasks": [ {
+    "name": "t", "cli": "agy", "projectPath": "$project_dir",
+    "model": "anything-goes", "prompt": "p",
+    "extraArgs": ["--dangerously-skip-permissions"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Config OK'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_validation_undiscoverable_test() {
+  local desc="model validation: undiscoverable CLI prints INFO and does not fail"
+  local root="$TMP_ROOT/model-nodisc"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local bin_dir="$root/bin"
+  mkdir -p "$project_dir" "$bin_dir"
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/claude"; chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ {
+    "name": "t", "cli": "claude", "projectPath": "$project_dir",
+    "model": "claude-opus-4-8", "prompt": "p",
+    "extraArgs": ["--permission-mode", "acceptEdits"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -qi 'INFO' && printf '%s' "$out" | grep -q 'Config OK'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_refresh_capabilities_test() {
+  local desc="--refresh-capabilities ignores stale cache and re-discovers"
+  local root="$TMP_ROOT/refresh-caps"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local caps_dir="$root/.limitshift-queue/capabilities"
+  mkdir -p "$bin_dir" "$project_dir" "$caps_dir"
+
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "models" ]; then printf 'fresh-model\n'; exit 0; fi
+exit 1
+EOF
+  chmod +x "$bin_dir/agy"
+
+  printf '%s\n' '{"cli":"agy","supportsModelDiscovery":true,"models":["stale-model"],"source":"agy models","discoveredAt":"2000-01-01T00:00:00Z","error":""}' \
+    > "$caps_dir/agy.json"
+
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ {
+    "name": "t", "cli": "agy", "projectPath": "$project_dir",
+    "model": "fresh-model", "prompt": "p",
+    "extraArgs": ["--dangerously-skip-permissions"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only --refresh-capabilities 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Config OK'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_probe_models_optin_test() {
+  local desc="probe models is opt-in and not triggered by normal --validate-only"
+  local root="$TMP_ROOT/probe-optin"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local probe_log="$root/probe-log.txt"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf 'Current session: 0%% used\nCurrent week (all models): 0%% used\n'; exit 0
+fi
+printf 'PROBE_RAN' >> "$probe_log"
+printf '{"result":"OK","session_id":"s1","is_error":false}'; exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [ {
+    "name": "t", "cli": "claude", "projectPath": "$project_dir",
+    "prompt": "p", "extraArgs": ["--permission-mode", "acceptEdits"]
+  } ]
+}
+EOF
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && [ ! -f "$probe_log" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code probe_ran=$(cat "$probe_log" 2>/dev/null)
+$out"
+  fi
+}
+
 run_shipped_examples_validate_test() {
   local repo_root="$HERE/.."
   local root="$TMP_ROOT/shipped-examples"
@@ -2066,6 +2416,17 @@ run_copilot_prompt_as_arg_test
 run_copilot_limit_detection_test
 run_unknown_cli_rejected_test
 run_shipped_examples_validate_test
+run_levenshtein_test
+run_capability_discovery_test
+run_capability_cache_test
+run_capability_cache_stale_test
+run_model_validation_strict_test
+run_model_validation_suggestion_test
+run_model_validation_warn_test
+run_model_validation_off_test
+run_model_validation_undiscoverable_test
+run_refresh_capabilities_test
+run_probe_models_optin_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

@@ -11,6 +11,10 @@ QUEUE_PATH_EXPLICIT=0
 VALIDATE_ONLY=0
 DRY_RUN=0
 SHOW_RAW=0
+REFRESH_CAPABILITIES=0
+PROBE_MODELS=0
+MODEL_VALIDATION="strictWhenDiscoverable"
+CAPABILITY_CACHE_HOURS=24
 
 TASK_COMPLETE_MARKER="[[TASK_COMPLETE]]"
 TASK_BLOCKED_MARKER="[[TASK_BLOCKED]]"
@@ -22,6 +26,8 @@ usage() {
   echo "  --validate-only      Validate configuration syntax, paths, and binaries, then exit"
   echo "  --dry-run            Simulate execution by printing commands without running them"
   echo "  --show-raw           Print the raw CLI JSON to the console (default: only the response text)"
+  echo "  --refresh-capabilities  Ignore cached capability data and re-discover model lists"
+  echo "  --probe-models          Run a cheap prompt per CLI to verify model connectivity (validate-only)"
   echo "  -h, --help           Show this help message"
 }
 
@@ -31,6 +37,8 @@ while [ $# -gt 0 ]; do
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --show-raw) SHOW_RAW=1; shift ;;
+    --refresh-capabilities) REFRESH_CAPABILITIES=1; shift ;;
+    --probe-models) PROBE_MODELS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -216,6 +224,10 @@ read_queue_config() {
   # so completionCheck is read with has() to preserve an explicit false.
   COMPLETION_CHECK=$(jq -r '(.settings // {}) | if has("completionCheck") then .completionCheck else true end' "$QUEUE_PATH" | tr -d '\r')
   MAX_STALLS=$(jq -r '.settings.maxStalls // 2' "$QUEUE_PATH" | tr -d '\r')
+  MODEL_VALIDATION=$(jq -r '.settings.modelValidation // "strictWhenDiscoverable"' "$QUEUE_PATH" | tr -d '\r')
+  CAPABILITY_CACHE_HOURS=$(jq -r '.settings.capabilityCacheHours // 24' "$QUEUE_PATH" | tr -d '\r')
+  local probe_from_config; probe_from_config=$(jq -r 'if .settings.probeModels == true then 1 else 0 end' "$QUEUE_PATH" | tr -d '\r')
+  [ "$PROBE_MODELS" -eq 0 ] && PROBE_MODELS=$probe_from_config
 
   local i=0 n cli path
   while [ "$i" -lt "$TASK_COUNT" ]; do
@@ -348,6 +360,282 @@ check_cli_binaries() {
     echo "  ollama : https://ollama.com/download  (only needed for local models)" >&2
     exit 2
   fi
+}
+
+_levenshtein() {
+  local s="$1" t="$2"
+  local sl=${#s} tl=${#t}
+  if [ "$sl" -gt 50 ] || [ "$tl" -gt 50 ]; then echo 99; return; fi
+  local -a d
+  local i j c a b e
+  for ((i = 0; i <= sl; i++)); do d[i*(tl+1)+0]=$i; done
+  for ((j = 0; j <= tl; j++)); do d[0*(tl+1)+j]=$j; done
+  for ((i = 1; i <= sl; i++)); do
+    for ((j = 1; j <= tl; j++)); do
+      [ "${s:i-1:1}" = "${t:j-1:1}" ] && c=0 || c=1
+      a=$((d[(i-1)*(tl+1)+j]+1))
+      b=$((d[i*(tl+1)+(j-1)]+1))
+      e=$((d[(i-1)*(tl+1)+(j-1)]+c))
+      d[i*(tl+1)+j]=$((a<b ? (a<e ? a : e) : (b<e ? b : e)))
+    done
+  done
+  echo "${d[sl*(tl+1)+tl]}"
+}
+
+suggest_model_corrections() {
+  local input="$1" models_list="$2"
+  local input_lc; input_lc=$(printf '%s' "$input" | tr '[:upper:]' '[:lower:]')
+  local min_dist=5
+  local -a best
+  best=()
+  while IFS= read -r m; do
+    [ -z "$m" ] && continue
+    local m_lc; m_lc=$(printf '%s' "$m" | tr '[:upper:]' '[:lower:]')
+    local dist; dist=$(_levenshtein "$input_lc" "$m_lc")
+    if [ "$dist" -lt "$min_dist" ]; then
+      min_dist=$dist
+      best=("$m")
+    elif [ "$dist" -eq "$min_dist" ]; then
+      best+=("$m")
+    fi
+  done <<< "$models_list"
+  if [ "${#best[@]}" -gt 0 ]; then
+    printf '%s\n' "${best[@]}" | head -3
+  fi
+}
+
+discover_cli_models() {
+  local cli="$1"
+  local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+  local supports=false models_json="[]" source="" error_msg=""
+
+  case "$cli" in
+    agy)
+      if command -v agy >/dev/null 2>&1; then
+        local out ec=0
+        out=$(agy models 2>&1) || ec=$?
+        if [ "$ec" -eq 0 ] && [ -n "$out" ]; then
+          local parsed
+          parsed=$(printf '%s' "$out" | \
+            jq -r '.[].id // .[].name // .[]' 2>/dev/null | \
+            grep -v '^$' | jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
+          if [ -z "$parsed" ] || [ "$parsed" = "[]" ]; then
+            parsed=$(printf '%s' "$out" | grep -v '^$' | \
+              jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
+          fi
+          local cnt; cnt=$(printf '%s' "$parsed" | jq 'length' 2>/dev/null) || cnt=0
+          if [ "${cnt:-0}" -gt 0 ]; then
+            models_json="$parsed"; supports=true; source="agy models"
+          else
+            error_msg="agy models: could not parse model list from output"
+          fi
+        else
+          error_msg="agy models: exited $ec"
+        fi
+      else
+        error_msg="agy not on PATH"
+      fi
+      ;;
+    copilot)
+      if command -v copilot >/dev/null 2>&1; then
+        local out ec=0
+        out=$(copilot models 2>&1) || ec=$?
+        if [ "$ec" -eq 0 ] && [ -n "$out" ]; then
+          local parsed
+          parsed=$(printf '%s' "$out" | \
+            jq -r '.[].id // .[].name // .[]' 2>/dev/null | \
+            grep -v '^$' | jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
+          if [ -z "$parsed" ] || [ "$parsed" = "[]" ]; then
+            parsed=$(printf '%s' "$out" | grep -v '^$' | \
+              jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
+          fi
+          local cnt; cnt=$(printf '%s' "$parsed" | jq 'length' 2>/dev/null) || cnt=0
+          if [ "${cnt:-0}" -gt 0 ]; then
+            models_json="$parsed"; supports=true; source="copilot models"
+          else
+            error_msg="copilot models: could not parse model list from output"
+          fi
+        else
+          error_msg="copilot models: exited $ec"
+        fi
+      else
+        error_msg="copilot not on PATH"
+      fi
+      ;;
+    claude|codex|gemini)
+      error_msg="$cli does not expose a scriptable model list"
+      ;;
+  esac
+
+  jq -n \
+    --arg cli "$cli" \
+    --argjson supports "$supports" \
+    --argjson models "$models_json" \
+    --arg source "$source" \
+    --arg ts "$ts" \
+    --arg error "$error_msg" \
+    '{cli:$cli,supportsModelDiscovery:$supports,models:$models,source:$source,discoveredAt:$ts,error:$error}'
+}
+
+load_capability_cache() {
+  local cli="$1" caps_dir="$2" max_age_hours="$3"
+  local cache_file="$caps_dir/$cli.json"
+  [ -f "$cache_file" ] || return 0
+  [ "$max_age_hours" -gt 0 ] 2>/dev/null || return 0
+
+  local discovered_at; discovered_at=$(jq -r '.discoveredAt // ""' "$cache_file" 2>/dev/null)
+  [ -n "$discovered_at" ] || return 0
+
+  local now_ts file_ts
+  now_ts=$(date -u +%s)
+  file_ts=$(date -u -d "$discovered_at" +%s 2>/dev/null) || \
+    file_ts=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$discovered_at" +%s 2>/dev/null) || return 0
+
+  local age_hours=$(( (now_ts - file_ts) / 3600 ))
+  if [ "$age_hours" -lt "$max_age_hours" ]; then
+    cat "$cache_file"
+  fi
+}
+
+save_capability_cache() {
+  local cli="$1" caps_dir="$2" caps_json="$3"
+  mkdir -p "$caps_dir"
+  printf '%s\n' "$caps_json" > "$caps_dir/$cli.json"
+}
+
+get_cli_capabilities() {
+  local cli="$1" caps_dir="$2" max_age_hours="${3:-24}" refresh="${4:-0}"
+  if [ "$refresh" -eq 0 ]; then
+    local cached; cached=$(load_capability_cache "$cli" "$caps_dir" "$max_age_hours")
+    if [ -n "$cached" ]; then printf '%s' "$cached"; return 0; fi
+  fi
+  local caps; caps=$(discover_cli_models "$cli")
+  save_capability_cache "$cli" "$caps_dir" "$caps"
+  printf '%s' "$caps"
+}
+
+validate_model_availability() {
+  local caps_dir="$1" refresh="$2" policy="$3" cache_hours="$4"
+  local had_error=0 i=0 cli model_type
+
+  [ "$policy" = "off" ] && return 0
+
+  while [ "$i" -lt "$TASK_COUNT" ]; do
+    local n=$((i + 1))
+    cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
+    model_type=$(jq -r ".tasks[$i].model | type" "$QUEUE_PATH" 2>/dev/null | tr -d '\r')
+    [ "$model_type" = "null" ] && { i=$((i + 1)); continue; }
+
+    local caps; caps=$(get_cli_capabilities "$cli" "$caps_dir" "$cache_hours" "$refresh")
+    local supports; supports=$(printf '%s' "$caps" | jq -r '.supportsModelDiscovery')
+    local source; source=$(printf '%s' "$caps" | jq -r '.source // ""')
+
+    if [ "$supports" = "true" ]; then
+      local available; available=$(printf '%s' "$caps" | jq -r '.models[]' 2>/dev/null)
+      local models_to_check; models_to_check=$(get_task_models "$i")
+      while IFS= read -r m; do
+        [ -z "$m" ] && continue
+        if ! printf '%s\n' "$available" | grep -qxF "$m"; then
+          local suggestions; suggestions=$(suggest_model_corrections "$m" "$available" | tr '\n' ',' | sed 's/,$//')
+          local sug_str=""
+          [ -n "$suggestions" ] && sug_str=" (did you mean: ${suggestions}?)"
+          case "$policy" in
+            strictWhenDiscoverable)
+              echo "ERROR: Task $n: model \"$m\" is not available for $cli according to $source${sug_str}" >&2
+              had_error=1
+              ;;
+            warn)
+              echo "WARNING: Task $n: model \"$m\" not found in $cli model list (continuing)${sug_str}" >&2
+              ;;
+          esac
+        fi
+      done <<< "$models_to_check"
+    else
+      local err_msg; err_msg=$(printf '%s' "$caps" | jq -r '.error // ""')
+      echo "  INFO: Task $n: model validation skipped for $cli ($err_msg)" >&2
+    fi
+    i=$((i + 1))
+  done
+  return $had_error
+}
+
+probe_cli_model() {
+  local cli="$1" model="$2"
+  local tmp_dir; tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/limitshift-probe.XXXXXX")
+  local model_flag="" out ec=0
+  if [ -n "$model" ]; then
+    case "$cli" in
+      claude)   model_flag="--model $model" ;;
+      codex)    model_flag="-m $model" ;;
+      gemini)   model_flag="-m $model" ;;
+      agy)      model_flag="--model $model" ;;
+      copilot)  model_flag="--model $model" ;;
+    esac
+  fi
+
+  case "$cli" in
+    claude)
+      out=$(cd "$tmp_dir" && claude --permission-mode viewOnly --output-format json $model_flag \
+        -p 'Respond with only: OK' 2>&1) || ec=$?
+      ;;
+    codex)
+      out=$(cd "$tmp_dir" && printf 'Respond with only: OK' | \
+        codex exec --json $model_flag --skip-git-repo-check 2>&1) || ec=$?
+      ;;
+    gemini)
+      out=$(cd "$tmp_dir" && printf 'Respond with only: OK' | \
+        gemini $model_flag 2>&1) || ec=$?
+      ;;
+    agy)
+      out=$(agy -p 'Respond with only: OK' $model_flag \
+        --dangerously-skip-permissions 2>&1) || ec=$?
+      ;;
+    copilot)
+      out=$(printf 'Respond with only: OK' | \
+        copilot --name "limitshift-probe" $model_flag --allow-all 2>&1) || ec=$?
+      ;;
+  esac
+
+  rm -rf "$tmp_dir"
+  local label="$cli${model:+ ($model)}"
+  if [ "$ec" -eq 0 ]; then
+    echo "  INFO: Probe $label: OK"
+  else
+    echo "  WARNING: Probe $label: failed (exit $ec) — $(printf '%s' "$out" | head -1)"
+  fi
+}
+
+probe_all_models() {
+  echo "--- model probe ---"
+  local i=0 cli model
+  local -a seen
+  seen=()
+  while [ "$i" -lt "$TASK_COUNT" ]; do
+    cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
+    local task_has_model=0
+    while IFS= read -r model; do
+      task_has_model=1
+      local key="$cli:$model"
+      local already=0
+      local s
+      for s in "${seen[@]}"; do [ "$s" = "$key" ] && already=1 && break; done
+      if [ "$already" -eq 0 ]; then
+        seen+=("$key")
+        probe_cli_model "$cli" "$model"
+      fi
+    done < <(get_task_models "$i")
+    if [ "$task_has_model" -eq 0 ]; then
+      local key="$cli:"
+      local already=0
+      local s
+      for s in "${seen[@]}"; do [ "$s" = "$key" ] && already=1 && break; done
+      if [ "$already" -eq 0 ]; then
+        seen+=("$key")
+        probe_cli_model "$cli" ""
+      fi
+    fi
+    i=$((i + 1))
+  done
 }
 
 epoch_from_clock() {
@@ -975,7 +1263,7 @@ build_cli_args() {
       elif [ "$mode" = "Resume" ]; then
         CLI_ARGS+=("--resume" "$session_id")
       fi
-      CLI_ARGS+=("--output-format" "json" "--stream" "off" "--no-ask-user")
+      CLI_ARGS+=("--output-format=json" "--stream=off" "--no-ask-user")
       CLI_ARGS+=("-p" "$prompt")
       if [ -n "$model" ]; then
         CLI_ARGS+=("--model" "$model")
@@ -1169,8 +1457,8 @@ parse_cli_output() {
       fi
 
       R_SESSION_ID=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.interactionId // .session_id // .sessionId // .conversation_id // .conversationId // .thread_id // .threadId // empty) | last // empty')
-      R_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(select(.type=="assistant.message") | (.content // .text // .message // empty)) | join("")')
-      R_ERROR_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.error.message // .error.text // .error.detail // select(.type=="error").message // select(.type=="error").text // select(.type=="error").detail // empty) | last // empty')
+      R_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(select(.type=="assistant.message" or .type=="assistant" or .type=="message" or .type=="response" or .type=="completion" or .type=="final" or .role=="assistant") | (.content // .text // .message // (.item.content // .item.text // .item.message // empty))) | map(select(type=="string" and . != "")) | join("")')
+      R_ERROR_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.error.message // .error.text // .error.detail // (if .type=="error" then (.message // .text // .detail // empty) else empty end) // empty) | last // empty')
 
       if [ -n "$R_ERROR_TEXT" ] || [ "$exit_code" -ne 0 ]; then
         R_OK=0
@@ -1405,6 +1693,11 @@ read_queue_config
 
 if [ "$VALIDATE_ONLY" -eq 1 ]; then
   check_cli_binaries
+  caps_dir="$RUNNER_STATE_PATH/capabilities"
+  if ! validate_model_availability "$caps_dir" "$REFRESH_CAPABILITIES" "$MODEL_VALIDATION" "$CAPABILITY_CACHE_HOURS"; then
+    exit 2
+  fi
+  [ "$PROBE_MODELS" -eq 1 ] && probe_all_models
   echo "Config OK: $QUEUE_PATH"
   echo "Tasks: $TASK_COUNT"
   i=0
