@@ -316,9 +316,19 @@ ui_format_duration() {
   printf '%s %s' "$hpart" "$mpart"
 }
 
-# Three-variant final summary. Drawn over a separator.
+# Final summary. Variants:
+#   dry-run                          -> "Dry run complete"
+#   all tasks already done (skipped) -> "Nothing to do" + redo-hint
+#   any failed                       -> bulleted breakdown (+ skipped row + redo-hint if any)
+#   some new + some skipped          -> "Done - N of M ran" breakdown + redo-hint
+#   all new + all completionCheck    -> "executed successfully"
+#   all new + any completionCheck off-> "executed. Please check the work manually"
+#
+# Args: task_count, done_count, failed_count, skipped_count, all_completion_check,
+#       log_path, state_path, dry_run
 ui_summary() {
-  local task_count="$1" done_count="$2" failed_count="$3" all_completion_check="$4" log_path="$5" dry_run="${6:-0}"
+  local task_count="$1" done_count="$2" failed_count="$3" skipped_count="$4"
+  local all_completion_check="$5" log_path="$6" state_path="$7" dry_run="${8:-0}"
   printf '\n'
   ui_separator
   printf '\n'
@@ -331,19 +341,67 @@ ui_summary() {
     return
   fi
 
-  if [ "$failed_count" -gt 0 ]; then
-    ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND All done"
-    ui_color "$UI_DIM" " $GLYPH_DASH all queued tasks were executed:"
+  # All tasks skipped - nothing actually ran this turn.
+  if [ "$skipped_count" -eq "$task_count" ] && [ "$task_count" -gt 0 ]; then
+    local plural="s"; local was="were"
+    [ "$task_count" -eq 1 ] && { plural=""; was="was"; }
+    ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND Nothing to do"
+    ui_color "$UI_DIM" " $GLYPH_DASH all ${task_count} queued task${plural} ${was} already done in a previous run."
     printf '\n'
-    ui_color "$UI_GREEN" "      $GLYPH_DOT ${done_count} completed"
-    printf '\n'
-    ui_color "$UI_RED" "      $GLYPH_DOT ${failed_count} failed"
-    printf '\n\n'
-    ui_color "$UI_DIM" "    See a detailed transcript in ${log_path}"
-    printf '\n'
+    if [ -n "$state_path" ]; then
+      ui_color "$UI_DIM" "    To re-run, delete the state folder: ${state_path}"
+      printf '\n'
+    fi
     return
   fi
 
+  if [ "$failed_count" -gt 0 ]; then
+    local ran_count=$((done_count + failed_count))
+    ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND Done"
+    ui_color "$UI_DIM" " $GLYPH_DASH ${ran_count} of ${task_count} queued tasks ran this turn:"
+    printf '\n'
+    ui_color "$UI_GREEN" "      $GLYPH_DOT ${done_count} newly completed"
+    printf '\n'
+    ui_color "$UI_RED" "      $GLYPH_DOT ${failed_count} failed"
+    printf '\n'
+    if [ "$skipped_count" -gt 0 ]; then
+      ui_color "$UI_DIM" "      $GLYPH_DOT ${skipped_count} already done (skipped)"
+      printf '\n'
+    fi
+    printf '\n'
+    ui_color "$UI_DIM" "    See a detailed transcript in ${log_path}"
+    printf '\n'
+    if [ "$skipped_count" -gt 0 ] && [ -n "$state_path" ]; then
+      ui_color "$UI_DIM" "    To redo skipped tasks, delete the state folder: ${state_path}"
+      printf '\n'
+    fi
+    return
+  fi
+
+  # Some skipped, some newly executed - no failures.
+  if [ "$skipped_count" -gt 0 ]; then
+    ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND Done"
+    ui_color "$UI_DIM" " $GLYPH_DASH ${done_count} of ${task_count} queued tasks ran this turn:"
+    printf '\n'
+    ui_color "$UI_GREEN" "      $GLYPH_DOT ${done_count} newly completed"
+    printf '\n'
+    ui_color "$UI_DIM" "      $GLYPH_DOT ${skipped_count} already done (skipped)"
+    printf '\n'
+    if [ "$all_completion_check" != "1" ]; then
+      printf '\n'
+      ui_color "$UI_DIM" "    completionCheck is off for at least one task $GLYPH_DASH please check the work manually."
+      printf '\n'
+    fi
+    ui_color "$UI_DIM" "    log saved to ${log_path}"
+    printf '\n'
+    if [ -n "$state_path" ]; then
+      ui_color "$UI_DIM" "    To redo skipped tasks, delete the state folder: ${state_path}"
+      printf '\n'
+    fi
+    return
+  fi
+
+  # All new, no failures, no skips - the "everything went great" path.
   local plural="s"; [ "$task_count" -eq 1 ] && plural=""
   if [ "$all_completion_check" = "1" ]; then
     ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND All done"
@@ -550,7 +608,7 @@ ui_demo() {
     k=$((k + 1))
   done
 
-  ui_summary "$count" "$count" 0 1 './.limitshift-limitshift-queue/limitshift-log.txt' 0
+  ui_summary "$count" "$count" 0 0 1 './.limitshift-limitshift-queue/limitshift-log.txt' './.limitshift-limitshift-queue' 0
 }
 
 # --- Functional core (parity with limitshift.sh) -----------------------------
@@ -1914,7 +1972,7 @@ run_queue() {
     ui_color "$UI_DIM" "    log   $GLYPH_DOT ${LOG_PATH}"; printf '\n'
   fi
 
-  local doneCount=0 failedCount=0 allCompletionCheck=1
+  local doneCount=0 skippedCount=0 failedCount=0 allCompletionCheck=1
   local ci=0
   while [ "$ci" -lt "$TASK_COUNT" ]; do
     if [ "$(task_completion_check "$ci")" != "true" ]; then allCompletionCheck=0; fi
@@ -1938,7 +1996,7 @@ run_queue() {
       if [ "$savedFp" = "$currentFp" ]; then
         write_step "Skipping task $taskNumber of $TASK_COUNT: $(task_field "$i" "name")"
         echo "Task is already marked as done."
-        doneCount=$((doneCount + 1))
+        skippedCount=$((skippedCount + 1))
         i=$((i + 1))
         continue
       fi
@@ -2143,7 +2201,7 @@ run_queue() {
     i=$((i + 1))
   done
 
-  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$allCompletionCheck" "$LOG_PATH" "$DRY_RUN"
+  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$skippedCount" "$allCompletionCheck" "$LOG_PATH" "$RUNNER_STATE_PATH" "$DRY_RUN"
 }
 
 # Run the queue and tee output to the log. The spinner writes to /dev/tty so its

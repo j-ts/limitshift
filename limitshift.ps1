@@ -230,19 +230,24 @@ function Write-UiTaskDone {
 }
 
 function Write-UiSummary {
-    # The final summary line. Three variants, picked from $DoneCount / $FailedCount and whether
-    # every task ran in completion-check mode (only then do we KNOW each task finished cleanly):
-    #   - any failed       -> bulleted breakdown + transcript link
-    #   - all succeeded, every task had completionCheck:true  -> "executed successfully"
-    #   - all succeeded, any task was completionCheck:false   -> "executed. Please check the work manually"
-    # Dry-run has its own simple variant. The accent glyph is the diamond (GlyphDiamond), not the
-    # four-pointed star (GlyphStar) - the star is already the "response" header glyph.
+    # The final summary line. Five variants, distinguished by what actually happened this run:
+    #   - dry-run                                          -> "Dry run complete"
+    #   - all tasks were already done (nothing ran)        -> "Nothing to do" + redo-hint
+    #   - any task failed                                  -> bulleted breakdown (+ skipped row + redo-hint if any)
+    #   - some new + some skipped                          -> "Done - N of M ran" breakdown + redo-hint
+    #   - all new, every task had completionCheck:true     -> "executed successfully"
+    #   - all new, any task was completionCheck:false      -> "executed. Please check the work manually"
+    # The accent glyph is the diamond (GlyphDiamond), not the four-pointed star (GlyphStar) - the
+    # star is already the "response" header glyph. -StatePath is the runner state folder that holds
+    # the .done markers; deleting it forces every task to re-run.
     param(
         [int]$TaskCount,
         [int]$DoneCount,
         [int]$FailedCount,
+        [int]$SkippedCount,
         [bool]$AllCompletionCheck,
         [string]$LogPath,
+        [string]$StatePath,
         [switch]$DryRun
     )
 
@@ -257,16 +262,53 @@ function Write-UiSummary {
         return
     }
 
-    if ($FailedCount -gt 0) {
-        Write-Host ("  " + $script:GlyphDiamond + " All done") -ForegroundColor $script:UiAccentColor -NoNewline
-        Write-Host (" " + $script:GlyphDash + " all queued tasks were executed:") -ForegroundColor Gray
-        Write-Host ("      " + $script:GlyphDot + " " + $DoneCount + " completed") -ForegroundColor Green
-        Write-Host ("      " + $script:GlyphDot + " " + $FailedCount + " failed") -ForegroundColor Red
-        Write-Host ""
-        Write-Host ("    See a detailed transcript in " + $LogPath) -ForegroundColor DarkGray
+    # All tasks were already done from a previous run - nothing actually ran this time.
+    if ($SkippedCount -eq $TaskCount -and $TaskCount -gt 0) {
+        $plural = if ($TaskCount -eq 1) { '' } else { 's' }
+        $was = if ($TaskCount -eq 1) { 'was' } else { 'were' }
+        Write-Host ("  " + $script:GlyphDiamond + " Nothing to do") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " all " + $TaskCount + " queued task" + $plural + " " + $was + " already done in a previous run.") -ForegroundColor Gray
+        if (-not [string]::IsNullOrWhiteSpace($StatePath)) {
+            Write-Host ("    To re-run, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+        }
         return
     }
 
+    if ($FailedCount -gt 0) {
+        $ranCount = $DoneCount + $FailedCount
+        Write-Host ("  " + $script:GlyphDiamond + " Done") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " " + $ranCount + " of " + $TaskCount + " queued tasks ran this turn:") -ForegroundColor Gray
+        Write-Host ("      " + $script:GlyphDot + " " + $DoneCount + " newly completed") -ForegroundColor Green
+        Write-Host ("      " + $script:GlyphDot + " " + $FailedCount + " failed") -ForegroundColor Red
+        if ($SkippedCount -gt 0) {
+            Write-Host ("      " + $script:GlyphDot + " " + $SkippedCount + " already done (skipped)") -ForegroundColor DarkGray
+        }
+        Write-Host ""
+        Write-Host ("    See a detailed transcript in " + $LogPath) -ForegroundColor DarkGray
+        if ($SkippedCount -gt 0 -and -not [string]::IsNullOrWhiteSpace($StatePath)) {
+            Write-Host ("    To redo skipped tasks, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+        }
+        return
+    }
+
+    # Some skipped, some newly executed - no failures.
+    if ($SkippedCount -gt 0) {
+        Write-Host ("  " + $script:GlyphDiamond + " Done") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " " + $DoneCount + " of " + $TaskCount + " queued tasks ran this turn:") -ForegroundColor Gray
+        Write-Host ("      " + $script:GlyphDot + " " + $DoneCount + " newly completed") -ForegroundColor Green
+        Write-Host ("      " + $script:GlyphDot + " " + $SkippedCount + " already done (skipped)") -ForegroundColor DarkGray
+        if (-not $AllCompletionCheck) {
+            Write-Host ""
+            Write-Host ("    completionCheck is off for at least one task " + $script:GlyphDash + " please check the work manually.") -ForegroundColor DarkGray
+        }
+        Write-Host ("    log saved to " + $LogPath) -ForegroundColor DarkGray
+        if (-not [string]::IsNullOrWhiteSpace($StatePath)) {
+            Write-Host ("    To redo skipped tasks, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+        }
+        return
+    }
+
+    # All new, no failures, no skips - the "everything went great" path.
     $plural = if ($TaskCount -eq 1) { '' } else { 's' }
     if ($AllCompletionCheck) {
         Write-Host ("  " + $script:GlyphDiamond + " All done") -ForegroundColor $script:UiAccentColor -NoNewline
@@ -561,8 +603,8 @@ function Invoke-UiDemo {
     # Real loop's settings.completionCheck applies to all tasks by default in this workflow JSON,
     # so the demo summary takes the "all completion-check, all succeeded" variant. Log path here
     # is illustrative only - nothing is written.
-    Write-UiSummary -TaskCount $count -DoneCount $count -FailedCount 0 -AllCompletionCheck $true `
-        -LogPath '.\.limitshift-limitshift-queue\limitshift-log.txt'
+    Write-UiSummary -TaskCount $count -DoneCount $count -SkippedCount 0 -FailedCount 0 -AllCompletionCheck $true `
+        -LogPath '.\.limitshift-limitshift-queue\limitshift-log.txt' -StatePath '.\.limitshift-limitshift-queue'
 }
 
 function New-DirectoryIfMissing {
@@ -2420,11 +2462,16 @@ try {
         Write-Host ("    log   " + $script:GlyphDot + " " + $LogPath) -ForegroundColor DarkGray
     }
 
-    # Per-run outcome counts, consulted by the final summary. A task is $doneCount when it ends
-    # successfully (simple-mode OK, completion-marker Done, or already-done skip) and $failedCount
-    # when it ends in failure but we keep going (stopOnError:false; error retries exhausted, blocked,
-    # or stall). Tasks that throw (stopOnError:true) skip the summary entirely.
+    # Per-run outcome counts, consulted by the final summary.
+    #   $doneCount    - tasks that actually ran AND finished successfully this run
+    #                   (simple-mode OK, or completion-marker Done).
+    #   $skippedCount - tasks that did NOT run because they were already marked done
+    #                   from a previous run (and their fingerprint still matches).
+    #   $failedCount  - tasks that ran and failed but we kept going (stopOnError:false;
+    #                   error retries exhausted, blocked, or stall).
+    # Tasks that throw (stopOnError:true) skip the summary entirely.
     $doneCount = 0
+    $skippedCount = 0
     $failedCount = 0
 
     for ($i = 0; $i -lt $Tasks.Count; $i++) {
@@ -2443,7 +2490,7 @@ try {
             if ($savedFingerprint -eq $currentFingerprint) {
                 Write-Step "Skipping task $taskNumber of $($Tasks.Count): $($task.Name)"
                 Write-Host "Task is already marked as done."
-                $doneCount++
+                $skippedCount++
                 continue
             }
             Write-Step "Re-running task $taskNumber of $($Tasks.Count): $($task.Name)"
@@ -2641,9 +2688,9 @@ try {
         }
     }
 
-    Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -FailedCount $failedCount `
+    Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -SkippedCount $skippedCount -FailedCount $failedCount `
         -AllCompletionCheck (-not ($Tasks | Where-Object { -not $_.CompletionCheck })) `
-        -LogPath $LogPath -DryRun:$DryRun
+        -LogPath $LogPath -StatePath $RunnerStatePath -DryRun:$DryRun
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.Message)
