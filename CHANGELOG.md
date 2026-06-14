@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **Multi-line prompts on Windows (the "stuck in a loop" bug)**: prompts are now delivered to every CLI on **stdin** instead of as a process argument. Passing a multi-line prompt as an argument through `Start-Process` and the npm `.cmd` shim silently truncated it to (almost) nothing, so the agent never saw the task, never emitted the completion marker, and the runner resumed in a token-burning loop until `maxRunsPerTask`.
-- **Completion-marker detection**: a task is now marked done when the **last non-empty line *contains*** `[[TASK_COMPLETE]]` (e.g. `OK[[TASK_COMPLETE]]`, or the marker with trailing whitespace), not only when the line is exactly the marker. `[[TASK_BLOCKED]] <reason>` is detected the same way, checked first.
-- **Resume prompt loses the task**: on resume the runner now repeats the **original prompt verbatim** (including any `/goal …` line) alongside the "continue where you stopped" instruction, so a thin first run or a fresh session has the full task to work from.
-- **Output-file encoding**: per-task output and the usage capture are written as **UTF-8 without BOM** (were UTF-16/Tee-Object), so they are greppable and parseable.
-
 ### Added
 - **`--queue-path` flag:** explicit alias for `--queue` in bash (PowerShell's `-QueuePath` already existed). A bare filename (no path separators) resolves from the script's own directory, so `--queue-path surgemesh-queue.json` just works next to the script.
 - **Isolated state per queue file:** each queue file always had its own `.limitshift-<name>/` folder; this is now the documented, first-class multi-queue workflow. Run one terminal per queue to parallelize projects.
@@ -52,9 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Naming alignment**: renamed the runner scripts to `limitshift.ps1` / `limitshift.sh`, the default queue file to `limitshift-queue.json`, the shipped example/schema to `limitshift-queue.example.json` / `limitshift-queue.schema.json`, the per-queue state folder to `.limitshift-<queue-name>/` (was `.ai-runner-<queue-name>/`), and the in-folder log to `limitshift-log.txt`.
 - **Automatic state-folder migration**: on startup the runner renames an existing `.ai-runner-<queue-name>/` folder to `.limitshift-<queue-name>/` when the new one does not yet exist.
 - **Legacy queue filename fallback**: when no queue path is given, the runner uses `limitshift-queue.json` if present, otherwise falls back to the old `ai-run-queue.json` with a warning.
-
-### Deprecated
-- The old `run-ai.ps1` / `run-ai.sh` script names now exist only as thin forwarder stubs that print a deprecation warning and call the new `limitshift.ps1` / `limitshift.sh` scripts. These forwarders, and the `ai-run-queue.json` legacy queue-filename fallback, will be **removed in the next release** — switch to the new names.
 
 ## [1.0.0] - 2026-06-12
 
