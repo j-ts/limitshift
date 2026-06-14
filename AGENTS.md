@@ -6,10 +6,12 @@ valid `limitshift-queue.json` that LimitShift can run.
 
 `agy` is the **Antigravity CLI**, Google's official successor to Gemini CLI for individual Google AI
 Pro/Ultra accounts (Gemini CLI stays for enterprise). It is fully supported, with two caveats baked
-into the runner: it has **no JSON output mode** (LimitShift reads its plain-text stdout), and it has
-**no per-conversation session IDs** — resume works only by continuing the most recent conversation
-(`agy -c`), so agy tasks are inherently sequential. Both are handled for you; you just pick `agy` as
-the `cli`.
+into the runner: it has **no headless output mode** — in `-p` print mode it renders the reply to a
+TTY, so LimitShift recovers the reply from agy's local conversation store
+(`~/.gemini/antigravity-cli/.../transcript.jsonl`) instead of from stdout — and it has **no
+per-conversation session IDs**, so resume works only by continuing the most recent conversation
+(`agy -c`) and agy tasks are inherently sequential. Both are handled for you; you just pick `agy` as
+the `cli`. (The user must have agy installed and signed in, same as any other CLI.)
 
 ## Default Scope
 
@@ -72,9 +74,10 @@ Useful optional fields:
   `gemini-2.5-pro` or `gemini-3.1-pro-preview` for depth. Omit `effort` or set it to `null`.
   Model arrays are especially useful for Gemini limit rotation.
 - Antigravity (`agy`): run `agy models` to see what the account can use; pass the chosen name as
-  `model`. Omit `effort` or set it to `null` (agy has no `--effort` flag). agy has no JSON output and
-  no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
-  checking (`completionCheck: true`) still works because the runner reads agy's plain-text reply.
+  `model`. Omit `effort` or set it to `null` (agy has no `--effort` flag). agy has no headless output
+  and no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
+  checking (`completionCheck: true`) still works because the runner recovers agy's reply from its
+  conversation transcript.
 
 ## Permission Flags
 

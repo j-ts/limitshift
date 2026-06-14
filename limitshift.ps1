@@ -1234,6 +1234,62 @@ function ConvertFrom-JsonTolerant {
     return $null
 }
 
+# agy (Antigravity CLI) has no JSON/stdout output mode: in -p/--print it renders the reply to a
+# TTY, so a redirected/captured stdout is empty. agy DOES persist every turn as plain JSONL, so
+# LimitShift recovers the response from agy's own conversation store instead of from stdout:
+#   <dataDir>/cache/last_conversations.json    maps an absolute workspace path -> conversation id
+#   <dataDir>/brain/<id>/.system_generated/logs/transcript.jsonl   one JSON object per turn; the
+#       agent's user-facing reply is the `content` of the last {"type":"PLANNER_RESPONSE"} line.
+# dataDir defaults to ~/.gemini/antigravity-cli (override with LIMITSHIFT_AGY_DATA_DIR, e.g. in tests).
+function Get-AgyDataDir {
+    $override = [Environment]::GetEnvironmentVariable('LIMITSHIFT_AGY_DATA_DIR')
+    if (-not [string]::IsNullOrWhiteSpace($override)) { return $override }
+    return (Join-Path $HOME '.gemini/antigravity-cli')
+}
+
+function Get-AgyResponseFromTranscript {
+    param([string]$ProjectPath, [string]$DataDir)
+
+    if ([string]::IsNullOrWhiteSpace($DataDir)) { $DataDir = Get-AgyDataDir }
+    $cacheFile = Join-Path $DataDir 'cache/last_conversations.json'
+    if (-not (Test-Path -LiteralPath $cacheFile)) { return $null }
+
+    $cache = $null
+    try { $cache = Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if ($null -eq $cache) { return $null }
+
+    # Keys are agy's absolute workspace paths; match the task's project path (exact, then case-insensitive).
+    $cid = $null
+    foreach ($p in $cache.PSObject.Properties) {
+        if ($p.Name -eq $ProjectPath) { $cid = [string]$p.Value; break }
+    }
+    if ([string]::IsNullOrWhiteSpace($cid)) {
+        foreach ($p in $cache.PSObject.Properties) {
+            if ($p.Name -ieq $ProjectPath) { $cid = [string]$p.Value; break }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($cid)) { return $null }
+
+    $tx = Join-Path $DataDir "brain/$cid/.system_generated/logs/transcript.jsonl"
+    if (-not (Test-Path -LiteralPath $tx)) { return $null }
+
+    # The latest PLANNER_RESPONSE with non-empty content is the agent's most recent reply (after a
+    # resume the transcript has grown, so the LAST one is what this run produced).
+    $resp = $null
+    foreach ($line in (Get-Content -LiteralPath $tx -Encoding UTF8)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $obj = $null
+        try { $obj = $line | ConvertFrom-Json } catch { continue }
+        $typeProp = $obj.PSObject.Properties['type']
+        if ($null -eq $typeProp -or ([string]$typeProp.Value) -ne 'PLANNER_RESPONSE') { continue }
+        $contentProp = $obj.PSObject.Properties['content']
+        if ($null -ne $contentProp -and -not [string]::IsNullOrWhiteSpace([string]$contentProp.Value)) {
+            $resp = [string]$contentProp.Value
+        }
+    }
+    return $resp
+}
+
 function ConvertFrom-CliOutput {
     param(
         [ValidateSet('claude','codex','gemini','agy')] [string]$Cli,
@@ -1322,21 +1378,23 @@ function ConvertFrom-CliOutput {
                 -ErrorText $(if ($ExitCode -ne 0) { $OutputText } else { $null })
         }
         'agy' {
-            # agy has no structured output: the response is its plain-text stdout. Use the captured
-            # stdout for the response (so trailing stderr/diagnostics never displace the agent's
-            # [[TASK_COMPLETE]] last line); fall back to the combined OutputText if stdout was not
-            # captured separately. Limit/error detection scans everything the process emitted. agy
-            # has no session id to capture (resume is a flag, -c), so SessionId is always null.
-            $text = if (-not [string]::IsNullOrEmpty($StdOut)) { $StdOut } else { $OutputText }
-            $text = ([string]$text).Trim()
-            # A usage limit only counts when the RUN failed (exit != 0) — exactly like claude/codex.
-            # Without this gate, a SUCCESSFUL agy response that merely mentions "429"/"rate limit"/
-            # "quota" (common in coding tasks) would be misread as a usage limit, because agy has no
-            # structured output and the limit regex is scanned against the agent's own plain-text stdout.
-            $isError = ($ExitCode -ne 0)
-            $isLimit = $isError -and ($OutputText -match $limitRegex)
-            return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text -SessionId $null `
-                -ErrorText $(if ($isError) { $OutputText } else { $null })
+            # agy has no JSON/stdout output mode (it renders to a TTY), so the caller recovers the
+            # reply from agy's persisted transcript and hands it in as $StdOut (falling back to the
+            # captured stdout for stubs / any future build that prints). Success is therefore based on
+            # whether a response was recovered — agy's exit code is unreliable under output redirection,
+            # so it is NOT used as the signal. agy has no session id to capture (resume is the -c flag).
+            $text = ([string]$StdOut).Trim()
+            $hasResponse = -not [string]::IsNullOrWhiteSpace($text)
+            # Usage-limit detection only applies when NO response came back (a real reply means it was
+            # not limited); then scan whatever the process emitted (stderr/stdout) for a limit signal.
+            # This also means a successful reply mentioning "429"/"rate limit"/"quota" is never misread.
+            $isLimit = (-not $hasResponse) -and ($OutputText -match $limitRegex)
+            $errorText = if (-not $hasResponse) {
+                if ([string]::IsNullOrWhiteSpace($OutputText)) {
+                    'agy produced no capturable response (no transcript reply found and stdout was empty)'
+                } else { $OutputText }
+            } else { $null }
+            return New-CliResult -Ok $hasResponse -IsLimit $isLimit -Text $text -SessionId $null -ErrorText $errorText
         }
     }
 }
@@ -1383,8 +1441,11 @@ function Invoke-CliTaskRun {
     [System.IO.File]::AppendAllText($outputFilePath, $prompt + [Environment]::NewLine + [Environment]::NewLine, $utf8NoBom)
 
     # agy takes the prompt as the -p argument (not stdin); the other CLIs read it from stdin.
+    # agy still needs a CLOSED/EOF stdin: under Start-Process an inherited (unredirected) stdin
+    # handle makes agy block reading it indefinitely. Hand it an empty stdin so it gets immediate
+    # EOF — this mirrors limitshift.sh, which runs agy with `</dev/null`.
     $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath }
-    if ($Task.Cli -ne 'agy') { $invokeParams['StdinText'] = $prompt }
+    $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy') { '' } else { $prompt }
     $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
@@ -1395,8 +1456,20 @@ function Invoke-CliTaskRun {
     }
 
     # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
-    # agy is plain-text: pass its stdout separately so the parser reads the response from stdout only.
-    $result = ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode -StdOut $processResult.StdOut
+    # agy renders its reply to a TTY, so the captured stdout is normally empty; recover the real
+    # response from agy's persisted transcript (keyed by projectPath), retrying once in case it is
+    # still being flushed. Fall back to the captured stdout when no transcript reply is found (covers
+    # test stubs and any future agy that prints to stdout).
+    $agyStdOut = $processResult.StdOut
+    if ($Task.Cli -eq 'agy') {
+        $agyResponse = Get-AgyResponseFromTranscript -ProjectPath $Task.ProjectPath
+        if ([string]::IsNullOrWhiteSpace($agyResponse)) {
+            Start-Sleep -Milliseconds 300
+            $agyResponse = Get-AgyResponseFromTranscript -ProjectPath $Task.ProjectPath
+        }
+        if (-not [string]::IsNullOrWhiteSpace($agyResponse)) { $agyStdOut = $agyResponse }
+    }
+    $result = ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode -StdOut $agyStdOut
 
     $consoleText = Get-ConsoleOutputText -Result $result -RawOutput $outputText -ShowRawOutput:$ShowRawOutput
     if (-not [string]::IsNullOrWhiteSpace($consoleText)) {

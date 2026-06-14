@@ -1,34 +1,56 @@
-# LimitShift
+<h1 align="center">LimitShift</h1>
 
-> **Give your AI coding tool a to-do list and walk away — when you hit your usage limit, LimitShift waits for the reset and picks up right where it left off.**
+<p align="center">
+  <strong>Give your AI coding CLI a to-do list and walk away — when you hit your usage limit, LimitShift waits for the reset and picks up exactly where it left off.</strong>
+</p>
+
+<p align="center">
+  <a href="#what-is-limitshift">What is it</a> ·
+  <a href="#why-limitshift">Why</a> ·
+  <a href="#key-features">Features</a> ·
+  <a href="#get-started">Get started</a> ·
+  <a href="#write-your-to-do-list">Write your list</a> ·
+  <a href="#run-it">Run it</a> ·
+  <a href="#reference">Reference</a>
+</p>
+
+---
+
+## What is LimitShift?
 
 LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, or Antigravity (`agy`)** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
-> ⚠️ **Treat first runs as rough drafts.** The result depends on the model, your wording, and the project. Only point LimitShift at a folder backed up with **Git**, so you can review and undo anything you don't like.
-
-## Contents
-
-- [What it does](#what-it-does)
-- [Get started](#get-started)
-  - [🐣 New to the terminal](#-new-to-the-terminal)
-  - [⚡ At home in a terminal](#-at-home-in-a-terminal)
-- [Write your to-do list](#write-your-to-do-list)
-  - [Option 1: Let your AI agent help you](#option-1-let-your-ai-agent-help-you)
-  - [Option 2: Write it yourself](#option-2-write-it-yourself)
-- [Run it](#run-it)
-- [When you hit your usage limit](#when-you-hit-your-usage-limit)
-- [Features](#features)
-  - [Completion checking](#completion-checking)
-  - [Run with local models through Ollama](#run-with-local-models-through-ollama)
-  - [Model rotation](#model-rotation)
-  - [Turn off your PC when it finishes](#turn-off-your-pc-when-it-finishes)
-- [Reference](#reference)
-
-## What it does
-
-You write your tasks in one list and start LimitShift. It runs each one. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** Start a big list before bed and wake up to the work done (or as far as it got).
+You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** Start a big list before bed and wake up to the work done (or as far as it got).
 
 You don't need to be a programmer. You do need to open a terminal once or twice — every step is spelled out.
+
+> ⚠️ **Treat first runs as rough drafts.** The result depends on the model, your wording, and the project. Only point LimitShift at a folder backed up with **Git**, so you can review and undo anything you don't like.
+
+---
+
+## Why LimitShift?
+
+|  | Using the app or CLI directly | **LimitShift** |
+| --- | --- | --- |
+| You hit a usage limit mid-task | You stop and lose your place | **Waits for the reset, then resumes the same conversation** |
+| A long list of changes | Babysit each one by hand | **Queue them once and walk away** |
+| More than one AI tool | Switch tools manually | **Mix `claude`, `codex`, `gemini`, `agy` in one queue** |
+| Overnight / unattended runs | Not really possible | **Start before bed, done by morning** |
+| Running a local model | Look up the flags every time | **Built-in [Ollama](#run-with-local-models-through-ollama) support** |
+
+---
+
+## Key Features
+
+- **Usage-limit aware** — detects the cap, works out when it resets, waits, and resumes the *same* session so the AI keeps its memory.
+- **Four CLIs, one queue** — `claude`, `codex`, `gemini`, and Antigravity (`agy`), mixable task by task.
+- **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
+- **[Completion checking](#completion-checking)** — keeps nudging a task across several rounds until the AI signals it's genuinely done.
+- **[Local models via Ollama](#run-with-local-models-through-ollama)** — run `claude` or `codex` against a model on your own machine.
+- **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
+- **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
+
+---
 
 ## Get started
 
@@ -82,6 +104,8 @@ Then make the script runnable:
 
 Sign in to each CLI once inside a real project folder — headless runs can't answer "trust this folder?" prompts.
 
+---
+
 ## Write your to-do list
 
 Your list is a file named **`limitshift-queue.json`**, saved in the LimitShift folder. Each entry is one **task**. You can let an AI agent write it for you, or write it by hand.
@@ -131,6 +155,8 @@ Four fields are required:
 
 Ready-made examples to copy: [`example-simple.json`](limitshift-queue.example-simple.json) (one task), [`example-workflow.json`](limitshift-queue.example-workflow.json) (review → fix → verify), [`example-advanced.json`](limitshift-queue.example-advanced.json) (models, effort, rotation, completion checks).
 
+---
+
 ## Run it
 
 From the LimitShift folder:
@@ -159,6 +185,8 @@ LimitShift prints each reply under a `--- agent response ---` header. It may sit
 
 **Didn't go how you wanted?** Edit the task's `prompt` and run again — LimitShift notices the change and re-does just that task. Add a new task to refine further; finished tasks are skipped.
 
+---
+
 ## When you hit your usage limit
 
 This is the whole point. AI tools cap how much you can use per session or week. Normally, hitting that cap mid-task means you stop and lose your place.
@@ -168,6 +196,8 @@ LimitShift instead **notices the limit, works out when it resets, waits, and res
 Give a task a **list** of models and it switches to the next one the instant one is capped — no waiting at all (see [Model rotation](#model-rotation)).
 
 > **Long overnight runs:** stop your computer from sleeping. Windows: Settings → System → Power → "put my device to sleep" → **Never**. Mac: `caffeinate -i ./limitshift.sh`. Linux: `systemd-inhibit ./limitshift.sh`.
+
+---
 
 ## Features
 
@@ -220,6 +250,12 @@ Because LimitShift is just a terminal command, you can chain it with anything yo
 
 ---
 
+## About the name
+
+The name *is* the idea. Your usage limit normally stops being a speed bump and becomes a wall — you hit it mid-task and start over later. LimitShift **shifts** the work across that wall instead: it parks the queue the moment you run out of quota and slides it forward the instant the limit resets. You set the tasks once; the limit turns into a pause, not a full stop. ⏳
+
+---
+
 # Reference
 
 Detail to come back to when you need a specific option. Everything above is enough to get real work done.
@@ -255,7 +291,7 @@ Model aliases passed through to each CLI:
 - **claude:** `opus`, `sonnet`, `haiku` (or full ids like `claude-opus-4-8`). *(`fable` is currently disabled.)*
 - **codex:** `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`.
 - **gemini:** `gemini-3.*` (e.g. `gemini-3.1-pro-preview`, `gemini-3-flash-preview`), `gemini-2.5-*`.
-- **agy:** run `agy models` to see what your account can use (e.g. `gemini-3.1-pro`, `gemini-3.5-flash`, `claude-sonnet`, `gpt-oss-120b`). agy has no JSON output and resumes only its most recent conversation, so keep agy work to one linear chain of tasks — LimitShift handles the rest.
+- **agy:** run `agy models` to see what your account can use (e.g. `gemini-3.1-pro`, `gemini-3.5-flash`, `claude-sonnet`, `gpt-oss-120b`). agy has no headless output mode (it draws its reply on screen), so LimitShift reads agy's answer back from its own local conversation history; and it resumes only its most recent conversation, so keep agy work to one linear chain of tasks — LimitShift handles the rest. Just have agy installed and signed in.
 
 **Effort** (`tasks[].effort`): claude `low`/`medium`/`high`/`xhigh`/`max`; codex `minimal`/`low`/`medium`/`high`/`xhigh`. Gemini, Antigravity (`agy`), and Claude Haiku have no effort flag — leave it `null`.
 
@@ -316,6 +352,16 @@ bash tests/test-limitshift.sh
 - **Headless / background** — running a tool with no one watching, so it can't ask questions — why you set permissions and trust folders ahead of time.
 - **Queue / task** — your whole list (the `.json` file) / one item in it.
 - **Session** — one ongoing conversation; resuming keeps the AI's memory.
+
+## Documentation
+
+| Doc | What's in it |
+| --- | --- |
+| [QUICKSTART.md](QUICKSTART.md) | The shortest path from zero to a first run |
+| [AGENTS.md](AGENTS.md) | How to have an AI agent build your queue — fields, model choices, permissions |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each version |
+| [`limitshift-queue.schema.json`](limitshift-queue.schema.json) | The full queue schema (gives inline validation in editors) |
+| Examples | [simple](limitshift-queue.example-simple.json) · [workflow](limitshift-queue.example-workflow.json) · [advanced](limitshift-queue.example-advanced.json) |
 
 ## License
 

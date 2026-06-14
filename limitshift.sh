@@ -964,6 +964,43 @@ build_cli_args() {
   esac
 }
 
+# agy (Antigravity CLI) renders its reply to a TTY; a captured/redirected stdout is empty. agy DOES
+# persist every turn as JSONL, so recover the reply from agy's conversation store (jq is already a
+# dependency):
+#   <dataDir>/cache/last_conversations.json    maps an absolute workspace path -> conversation id
+#   <dataDir>/brain/<id>/.system_generated/logs/transcript.jsonl   the agent reply is the `content`
+#       of the last {"type":"PLANNER_RESPONSE"} object.
+# dataDir defaults to ~/.gemini/antigravity-cli (override with LIMITSHIFT_AGY_DATA_DIR, e.g. in tests).
+agy_data_dir() {
+  if [ -n "${LIMITSHIFT_AGY_DATA_DIR:-}" ]; then
+    printf '%s' "$LIMITSHIFT_AGY_DATA_DIR"
+  else
+    printf '%s' "$HOME/.gemini/antigravity-cli"
+  fi
+}
+
+agy_response_from_transcript() {
+  local project_path="$1"
+  project_path="${project_path%$'\r'}"
+  local data_dir cache cid tx k v
+  data_dir=$(agy_data_dir)
+  cache="$data_dir/cache/last_conversations.json"
+  [ -f "$cache" ] || return 0
+  # Resolve the conversation id for this workspace. The key is matched in bash (not passed to jq as a
+  # --arg/$ENV value) so a Unix path is never rewritten by MSYS path-conversion under Windows git-bash;
+  # a jq *file* argument is fine. CRs are stripped because the native Windows jq build emits CRLF. On
+  # Mac/Linux this is a plain exact-string match.
+  cid=""
+  while IFS=$'\t' read -r k v; do
+    k="${k%$'\r'}"; v="${v%$'\r'}"
+    if [ "$k" = "$project_path" ]; then cid="$v"; break; fi
+  done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' "$cache" 2>/dev/null)
+  [ -n "$cid" ] || return 0
+  tx="$data_dir/brain/$cid/.system_generated/logs/transcript.jsonl"
+  [ -f "$tx" ] || return 0
+  jq -rs 'map(select(.type=="PLANNER_RESPONSE" and ((.content // "") != ""))) | (last // {}) | .content // empty' "$tx" 2>/dev/null | tr -d '\r'
+}
+
 parse_cli_output() {
   local cli="$1" output="$2" exit_code="$3"
   # agy passes its plain-text stdout as $output and the combined stdout+stderr as $4 (limit haystack).
@@ -1072,17 +1109,22 @@ parse_cli_output() {
       fi
       ;;
     agy)
-      # agy has no structured output: the response is its plain-text stdout (passed as $output); fall
-      # back to the combined stream if stdout is empty (mirrors limitshift.ps1). There is no session id
-      # to capture (resume is the -c flag), so R_SESSION_ID stays empty. A usage limit only counts when
-      # the run FAILED (exit != 0) — exactly like claude/codex — so a successful response mentioning
-      # "429"/"rate limit"/"quota" is not misread as a limit.
-      if [ -n "$output" ]; then R_TEXT="$output"; else R_TEXT="$combined"; fi
-      if [ "$exit_code" -ne 0 ]; then
+      # agy has no JSON/stdout output mode (it renders to a TTY). The caller recovers the reply from
+      # agy's persisted transcript and passes it as $output (falling back to captured stdout for stubs).
+      # Success is based on whether a response came back — agy's exit code is unreliable under output
+      # redirection. There is no session id to capture (resume is the -c flag), so R_SESSION_ID stays
+      # empty. A usage limit only applies when NO response came back; then scan the combined stream, so
+      # a successful reply mentioning "429"/"rate limit"/"quota" is never misread as a limit.
+      R_TEXT="$output"
+      if [ -z "$output" ]; then
         R_OK=0
-        R_ERROR_TEXT="$combined"
         if printf '%s' "$combined" | grep -qiE "$limit_regex" >/dev/null 2>&1; then
           R_IS_LIMIT=1
+        fi
+        if [ -n "$combined" ]; then
+          R_ERROR_TEXT="$combined"
+        else
+          R_ERROR_TEXT="agy produced no capturable response (no transcript reply found and stdout was empty)"
         fi
       fi
       ;;
@@ -1213,9 +1255,19 @@ invoke_cli_task_run() {
   fi
 
   # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
-  # agy: pass stdout as the response text and the combined stdout+stderr as the limit/error haystack.
+  # agy renders its reply to a TTY (captured stdout is empty), so recover the response from agy's
+  # persisted transcript (keyed by projectPath); retry once for flush lag, then fall back to the
+  # captured stdout (covers test stubs and any future agy that prints). The combined stdout+stderr is
+  # passed as the limit/error haystack.
   if [ "$cli" = "agy" ]; then
-    parse_cli_output "$cli" "$agy_stdout" "$exit_code" "$output_text"
+    local agy_response
+    agy_response=$(agy_response_from_transcript "$project_path")
+    if [ -z "$agy_response" ]; then
+      sleep 0.3
+      agy_response=$(agy_response_from_transcript "$project_path")
+    fi
+    [ -z "$agy_response" ] && agy_response="$agy_stdout"
+    parse_cli_output "$cli" "$agy_response" "$exit_code" "$output_text"
   else
     parse_cli_output "$cli" "$output_text" "$exit_code"
   fi

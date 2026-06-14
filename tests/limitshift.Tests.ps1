@@ -1072,9 +1072,9 @@ exit 0
         }
 
         It 'does NOT misread a successful agy response that mentions a limit keyword as a usage limit' {
-            # agy has no structured output, so the limit regex is scanned against the agent's own
-            # plain-text reply. A successful (exit 0) reply that talks about 429s/rate limits must
-            # stay Ok=true / IsLimit=false — the limit check is gated on a non-zero exit, like claude/codex.
+            # agy's reply is recovered from its transcript and passed as StdOut. A reply that mentions
+            # 429s/rate limits must stay Ok=true / IsLimit=false: a recovered response means the run
+            # succeeded, so the limit regex is only consulted when NO response came back.
             $out = "Implemented retry-on-429 and rate limit handling in client.py.`nOK [[TASK_COMPLETE]]"
             $result = ConvertFrom-CliOutput -Cli agy -OutputText $out -ExitCode 0 -StdOut $out
             $result.Ok | Should -Be $true
@@ -1082,10 +1082,36 @@ exit 0
             (Get-MarkerStatus -Text $result.Text).Status | Should -Be 'Done'
         }
 
-        It 'treats a non-zero agy exit with no limit message as a plain error, not a limit' {
-            $result = ConvertFrom-CliOutput -Cli agy -OutputText 'something went wrong' -ExitCode 1 -StdOut 'something went wrong'
+        It 'treats an agy run with no recovered response and no limit message as a plain error, not a limit' {
+            # No transcript reply recovered (StdOut empty) and nothing limit-like in the output -> error.
+            $result = ConvertFrom-CliOutput -Cli agy -OutputText 'something went wrong' -ExitCode 1 -StdOut ''
             $result.Ok | Should -Be $false
             $result.IsLimit | Should -Be $false
+        }
+
+        It 'recovers the agy reply from the persisted transcript store (last PLANNER_RESPONSE)' {
+            $data = Join-Path $TestDrive 'agydata'
+            $proj = 'C:\Users\me\proj-xyz'
+            $cid = 'conv-abc'
+            New-Item -ItemType Directory -Force -Path (Join-Path $data 'cache') | Out-Null
+            $txDir = Join-Path $data "brain/$cid/.system_generated/logs"
+            New-Item -ItemType Directory -Force -Path $txDir | Out-Null
+            "{`"$($proj -replace '\\','\\')`":`"$cid`"}" | Set-Content -LiteralPath (Join-Path $data 'cache/last_conversations.json') -Encoding UTF8
+            @(
+                '{"step_index":0,"type":"USER_INPUT","content":"do the thing"}',
+                '{"step_index":2,"type":"PLANNER_RESPONSE","content":"first reply"}',
+                '{"step_index":4,"type":"PLANNER_RESPONSE","content":"final reply [[TASK_COMPLETE]]"}'
+            ) | Set-Content -LiteralPath (Join-Path $txDir 'transcript.jsonl') -Encoding UTF8
+
+            $resp = Get-AgyResponseFromTranscript -ProjectPath $proj -DataDir $data
+            $resp | Should -Be 'final reply [[TASK_COMPLETE]]'
+        }
+
+        It 'returns nothing when the project has no agy conversation in the store' {
+            $data = Join-Path $TestDrive 'agydata2'
+            New-Item -ItemType Directory -Force -Path (Join-Path $data 'cache') | Out-Null
+            '{}' | Set-Content -LiteralPath (Join-Path $data 'cache/last_conversations.json') -Encoding UTF8
+            Get-AgyResponseFromTranscript -ProjectPath 'C:\nope\here' -DataDir $data | Should -BeNullOrEmpty
         }
 
         It 'survives non-JSON garbage output without throwing' {

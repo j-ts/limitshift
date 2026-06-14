@@ -1423,6 +1423,47 @@ $out"
   fi
 }
 
+run_agy_transcript_capture_test() {
+  local desc="agy reply recovered from the transcript store when stdout is empty"
+  local root="$TMP_ROOT/agy-transcript"
+  local bin_dir="$root/bin" project_dir="$root/project" data_dir="$root/agydata" queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+  # Stub agy prints NOTHING to stdout (like real agy under output redirection); instead it writes the
+  # conversation store LimitShift reads: last_conversations.json (workspace -> id) and the transcript
+  # whose last PLANNER_RESPONSE holds the reply (+ completion marker).
+  cat > "$bin_dir/agy" <<'EOF'
+#!/usr/bin/env bash
+set -u
+dd="${LIMITSHIFT_AGY_DATA_DIR:?}"
+key="${AGY_STUB_PROJKEY:?}"
+cid="testconv1"
+mkdir -p "$dd/cache" "$dd/brain/$cid/.system_generated/logs"
+printf '{"%s":"%s"}\n' "$key" "$cid" > "$dd/cache/last_conversations.json"
+{
+  printf '%s\n' '{"type":"USER_INPUT","content":"do it"}'
+  printf '%s\n' '{"type":"PLANNER_RESPONSE","content":"Recovered via transcript. [[TASK_COMPLETE]]"}'
+} > "$dd/brain/$cid/.system_generated/logs/transcript.jsonl"
+exit 0
+EOF
+  chmod +x "$bin_dir/agy"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "agy tx", "cli": "agy", "projectPath": "$project_dir", "prompt": "do it", "extraArgs": ["--dangerously-skip-permissions"] } ] }
+EOF
+  local out exit_code
+  out=$(LIMITSHIFT_AGY_DATA_DIR="$data_dir" AGY_STUB_PROJKEY="$project_dir" PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Recovered via transcript'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- console ---
+$out
+--- store ---
+$(cat "$data_dir/cache/last_conversations.json" 2>/dev/null)"
+  fi
+}
+
 run_effort_claude_ultracode_rejected_test() {
   local desc="claude ultracode is rejected with an interactive-only hint naming the task"
   local root="$TMP_ROOT/effort-ultracode"; local project_dir="$root/project"; local queue_path="$root/queue.json"
@@ -1901,6 +1942,7 @@ run_model_single_string_test
 run_agy_prompt_as_arg_test
 run_agy_resume_continue_test
 run_agy_limit_keyword_not_misread_test
+run_agy_transcript_capture_test
 run_shipped_examples_validate_test
 
 echo
