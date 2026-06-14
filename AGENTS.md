@@ -74,13 +74,19 @@ Useful optional fields:
   `gemini-2.5-pro` or `gemini-3.1-pro-preview` for depth. Omit `effort` or set it to `null`.
   Model arrays are especially useful for Gemini limit rotation.
 - Antigravity (`agy`): run `agy models` to see what the account can use; pass the chosen name as
-  `model`. Omit `effort` or set it to `null` (agy has no `--effort` flag). agy has no headless output
+  `model`. Omit `effort` or set it to `null` (agy has no `--effort` flag).
+
+> **Schema note:** `limitshift-queue.schema.json` validates `model` as a string or non-empty string array — it does not enumerate provider model names. Do not update the schema to add new model names; they are discovered at runtime from the CLI during `--validate-only`.
+
+  agy has no headless output
   and no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
   checking (`completionCheck: true`) still works because the runner recovers agy's reply from its
   conversation transcript.
 - GitHub Copilot CLI (`copilot`): run `copilot models` to see what your account can use; pass the
   chosen name as `model`. Effort: `low`, `medium`, `high`, `xhigh`, `max`. Copilot delivers prompts
-  via `-p`, uses `--name` / `--resume` for session identity, and returns structured JSONL.
+  via `-p`, uses `--name` / `--resume` for session identity, returns structured JSONL, and supports
+  `--output-format=json`, `--stream=off`, `--no-ask-user`, `--allow-tool`, `--deny-tool`, and
+  `--allow-all` / `--yolo`-style permission bypass where appropriate.
 
 ## Permission Flags
 
@@ -91,7 +97,7 @@ Headless CLI runs cannot answer permission prompts. If a task should edit files,
 - Gemini: `["--approval-mode", "auto_edit"]`
 - Antigravity (`agy`): `["--dangerously-skip-permissions"]` (agy's only headless auto-approve; it
   has no softer "accept edits only" mode).
-- Copilot: `["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]` (automation mode: `["--allow-all", "--no-ask-user"]`).
+- Copilot: recommended edit args are `["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]`; full automation mode is `["--allow-all", "--no-ask-user"]` and should only be used when you fully trust the task.
 
 Without these flags, the agent may run read-only and leave the project unchanged.
 
