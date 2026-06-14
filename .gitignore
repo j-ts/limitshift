@@ -15,6 +15,7 @@ ai-run-queue*.json
 run-gemini-phase1.ps1
 phase1-automation-tasks.ps1
 RELEASE-PLAN.md
+copilot-integration-verify.md
 
 # OS noise
 Thumbs.db
