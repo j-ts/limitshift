@@ -1120,7 +1120,7 @@ plain trailing text
 '@
             $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 1
             $result.Ok | Should -Be $false
-            $result.Text | Should -Be 'plain trailing text'
+            $result.Text | Should -Be $out.Trim()
             $result.SessionId | Should -Be 'cp-raw'
         }
         It 'parses an agy plain-text success from stdout and exposes the completion marker' {
