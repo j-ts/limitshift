@@ -11,7 +11,7 @@
       "cli": "codex",
       "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "model": "gpt-5.5",
-      "effort": "high",
+      "effort": "xhigh",
       "extraArgs": ["--sandbox", "workspace-write"],
       "prompt": "Review the code in src/ and write every bug or issue you find to bugs.md - one numbered item per bug, each with its file path and a short description. Do not fix anything yet."
     },
