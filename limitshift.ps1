@@ -3,6 +3,7 @@ param(
     [switch]$ValidateOnly,
     [switch]$DryRun,
     [switch]$ShowRawOutput,
+    [switch]$Demo,
     [switch]$LoadFunctionsOnly,
     [switch]$RefreshCapabilities,
     [switch]$ProbeModels
@@ -73,12 +74,495 @@ $PollSecondsAfterResetPassed = 60
 $TaskCompleteMarker = "[[TASK_COMPLETE]]"
 $TaskBlockedMarker  = "[[TASK_BLOCKED]]"
 
+# ---- UI output theme (prototype) ------------------------------------------------
+# Cosmetic only; runner behavior, flags and exit codes are unchanged. Colors use
+# Write-Host -ForegroundColor (works on Windows PowerShell 5.1 with no ANSI). Live
+# animations use [Console]::Write so they redraw in place AND stay out of the
+# Start-Transcript log; they auto-disable when stdout is redirected / not a TTY.
+# Every glyph is a [char] code (not literal Unicode) so the file stays ASCII-source.
+$script:UiAccentColor = [System.ConsoleColor]::Magenta
+$script:UiTaskTotal   = 0
+$script:UiTaskStart   = $null
+
+$script:GlyphStar = [char]0x2726   # four-pointed star
+$script:GlyphTask  = [char]0x25B8   # small right triangle
+$script:GlyphDone  = [char]0x2713   # check mark
+$script:GlyphErr   = [char]0x2717   # ballot x
+$script:GlyphArrow = [char]0x2192   # rightwards arrow
+$script:GlyphDot   = [char]0x00B7   # middle dot
+$script:GlyphMoon    = [char]0x263E   # last-quarter moon
+$script:GlyphDash    = [char]0x2014   # em dash
+$script:GlyphRetry   = [char]0x21BB   # clockwise open-circle arrow
+$script:GlyphDiamond = [char]0x25C6   # black diamond, used only on the final summary line
+
+# Milestone lines (task done / all done) are indented farther so they read as section end-caps.
+$script:UiMilestoneIndent = '      '
+
+function Test-UiAnimatable {
+    # Animate only on a real interactive console: not when stdout is redirected to a file/pipe.
+    try { return -not [Console]::IsOutputRedirected } catch { return $false }
+}
+
+function Format-UiDuration {
+    # Human-friendly time spans: '2 seconds', '5 minutes', '1 hour 23 minutes'. Used by the
+    # past-tense limit beat after a usage-reset rest.
+    param([TimeSpan]$Span)
+    if ($null -eq $Span) { return '0 seconds' }
+    if ($Span.TotalSeconds -lt 60) {
+        $s = [int][Math]::Round($Span.TotalSeconds)
+        if ($s -le 1) { return '1 second' }
+        return "$s seconds"
+    }
+    if ($Span.TotalMinutes -lt 60) {
+        $m = [int][Math]::Round($Span.TotalMinutes)
+        if ($m -eq 1) { return '1 minute' }
+        return "$m minutes"
+    }
+    $h = [int][Math]::Floor($Span.TotalHours)
+    $m = $Span.Minutes
+    $hpart = if ($h -eq 1) { '1 hour' } else { "$h hours" }
+    if ($m -eq 0) { return $hpart }
+    $mpart = if ($m -eq 1) { '1 minute' } else { "$m minutes" }
+    return "$hpart $mpart"
+}
+
 function Write-Step {
     param([string]$Message)
 
+    # Softer, lower-key section marker than the old ==== ... ==== banner.
     Write-Host ""
-    Write-Host "==== $Message ===="
+    Write-Host ("  " + $script:GlyphDot + " ") -ForegroundColor DarkGray -NoNewline
+    Write-Host $Message -ForegroundColor Gray
+}
+
+function Write-UiBeat {
+    # One accented status line. Reserved for the big beats (limits, summary).
+    param([string]$Glyph, [string]$Message, [System.ConsoleColor]$Color = $script:UiAccentColor)
+    Write-Host ("  " + $Glyph + " ") -ForegroundColor $Color -NoNewline
+    Write-Host $Message -ForegroundColor Gray
+}
+
+function Write-UiBanner {
+    param([int]$TaskCount, [string[]]$Clis)
+    $cliList = (@($Clis) | Select-Object -Unique) -join ', '
+    $plural = if ($TaskCount -eq 1) { '' } else { 's' }
     Write-Host ""
+    Write-Host ("  " + $script:GlyphStar + " LimitShift") -ForegroundColor $script:UiAccentColor -NoNewline
+    Write-Host ("   " + $script:GlyphDot + "   " + $TaskCount + " task" + $plural + " queued " + $script:GlyphDot + " " + $cliList) -ForegroundColor DarkGray
+}
+
+function Get-UiPromptPreview {
+    # First up-to-2 non-blank lines of the user's prompt, each trimmed to a sensible width,
+    # with the automation-marker boilerplate stripped so the user sees THEIR words.
+    param([string]$PromptText, [int]$MaxLines = 2, [int]$Width = 72)
+
+    $ellipsis   = [char]0x2026
+    $openQuote  = [char]0x201C
+    $closeQuote = [char]0x201D
+
+    if ([string]::IsNullOrWhiteSpace($PromptText)) { return @('(empty prompt)') }
+
+    $text = $PromptText
+    $cut = $text.IndexOf('IMPORTANT AUTOMATION INSTRUCTIONS')
+    if ($cut -ge 0) { $text = $text.Substring(0, $cut) }
+
+    $lines = @($text -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($lines.Count -eq 0) { return @('(empty prompt)') }
+
+    $take = [Math]::Min($MaxLines, $lines.Count)
+    $preview = New-Object System.Collections.Generic.List[string]
+    $truncatedLast = $false
+    for ($k = 0; $k -lt $take; $k++) {
+        $l = $lines[$k]
+        if ($l.Length -gt $Width) {
+            $l = $l.Substring(0, $Width - 1).TrimEnd() + $ellipsis
+            $truncatedLast = $true
+        }
+        else {
+            $truncatedLast = $false
+        }
+        $preview.Add($l)
+    }
+
+    $more = ($lines.Count -gt $take) -or $truncatedLast
+    $lastIdx = $preview.Count - 1
+    $preview[0] = [string]$openQuote + $preview[0]
+    if ($more -and -not $truncatedLast) { $preview[$lastIdx] = $preview[$lastIdx] + $ellipsis }
+    $preview[$lastIdx] = $preview[$lastIdx] + $closeQuote
+    return $preview.ToArray()
+}
+
+function Write-UiTaskHeader {
+    param([int]$TaskNumber, [int]$TaskTotal, $Task, [string]$Mode, [string]$Model, [string]$PromptText)
+
+    $modeWord = if ($Mode -eq 'New') { 'new' } else { 'resume' }
+    $meta = "   " + $Task.Cli
+    if (-not [string]::IsNullOrWhiteSpace($Model)) { $meta += " " + $script:GlyphDot + " " + $Model }
+    $meta += " " + $script:GlyphDot + " " + $modeWord
+
+    Write-Host ""
+    Write-Host ("  " + $script:GlyphTask + " ") -ForegroundColor $script:UiAccentColor -NoNewline
+    Write-Host ("Task " + $TaskNumber + "/" + $TaskTotal + " " + $script:GlyphDot + " " + $Task.Name) -ForegroundColor White -NoNewline
+    Write-Host $meta -ForegroundColor DarkGray
+
+    # On Resume the prompt is unchanged from the previous run and the full text is already in the
+    # output file - skip the preview block so the resume header is a single compact line.
+    if ($Mode -eq 'New') {
+        foreach ($line in (Get-UiPromptPreview -PromptText $PromptText)) {
+            Write-Host ("  " + $line) -ForegroundColor DarkYellow
+        }
+        Write-Host ("  " + $script:GlyphArrow + " full prompt saved to the output file") -ForegroundColor DarkGray
+    }
+
+    $script:UiTaskStart = Get-Date
+}
+
+function Write-UiTaskDone {
+    param([int]$TaskNumber)
+    $tail = ''
+    if ($null -ne $script:UiTaskStart) {
+        $e = (Get-Date) - $script:UiTaskStart
+        $tail = '  ' + $script:GlyphDot + '  ' + ('{0}:{1:00}' -f [int][Math]::Floor($e.TotalMinutes), $e.Seconds)
+    }
+    Write-Host ""
+    Write-Host ($script:UiMilestoneIndent + $script:GlyphDone + " ") -ForegroundColor Green -NoNewline
+    Write-Host ("Task " + $TaskNumber + " done" + $tail) -ForegroundColor Gray
+}
+
+function Write-UiSummary {
+    # The final summary line. Three variants, picked from $DoneCount / $FailedCount and whether
+    # every task ran in completion-check mode (only then do we KNOW each task finished cleanly):
+    #   - any failed       -> bulleted breakdown + transcript link
+    #   - all succeeded, every task had completionCheck:true  -> "executed successfully"
+    #   - all succeeded, any task was completionCheck:false   -> "executed. Please check the work manually"
+    # Dry-run has its own simple variant. The accent glyph is the diamond (GlyphDiamond), not the
+    # four-pointed star (GlyphStar) - the star is already the "response" header glyph.
+    param(
+        [int]$TaskCount,
+        [int]$DoneCount,
+        [int]$FailedCount,
+        [bool]$AllCompletionCheck,
+        [string]$LogPath,
+        [switch]$DryRun
+    )
+
+    Write-Host ""
+    Write-UiSeparator
+    Write-Host ""
+
+    if ($DryRun) {
+        $plural = if ($TaskCount -eq 1) { '' } else { 's' }
+        Write-Host ("  " + $script:GlyphDiamond + " Dry run complete") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " recorded " + $TaskCount + " task command" + $plural + ", no CLIs were run.") -ForegroundColor Gray
+        return
+    }
+
+    if ($FailedCount -gt 0) {
+        Write-Host ("  " + $script:GlyphDiamond + " All done") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " all queued tasks were executed:") -ForegroundColor Gray
+        Write-Host ("      " + $script:GlyphDot + " " + $DoneCount + " completed") -ForegroundColor Green
+        Write-Host ("      " + $script:GlyphDot + " " + $FailedCount + " failed") -ForegroundColor Red
+        Write-Host ""
+        Write-Host ("    See a detailed transcript in " + $LogPath) -ForegroundColor DarkGray
+        return
+    }
+
+    $plural = if ($TaskCount -eq 1) { '' } else { 's' }
+    if ($AllCompletionCheck) {
+        Write-Host ("  " + $script:GlyphDiamond + " All done") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " all " + $TaskCount + " queued task" + $plural + " were executed successfully.") -ForegroundColor Gray
+    }
+    else {
+        Write-Host ("  " + $script:GlyphDiamond + " All done") -ForegroundColor $script:UiAccentColor -NoNewline
+        Write-Host (" " + $script:GlyphDash + " all " + $TaskCount + " queued task" + $plural + " were executed. Please check the work manually.") -ForegroundColor Gray
+    }
+    Write-Host ("    log saved to " + $LogPath) -ForegroundColor DarkGray
+}
+
+function Invoke-UiSpinner {
+    # Redraws the "working" line in place while $Process runs. Uses [Console]::Write so frames
+    # never reach the transcript. The little light glides back and forth across a fixed track.
+    param([System.Diagnostics.Process]$Process)
+
+    $verbs = @('running', 'reading', 'operating', 'considering', 'still on it', 'wondering', 'progressing', 'performing')
+    $track = 7
+    $pos = 0
+    $dir = 1
+    $dot = [char]0x00B7
+    $star = [char]0x2726
+    $start = Get-Date
+    $cr = [string][char]13
+    $cursorRestore = $null
+    try { $cursorRestore = [Console]::CursorVisible; [Console]::CursorVisible = $false } catch {}
+
+    try {
+        while (-not $Process.HasExited) {
+            $sb = New-Object System.Text.StringBuilder
+            for ($i = 0; $i -lt $track; $i++) {
+                $d = [Math]::Abs($i - $pos)
+                $ch = if ($d -eq 0) { [char]0x25CF } elseif ($d -eq 1) { [char]0x25CB } elseif ($d -eq 2) { [char]0x2218 } else { [char]0x00B7 }
+                [void]$sb.Append($ch)
+            }
+            $elapsed = (Get-Date) - $start
+            $mmss = '{0}:{1:00}' -f [int][Math]::Floor($elapsed.TotalMinutes), $elapsed.Seconds
+            $verb = $verbs[[int]([Math]::Floor($elapsed.TotalSeconds / 3) % $verbs.Count)]
+
+            [Console]::Write($cr)
+            $prev = [Console]::ForegroundColor
+            try {
+                [Console]::ForegroundColor = $script:UiAccentColor
+                [Console]::Write("  " + $star + " " + $sb.ToString() + " ")
+                [Console]::ForegroundColor = [System.ConsoleColor]::DarkGray
+                [Console]::Write(($verb + " " + $dot + " " + $mmss).PadRight(20))
+            }
+            finally { [Console]::ForegroundColor = $prev }
+
+            $pos += $dir
+            if ($pos -ge ($track - 1) -or $pos -le 0) { $dir = -$dir }
+            Start-Sleep -Milliseconds 140
+        }
+    }
+    finally {
+        [Console]::Write($cr + (' ' * 44) + $cr)
+        if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
+    }
+}
+
+function Invoke-UiRestWithSummary {
+    # Show 'Hit a usage limit on <cli>, resting now till <when>' with a live countdown directly
+    # below it. When the wait ends, the countdown line is erased and the header line is rewritten
+    # in past tense: 'Hit a usage limit on <cli>, rested for X time'. Refuses to wait > 24h
+    # (likely a weekly reset) - throws so the runner surfaces the error instead of blocking.
+    param([string]$Cli, [datetime]$WakeTime)
+
+    $now = Get-Date
+    $waitSpan = $WakeTime - $now
+    if ($waitSpan.TotalHours -gt 24) {
+        $human = Format-UiDuration -Span $waitSpan
+        $when = $WakeTime.ToString('ddd MMM d, h:mm tt')
+        $msg = "Hit a usage limit on $Cli, reset not until $when (in $human). That is more than 24 hours - too long to wait, refusing (likely a weekly reset)."
+        Write-Host ""
+        Write-Host ("  " + $script:GlyphErr + " " + $msg) -ForegroundColor Red
+        throw $msg
+    }
+
+    $wakeStr = if ($WakeTime.Date -eq $now.Date) {
+        $WakeTime.ToString('h:mm tt')
+    } else {
+        $WakeTime.ToString('ddd MMM d, h:mm tt')
+    }
+    $presentMsg = "Hit a usage limit on " + $Cli + ", resting now till " + $wakeStr
+
+    $start = Get-Date
+
+    if (-not (Test-UiAnimatable)) {
+        Write-Host ""
+        Write-UiBeat -Glyph ([string]$script:GlyphMoon) -Message $presentMsg -Color Blue
+        Invoke-UiRest -WakeTime $WakeTime
+        $elapsed = (Get-Date) - $start
+        if ($elapsed.TotalSeconds -ge 1) {
+            Write-UiBeat -Glyph ([string]$script:GlyphMoon) -Message ("Hit a usage limit on " + $Cli + ", rested for " + (Format-UiDuration -Span $elapsed)) -Color Blue
+        }
+        return
+    }
+
+    # Animated: print the present-tense header via [Console]::Write so it can be overwritten in
+    # place when the timer ends. Only the final past-tense line goes through Write-Host, so the
+    # transcript records exactly one moon line per rest.
+    Write-Host ""
+    $prev = [Console]::ForegroundColor
+    try {
+        [Console]::ForegroundColor = [System.ConsoleColor]::Blue
+        [Console]::Write("  " + $script:GlyphMoon + " ")
+        [Console]::ForegroundColor = [System.ConsoleColor]::Gray
+        [Console]::Write($presentMsg)
+    } finally { [Console]::ForegroundColor = $prev }
+    [Console]::WriteLine()
+
+    Invoke-UiRest -WakeTime $WakeTime
+    $elapsed = (Get-Date) - $start
+
+    # After Invoke-UiRest, the cursor sits at column 0 of the (now blank) countdown line; the
+    # header is the line directly above. Wipe it before writing the past-tense replacement.
+    try {
+        $top = [Console]::CursorTop
+        if ($top -gt 0) {
+            $w = [Math]::Max(1, [Console]::WindowWidth - 1)
+            [Console]::SetCursorPosition(0, $top - 1)
+            [Console]::Write((' ' * $w))
+            [Console]::SetCursorPosition(0, $top - 1)
+        }
+    } catch {}
+
+    if ($elapsed.TotalSeconds -ge 1) {
+        Write-UiBeat -Glyph ([string]$script:GlyphMoon) -Message ("Hit a usage limit on " + $Cli + ", rested for " + (Format-UiDuration -Span $elapsed)) -Color Blue
+    }
+}
+
+function Invoke-UiRest {
+    # Calm "resting" indicator with a live countdown while waiting out a usage limit. Falls back
+    # to a plain Start-Sleep when output is redirected.
+    param([datetime]$WakeTime)
+
+    if (-not (Test-UiAnimatable)) {
+        $secs = [int]($WakeTime - (Get-Date)).TotalSeconds
+        if ($secs -gt 0) { Start-Sleep -Seconds $secs }
+        return
+    }
+
+    $moons = @([char]0x25D0, [char]0x25D3, [char]0x25D1, [char]0x25D2)
+    $mi = 0
+    $cr = [string][char]13
+    $cursorRestore = $null
+    try { $cursorRestore = [Console]::CursorVisible; [Console]::CursorVisible = $false } catch {}
+
+    try {
+        while ((Get-Date) -lt $WakeTime) {
+            $remain = $WakeTime - (Get-Date)
+            $cd = '{0:00}:{1:00}:{2:00}' -f [int][Math]::Floor($remain.TotalHours), $remain.Minutes, $remain.Seconds
+            [Console]::Write($cr)
+            $prev = [Console]::ForegroundColor
+            try {
+                [Console]::ForegroundColor = [System.ConsoleColor]::Blue
+                [Console]::Write("     " + $moons[$mi % $moons.Count] + " ")
+                [Console]::ForegroundColor = [System.ConsoleColor]::DarkGray
+                [Console]::Write("resting " + [char]0x00B7 + " " + $cd + " until " + $WakeTime.ToString('h:mm tt') + "   ")
+            }
+            finally { [Console]::ForegroundColor = $prev }
+            $mi++
+            Start-Sleep -Milliseconds 1000
+        }
+    }
+    finally {
+        [Console]::Write($cr + (' ' * 52) + $cr)
+        if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
+    }
+}
+
+function Start-UiFakeWork {
+    # Demo helper: drive the real spinner against a tiny sleeper process (no CLI is run).
+    param([int]$Seconds = 4)
+    if (-not (Test-UiAnimatable)) {
+        Write-Host ("  " + $script:GlyphStar + " working...") -ForegroundColor $script:UiAccentColor
+        Start-Sleep -Seconds $Seconds
+        return
+    }
+    $p = Start-Process -FilePath (Get-Command powershell.exe).Source `
+        -ArgumentList @('-NoProfile', '-Command', "Start-Sleep -Seconds $Seconds") `
+        -NoNewWindow -PassThru
+    Invoke-UiSpinner -Process $p
+    try { $p.WaitForExit() } catch {}
+}
+
+function Write-UiResponseHeader {
+    Write-Host ""
+    Write-Host ("  " + $script:GlyphStar + " ") -ForegroundColor $script:UiAccentColor -NoNewline
+    Write-Host "response" -ForegroundColor DarkGray
+}
+
+function Write-UiReason {
+    # Format a failure reason: quoted on one line if short and single-line; otherwise Write-UiBody.
+    # Used by error / blocked / stall messages so the agent's reason is always visible.
+    param([string]$Text, [int]$MaxLines = 10)
+    $r = if ($null -eq $Text) { '' } else { [string]$Text }
+    $lines = @($r -split "`r?`n" | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne '' })
+    if ($lines.Count -eq 0) {
+        Write-Host '  "(no detail)"' -ForegroundColor Gray
+        return
+    }
+    if ($lines.Count -eq 1) {
+        Write-Host ('  "' + $lines[0] + '"') -ForegroundColor Gray
+        return
+    }
+    Write-UiBody -Text $r -MaxLines $MaxLines -Color Gray
+}
+
+function Write-UiBody {
+    # Print at most $MaxLines of a (possibly huge) block, then a dim "trimmed" note pointing at the
+    # output file. Replies and especially errors can run to hundreds of lines; the FULL text is always
+    # written to the per-task output file, so trimming the console view loses nothing.
+    param([string]$Text, [int]$MaxLines = 10, [System.ConsoleColor]$Color)
+
+    if ($null -eq $Text) { return }
+    $hasColor = $PSBoundParameters.ContainsKey('Color')
+    $lines = $Text -split "`r?`n"
+    $show = [Math]::Min($MaxLines, $lines.Count)
+    for ($i = 0; $i -lt $show; $i++) {
+        if ($hasColor) { Write-Host $lines[$i] -ForegroundColor $Color } else { Write-Host $lines[$i] }
+    }
+    if ($lines.Count -gt $MaxLines) {
+        $hidden = $lines.Count - $MaxLines
+        $plural = if ($hidden -eq 1) { '' } else { 's' }
+        Write-Host ("  " + $script:GlyphDot + " " + $hidden + " more line" + $plural + " trimmed " + $script:GlyphDot + " full text in the output file") -ForegroundColor DarkGray
+    }
+}
+
+function Write-UiSeparator {
+    # A dim rule drawn between tasks so each one reads as its own block.
+    $rule = [string][char]0x2500
+    Write-Host ""
+    Write-Host ("  " + ($rule * 54)) -ForegroundColor DarkGray
+}
+
+function Invoke-UiDemo {
+    # Scripted, no-network preview driven by limitshift-queue.example-workflow.json
+    # (the shipped review -> fix -> verify pipeline). No CLIs run, no quota used.
+    # The usage-limit / resting state plays on task 2 (Fix bugs with Copilot).
+    #   .\limitshift-preview.ps1 -Demo
+
+    $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $workflowPath = Join-Path $root 'limitshift-queue.example-workflow.json'
+    if (-not (Test-Path -LiteralPath $workflowPath)) {
+        Write-Host ("  " + $script:GlyphErr + " Demo file not found: " + $workflowPath) -ForegroundColor Red
+        return
+    }
+    $workflow = Get-Content -LiteralPath $workflowPath -Raw | ConvertFrom-Json
+    $tasks = @($workflow.tasks)
+    $count = $tasks.Count
+    $script:UiTaskTotal = $count
+
+    # Canned demo replies aligned with the workflow's review -> fix -> verify intent. The workflow
+    # JSON sets completionCheck:true (see its "settings"), so each agent reply must end with the
+    # [[TASK_COMPLETE]] marker on the very last line - that is the protocol the real runner parses.
+    $replies = @(
+        "Wrote bugs.md with 7 numbered issues found in src/ (auth, parsing, error handling).`n[[TASK_COMPLETE]]",
+        "Walked bugs.md top to bottom; applied fixes and appended ' - FIXED' to each item.`n[[TASK_COMPLETE]]",
+        "Audited bugs.md against current src/: 6 items verified fixed, 1 still broken (src/auth/token.ts: race on expired refresh).`n[[TASK_COMPLETE]]"
+    )
+
+    Write-UiBanner -TaskCount $count -Clis @($tasks | ForEach-Object { $_.cli })
+    Write-Host ("    started " + (Get-Date).ToString('ddd HH:mm') + " " + $script:GlyphDot + " demo from " + (Split-Path -Leaf $workflowPath) + " (no CLIs are run)") -ForegroundColor DarkGray
+
+    for ($k = 0; $k -lt $count; $k++) {
+        $t = $tasks[$k]
+        $taskNumber = $k + 1
+        if ($k -gt 0) { Write-UiSeparator }
+
+        # Optional model from the JSON (StrictMode 2 needs a property-presence check).
+        $model = if ($t.PSObject.Properties['model']) { [string]$t.model } else { '' }
+
+        # First run: full header with prompt preview.
+        Write-UiTaskHeader -TaskNumber $taskNumber -TaskTotal $count -Task $t -Mode New -Model $model -PromptText $t.prompt
+        Start-UiFakeWork -Seconds 4
+
+        # Usage-limit / resting state plays on task 2 only. Mirrors the real runner:
+        # silent during rest (the countdown is the indicator), past-tense beat after the timer is up,
+        # then the resumed work starts straight from the spinner - NO repeated task header.
+        if ($taskNumber -eq 2) {
+            Invoke-UiRestWithSummary -Cli ([string]$t.cli) -WakeTime ((Get-Date).AddSeconds(2))
+            Start-UiFakeWork -Seconds 2
+        }
+
+        Write-UiResponseHeader
+        Write-UiBody -Text $replies[$k] -MaxLines 10
+        Write-UiTaskDone -TaskNumber $taskNumber
+    }
+
+    # Real loop's settings.completionCheck applies to all tasks by default in this workflow JSON,
+    # so the demo summary takes the "all completion-check, all succeeded" variant. Log path here
+    # is illustrative only - nothing is written.
+    Write-UiSummary -TaskCount $count -DoneCount $count -FailedCount 0 -AllCompletionCheck $true `
+        -LogPath '.\.limitshift-limitshift-queue\limitshift-log.txt'
 }
 
 function New-DirectoryIfMissing {
@@ -783,13 +1267,10 @@ function Wait-UntilClaudeUsageReady {
         $sleepSeconds = [int]($wakeTime - (Get-Date)).TotalSeconds
 
         if ($sleepSeconds -gt 0) {
-            Write-Step "Waiting for Claude reset"
-            Write-Host "Sleeping until: $wakeTime"
-            Start-Sleep -Seconds $sleepSeconds
+            Invoke-UiRestWithSummary -Cli 'claude' -WakeTime $wakeTime
         }
         else {
-            Write-Step "Reset time already passed"
-            Write-Host "Checking usage again in $PollSecondsAfterResetPassed seconds"
+            Write-Host ("  " + $script:GlyphDot + " reset time already passed; re-checking in " + $PollSecondsAfterResetPassed + "s") -ForegroundColor DarkGray
             Start-Sleep -Seconds $PollSecondsAfterResetPassed
         }
     }
@@ -944,7 +1425,8 @@ function Invoke-NativeProcess {
         [string]$Command,
         [string[]]$Arguments,
         [string]$WorkingDirectory,
-        [string]$StdinText
+        [string]$StdinText,
+        [switch]$Spinner
     )
 
     $commandInfo = Get-Command $Command -ErrorAction Stop
@@ -1020,15 +1502,21 @@ exit `$LASTEXITCODE
     $stdinPath = $null
 
     try {
+        # When animating the working indicator we must NOT block on Start-Process; we launch and
+        # poll the process while redrawing the spinner in place. Every other call (and any run with
+        # redirected output) keeps the original blocking -Wait behavior unchanged.
+        $animate = $Spinner -and (Test-UiAnimatable)
+
         $startProcessParams = @{
             FilePath               = $launcherPath
             WorkingDirectory       = $WorkingDirectory
             NoNewWindow            = $true
-            Wait                   = $true
             PassThru               = $true
             RedirectStandardOutput = $stdoutPath
             RedirectStandardError  = $stderrPath
         }
+        if (-not $animate) { $startProcessParams['Wait'] = $true }
+
         # Start-Process rejects an empty/null ArgumentList; only add it when there are real args.
         if (-not [string]::IsNullOrEmpty($launcherArguments)) {
             $startProcessParams['ArgumentList'] = $launcherArguments
@@ -1040,7 +1528,22 @@ exit `$LASTEXITCODE
             $startProcessParams['RedirectStandardInput'] = $stdinPath
         }
 
+        # Redirected output (no TTY) can't animate: print one static line so logs aren't silent.
+        if ($Spinner -and -not $animate) {
+            Write-Host ("  " + $script:GlyphStar + " working...") -ForegroundColor $script:UiAccentColor
+        }
+
         $process = Start-Process @startProcessParams
+
+        if ($animate) {
+            # Cache the process handle so .ExitCode survives after a non-blocking (-PassThru, no -Wait)
+            # process exits. Without this the exit code reads back as $null and breaks output
+            # classification. The blocking (-Wait) path populates ExitCode on its own.
+            try { $null = $process.Handle } catch {}
+            Invoke-UiSpinner -Process $process
+        }
+        # Make sure the process has fully exited and its redirected files are flushed before reading.
+        try { $process.WaitForExit() } catch {}
 
         $stdout = if (Test-Path -LiteralPath $stdoutPath) {
             [System.IO.File]::ReadAllText($stdoutPath)
@@ -1436,15 +1939,25 @@ function ConvertFrom-CliOutput {
                 $evt = $null
                 try { $evt = $line | ConvertFrom-Json } catch { continue }
                 $eventType = [string](Get-ObjectPropertyValue -Object $evt -Name 'type' -Default $null)
+                # Copilot wraps the payload inside `data` (e.g. {type:'assistant.message', data:{content:'...'}})
+                # so look in BOTH places. This is a preview-only fix - upstream limitshift.ps1 has the same gap.
+                $evtData = Get-ObjectPropertyValue -Object $evt -Name 'data' -Default $null
                 if ($eventType -in @('assistant.message','assistant','message','response','completion','final') -or
-                    ([string](Get-ObjectPropertyValue -Object $evt -Name 'role' -Default '') -eq 'assistant')) {
+                    ([string](Get-ObjectPropertyValue -Object $evt -Name 'role' -Default '') -eq 'assistant') -or
+                    ([string](Get-ObjectPropertyValue -Object $evtData -Name 'role' -Default '') -eq 'assistant')) {
                     foreach ($contentName in @('content', 'text', 'message')) {
                         $content = [string](Get-ObjectPropertyValue -Object $evt -Name $contentName -Default $null)
+                        if ([string]::IsNullOrEmpty($content) -and $null -ne $evtData) {
+                            $content = [string](Get-ObjectPropertyValue -Object $evtData -Name $contentName -Default $null)
+                        }
                         if (-not [string]::IsNullOrEmpty($content)) { $textParts += $content; break }
                     }
                 }
                 foreach ($sidName in @('interactionId', 'session_id', 'sessionId', 'conversation_id', 'conversationId', 'thread_id', 'threadId')) {
                     $sid = [string](Get-ObjectPropertyValue -Object $evt -Name $sidName -Default $null)
+                    if ([string]::IsNullOrWhiteSpace($sid) -and $null -ne $evtData) {
+                        $sid = [string](Get-ObjectPropertyValue -Object $evtData -Name $sidName -Default $null)
+                    }
                     if (-not [string]::IsNullOrWhiteSpace($sid)) { $sessionId = $sid; break }
                 }
                 $err = Get-ObjectPropertyValue -Object $evt -Name 'error' -Default $null
@@ -1477,7 +1990,11 @@ function Invoke-CliTaskRun {
         [ValidateSet('New','Resume')] [string]$Mode,
         [string]$SessionId,
         # Task 6: the rotation model for this run (Models[currentModelIndex]). Defaults to $Task.Model.
-        [string]$ModelOverride
+        [string]$ModelOverride,
+        # When set, suppress the task header. The caller (main loop) is responsible for printing a
+        # contextual one-liner (limit summary, retry line, no-marker resume) BEFORE this call instead.
+        # Used for any within-run continuation so the task header doesn't repeat.
+        [switch]$Quiet
     )
 
     $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex -Task $Task
@@ -1497,10 +2014,12 @@ function Invoke-CliTaskRun {
     $arguments = Get-CliArguments @cliArgsParams
     $exe = Get-CliExecutable -Task $Task
 
-    Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
-    Write-Host "Command: $(Format-CommandForDisplay -Command $exe -Arguments $arguments)"
-    $promptChannel = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { 'passed as the -p argument' } else { 'sent via stdin' }
-    Write-Host "(prompt $promptChannel; full text in the output file)"
+    if (-not $Quiet) {
+        Write-UiTaskHeader -TaskNumber ($TaskIndex + 1) -TaskTotal $script:UiTaskTotal -Task $Task -Mode $Mode -Model $ModelOverride -PromptText $Task.Prompt
+    }
+    if ($ShowRawOutput) {
+        Write-Host ("  " + $script:GlyphDot + " command: " + (Format-CommandForDisplay -Command $exe -Arguments $arguments)) -ForegroundColor DarkGray
+    }
 
     if ($DryRun) {
         return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
@@ -1515,7 +2034,7 @@ function Invoke-CliTaskRun {
     # agy and copilot still need a CLOSED/EOF stdin: under Start-Process an inherited (unredirected) stdin
     # handle makes them block reading it indefinitely. Hand them an empty stdin so they get immediate
     # EOF — this mirrors limitshift.sh, which runs them with `</dev/null`.
-    $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath }
+    $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath; Spinner = $true }
     $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { '' } else { $prompt }
     $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
@@ -1544,8 +2063,16 @@ function Invoke-CliTaskRun {
 
     $consoleText = Get-ConsoleOutputText -Result $result -RawOutput $outputText -ShowRawOutput:$ShowRawOutput
     if (-not [string]::IsNullOrWhiteSpace($consoleText)) {
-        Write-Host "--- agent response ---"
-        Write-Host $consoleText
+        # -ShowRawOutput dumps the full text. Otherwise show the reply only for a successful run,
+        # trimmed to the first lines; failures and limits are reported with their reason by the loop.
+        if ($ShowRawOutput) {
+            Write-UiResponseHeader
+            Write-Host $consoleText
+        }
+        elseif ($result.Ok) {
+            Write-UiResponseHeader
+            Write-UiBody -Text $consoleText -MaxLines 10
+        }
     }
 
     return $result
@@ -1603,14 +2130,12 @@ function Wait-ForLimitReset {
     $resetTime = Get-ResetTimeFromErrorText -ErrorText $Result.ErrorText
     if ($null -eq $resetTime) {
         $resetTime = (Get-Date).AddMinutes($Settings.LimitWaitMinutes)
-        Write-Step "Limit hit on $($Task.Cli); no reset time found in the error"
-        Write-Host "Waiting the configured limitWaitMinutes: $($Settings.LimitWaitMinutes) minutes"
+        Write-Host ("     no reset time in the error " + $script:GlyphDot + " waiting the configured " + $Settings.LimitWaitMinutes + " min") -ForegroundColor DarkGray
     }
     $wakeTime = $resetTime.AddMinutes($Settings.ResetBufferMinutes)
     $sleepSeconds = [int]($wakeTime - (Get-Date)).TotalSeconds
     if ($sleepSeconds -gt 0) {
-        Write-Host "Sleeping until: $wakeTime"
-        Start-Sleep -Seconds $sleepSeconds
+        Invoke-UiRestWithSummary -Cli ([string]$Task.Cli) -WakeTime $wakeTime
     }
 }
 
@@ -1835,6 +2360,11 @@ function Invoke-ModelProbe {
 
 if ($LoadFunctionsOnly) { return }
 
+if ($Demo) {
+    Invoke-UiDemo
+    exit 0
+}
+
 try {
     $config = Test-QueuePreflight -Path $QueuePath -RequireCliBinaries:($ValidateOnly -or -not $DryRun)
 }
@@ -1844,10 +2374,6 @@ catch {
 }
 
 if ($ValidateOnly) {
-    $capsDir = Join-Path $RunnerStatePath 'capabilities'
-    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
-    if (-not $modelValidationPassed) { exit 2 }
-    if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
     Write-Host "Config OK: $QueuePath"
     Write-Host "Tasks: $($config.Tasks.Count)"
     foreach ($t in $config.Tasks) {
@@ -1855,6 +2381,9 @@ if ($ValidateOnly) {
     }
     exit 0
 }
+
+$transcriptStarted = $false
+$exitCode = 0
 
 # Pre-check: fail fast if a live lock is held; skip if the state dir (and lock) don't exist yet.
 if (Test-Path -LiteralPath $LockPath) {
@@ -1868,32 +2397,42 @@ if (Test-Path -LiteralPath $LockPath) {
     }
 }
 
-$transcriptStarted = $false
-$exitCode = 0
-
 try {
     Initialize-RunnerState  # migration + mkdir must happen before we write the lock
     $PID | Set-Content -LiteralPath $LockPath -Encoding UTF8 -NoNewline
+
+    $capsDir = Join-Path $RunnerStatePath 'capabilities'
+    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
+    if (-not $modelValidationPassed) { exit 2 }
+    if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
+
     $Tasks = $config.Tasks
     $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
 
     Start-Transcript -Path $LogPath -Append
     $transcriptStarted = $true
 
-    Write-Step "Script started"
-    Write-Host "Started at: $(Get-Date)"
-    Write-Host "Queue path: $QueuePath"
-    Write-Host "Runner state path: $RunnerStatePath"
-    Write-Host "Log path: $LogPath"
-    Write-Host "Usage path: $UsagePath"
-    Write-Host "Prompt count: $($Tasks.Count)"
+    $script:UiTaskTotal = $Tasks.Count
+    Write-UiBanner -TaskCount $Tasks.Count -Clis @($Tasks | ForEach-Object { $_.Cli })
+    Write-Host ("    started " + (Get-Date).ToString('ddd HH:mm') + " " + $script:GlyphDot + " " + $QueuePath) -ForegroundColor DarkGray
+    if ($ShowRawOutput) {
+        Write-Host ("    state " + $script:GlyphDot + " " + $RunnerStatePath) -ForegroundColor DarkGray
+        Write-Host ("    log   " + $script:GlyphDot + " " + $LogPath) -ForegroundColor DarkGray
+    }
 
-    Write-Step "Current folder"
-    Get-Location
+    # Per-run outcome counts, consulted by the final summary. A task is $doneCount when it ends
+    # successfully (simple-mode OK, completion-marker Done, or already-done skip) and $failedCount
+    # when it ends in failure but we keep going (stopOnError:false; error retries exhausted, blocked,
+    # or stall). Tasks that throw (stopOnError:true) skip the summary entirely.
+    $doneCount = 0
+    $failedCount = 0
 
     for ($i = 0; $i -lt $Tasks.Count; $i++) {
         $task = $Tasks[$i]
         $taskNumber = $i + 1
+
+        # Visual separator between tasks (not before the first one).
+        if ($i -gt 0) { Write-UiSeparator }
 
         if (Test-TaskAlreadyDone -TaskIndex $i) {
             # Task 4: a done marker only counts when its stored fingerprint still matches the
@@ -1904,6 +2443,7 @@ try {
             if ($savedFingerprint -eq $currentFingerprint) {
                 Write-Step "Skipping task $taskNumber of $($Tasks.Count): $($task.Name)"
                 Write-Host "Task is already marked as done."
+                $doneCount++
                 continue
             }
             Write-Step "Re-running task $taskNumber of $($Tasks.Count): $($task.Name)"
@@ -1944,17 +2484,23 @@ try {
 
             $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
 
+            # Any iteration after the first is a WITHIN-RUN continuation (limit/rest, error retry,
+            # no-marker resume). Suppress the task header on those: the contextual one-liner
+            # printed by the prior iteration is the resume marker. First iteration always shows
+            # the header (Mode=New gives the full header; Mode=Resume on $runCount==1 is a
+            # fresh-start resume from a prior script run, which still benefits from a header).
+            $quietHeader = ($runCount -gt 1)
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
                 $runMode = 'New'
                 $sessionId = $null
                 # claude is given a session id up front (passed as --session-id). agy/copilot need a
                 # stable session id so the NEXT run can resume the same conversation.
                 if ($task.Cli -eq 'claude' -or $task.Cli -eq 'agy' -or $task.Cli -eq 'copilot') { $sessionId = New-TaskSessionId -TaskIndex $i }
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader
             }
             else {
                 $runMode = 'Resume'
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader
             }
 
             if ($DryRun) {
@@ -2015,22 +2561,28 @@ try {
                 }
 
                 $mustWaitForFreshSession = $true
-                Write-Step "Task $taskNumber paused by a usage limit on $($task.Cli)"
+                # Past-tense 'â˜¾ Hit a usage limit on <cli>, rested for X min' is printed by the
+                # helper INSIDE Wait-ForLimitReset, after the rest countdown ends — no upfront beat.
                 Wait-ForLimitReset -Task $task -Result $result -Settings $config.Settings
                 continue
             }
 
             if (-not $result.Ok) {
                 $errorRetryCount++
-                Write-Step "Task $taskNumber errored: $($result.ErrorText)"
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " hit an error:") -ForegroundColor Red
+                Write-UiReason -Text $result.ErrorText
                 if ($errorRetryCount -le $config.Settings.MaxRetriesOnError) {
-                    Write-Host "Retry $errorRetryCount of $($config.Settings.MaxRetriesOnError); resuming the same session."
+                    Write-Host ""
+                    Write-Host ("  " + $script:GlyphRetry + " retry " + $errorRetryCount + " of " + $config.Settings.MaxRetriesOnError + " for Task " + $taskNumber + "/" + $Tasks.Count + " " + $script:GlyphDot + " " + $task.Name + " " + $script:GlyphDot + " resume") -ForegroundColor Yellow
                     continue
                 }
                 if ($config.Settings.StopOnError) {
                     throw "Task $taskNumber failed after $($config.Settings.MaxRetriesOnError) retries: $($result.ErrorText)"
                 }
-                Write-Host "stopOnError=false; abandoning this task and moving to the next one."
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " gave up after " + $config.Settings.MaxRetriesOnError + " retries " + $script:GlyphDot + " moving to the next task") -ForegroundColor Red
+                $failedCount++
                 break
             }
 
@@ -2038,23 +2590,27 @@ try {
             # No marker parsing, no stall guard.
             if (-not $task.CompletionCheck) {
                 Save-TaskDoneMarker -TaskIndex $i -Task $task
-                Write-Step "Task $taskNumber completed"
+                Write-UiTaskDone -TaskNumber $taskNumber
+                $doneCount++
                 break
             }
 
             $marker = Get-MarkerStatus -Text $result.Text
             if ($marker.Status -eq 'Done') {
                 Save-TaskDoneMarker -TaskIndex $i -Task $task
-                Write-Step "Task $taskNumber completed"
+                Write-UiTaskDone -TaskNumber $taskNumber
+                $doneCount++
                 break
             }
             if ($marker.Status -eq 'Blocked') {
                 Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
-                Write-Step "Task $taskNumber reported itself BLOCKED: $($marker.Reason)"
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked:") -ForegroundColor Yellow
+                Write-UiReason -Text $marker.Reason
                 if ($config.Settings.StopOnError) {
                     throw "Task $taskNumber is blocked: $($marker.Reason)"
                 }
-                Write-Host "stopOnError=false; moving to the next task."
+                $failedCount++
                 break
             }
 
@@ -2066,11 +2622,13 @@ try {
                 if ($stallCount -ge $config.Settings.MaxStalls) {
                     $stallReason = 'no progress: agent repeated the same response without a completion marker'
                     Save-TaskFailedMarker -TaskIndex $i -Reason $stallReason -Task $task
-                    Write-Step "Task $taskNumber failed: $stallReason"
+                    Write-Host ""
+                    Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " failed:") -ForegroundColor Red
+                    Write-UiReason -Text $stallReason
                     if ($config.Settings.StopOnError) {
                         throw "Task $taskNumber failed: $stallReason"
                     }
-                    Write-Host "stopOnError=false; abandoning this task and moving to the next one."
+                    $failedCount++
                     break
                 }
             }
@@ -2078,15 +2636,14 @@ try {
 
             # Ran fine, no marker: the agent stopped early. Resume to push it onward.
             $mustWaitForFreshSession = $false
-            Write-Step "Task $taskNumber is not complete yet; resuming the same session."
+            Write-Host ""
+            Write-Host ("  " + $script:GlyphRetry + " Task " + $taskNumber + "/" + $Tasks.Count + " " + $script:GlyphDot + " " + $task.Name + " not finished yet " + $script:GlyphDot + " resuming the same session") -ForegroundColor DarkGray
         }
     }
 
-    Write-Step "Script completed"
-    Write-Host "All queue tasks are finished."
-    Write-Host "Finished at: $(Get-Date)"
-    Write-Host "Log saved to: $LogPath"
-    Write-Host "Last Claude usage saved to: $UsagePath"
+    Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -FailedCount $failedCount `
+        -AllCompletionCheck (-not ($Tasks | Where-Object { -not $_.CompletionCheck })) `
+        -LogPath $LogPath -DryRun:$DryRun
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.Message)
