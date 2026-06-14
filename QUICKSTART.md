@@ -53,3 +53,24 @@ All of LimitShift's memory lives in one folder, `.limitshift-limitshift-queue/`,
 - To re-run one finished task, delete its `status/task-NN.done` file.
 - To start over completely, delete the whole `.limitshift-limitshift-queue/` folder.
 - The entire state folder is **safe to delete at any time** — it is rebuilt on the next run.
+
+## Running multiple queues in parallel
+
+Create one queue JSON per project, then open a separate terminal for each:
+
+```powershell
+# terminal 1
+.\limitshift.ps1 -QueuePath surgemesh-queue.json
+
+# terminal 2
+.\limitshift.ps1 -QueuePath papertrade-queue.json
+```
+```bash
+# terminal 1
+./limitshift.sh --queue-path surgemesh-queue.json
+
+# terminal 2
+./limitshift.sh --queue-path papertrade-queue.json
+```
+
+Each queue keeps its state in its own `.limitshift-<name>/` folder. If you accidentally start the same queue twice, the second run exits immediately with an error — you'll see the PID of the first run in the message.

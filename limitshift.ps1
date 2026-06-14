@@ -40,7 +40,14 @@ if (-not $LoadFunctionsOnly) {
         }
     }
 
-    $QueuePath = [System.IO.Path]::GetFullPath($QueuePath)
+    # A bare filename (no directory separator) resolves from the script's directory so that
+    # `-QueuePath surgemesh-queue.json` is equivalent to placing the file next to the script.
+    # A relative path WITH separators resolves from the current working directory.
+    if ($QueuePath -notmatch '[/\\]') {
+        $QueuePath = Join-Path $PSScriptRoot $QueuePath
+    } else {
+        $QueuePath = [System.IO.Path]::GetFullPath($QueuePath)
+    }
     $QueueRootPath = Split-Path -Parent $QueuePath
     $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
     $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
@@ -55,6 +62,7 @@ if (-not $LoadFunctionsOnly) {
     $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
     $RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
     $StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
+    $LockPath = Join-Path $RunnerStatePath 'limitshift.lock'
 }
 
 $RunsCsvHeader = "timestamp,task,run,mode,exit,status"
@@ -1843,11 +1851,24 @@ if ($ValidateOnly) {
     exit 0
 }
 
+# Pre-check: fail fast if a live lock is held; skip if the state dir (and lock) don't exist yet.
+if (Test-Path -LiteralPath $LockPath) {
+    $existingPid = [int](Get-Content -LiteralPath $LockPath -ErrorAction SilentlyContinue)
+    $existingProc = if ($existingPid) { Get-Process -Id $existingPid -ErrorAction SilentlyContinue } else { $null }
+    if ($existingProc) {
+        [Console]::Error.WriteLine("ERROR: Another LimitShift process is already running with this queue (PID $existingPid).")
+        [Console]::Error.WriteLine("       Queue: $QueuePath")
+        [Console]::Error.WriteLine("       To force-unlock: del `"$LockPath`"")
+        exit 2
+    }
+}
+
 $transcriptStarted = $false
 $exitCode = 0
 
 try {
-    Initialize-RunnerState
+    Initialize-RunnerState  # migration + mkdir must happen before we write the lock
+    $PID | Set-Content -LiteralPath $LockPath -Encoding UTF8 -NoNewline
     $Tasks = $config.Tasks
     $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
 
@@ -2070,6 +2091,7 @@ finally {
     if ($transcriptStarted) {
         Stop-Transcript
     }
+    Remove-Item -LiteralPath $LockPath -ErrorAction SilentlyContinue
 }
 
 exit $exitCode

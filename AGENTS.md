@@ -135,6 +135,20 @@ have no Ollama path here.
 - Use `completionCheck: true` for tasks that may need multiple resumes; prompts should end by
   emitting `[[TASK_COMPLETE]]` or `[[TASK_BLOCKED]] <reason>`.
 
+## Multiple Queues
+
+The recommended workflow when a user wants to work on two or more projects at the same time is **one queue file per project**, named after the project (e.g. `surgemesh-queue.json`, `papertrade-queue.json`). Each queue gets its own isolated state folder automatically (`​.limitshift-surgemesh-queue/`, etc.).
+
+To run multiple queues in parallel the user opens separate terminals:
+```powershell
+.\limitshift.ps1 -QueuePath surgemesh-queue.json   # terminal 1
+.\limitshift.ps1 -QueuePath papertrade-queue.json  # terminal 2
+```
+
+A bare filename passed as `-QueuePath` / `--queue-path` resolves from the script's own folder, so the file just needs to exist there. An absolute path works too.
+
+Mixed-project queues (all tasks in one file, using per-task `projectPath`) are still supported and work fine — they just can't be parallelised across separate runs. Recommend separate queues whenever isolation matters.
+
 ## Good Local Examples
 
 - Minimal queue shape: `limitshift-queue.example-simple.json`.

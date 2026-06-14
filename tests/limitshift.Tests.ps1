@@ -2280,4 +2280,169 @@ exit 0
             $run.Output | Should -Match 'Config OK'
         }
     }
+
+    Context 'Multi-queue and lock' {
+        BeforeAll {
+            function Write-FakeClaudeSuccess {
+                param([string]$BinDir)
+                $stub = Join-Path $BinDir 'claude.ps1'
+                @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"done\n[[TASK_COMPLETE]]","session_id":"fake-session","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $stub -Encoding UTF8
+            }
+
+            function Invoke-RunQueue {
+                param([string]$QueuePath, [string]$ExtraPath = '')
+                $scriptArgs = @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $QueuePath)
+                $oldPath = $env:PATH
+                if ($ExtraPath) { $env:PATH = "$ExtraPath;$oldPath" }
+                try { return Invoke-RunnerProcess -Arguments $scriptArgs }
+                finally { $env:PATH = $oldPath }
+            }
+        }
+
+        It '-QueuePath with bare filename resolves from script directory' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            # Copy the runner to $root so its PSScriptRoot is $root, place queue next to it
+            $scriptCopy = Join-Path $root 'limitshift.ps1'
+            Copy-Item -LiteralPath $script:__limitshiftScriptPath -Destination $scriptCopy -Force
+            $queueName = 'myproject-queue.json'
+            Write-TestQueue -Path (Join-Path $root $queueName) -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'bare filename task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+
+            $oldPath = $env:PATH
+            $env:PATH = "$binDir;$oldPath"
+            try {
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $scriptCopy, '-QueuePath', $queueName)
+            } finally {
+                $env:PATH = $oldPath
+            }
+            $stateDir = Join-Path $root '.limitshift-myproject-queue'
+
+            $run.ExitCode | Should -Be 0
+            $run.Output   | Should -Match 'Task 1 completed'
+            Test-Path (Join-Path $stateDir 'status\task-01.done') | Should -BeTrue
+        }
+
+        It '-QueuePath with absolute path works regardless of cwd' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            $qPath = Join-Path $root 'abs-queue.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'absolute path task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+
+            $run = Invoke-RunQueue -QueuePath $qPath -ExtraPath $binDir
+
+            $run.ExitCode | Should -Be 0
+            $run.Output   | Should -Match 'Task 1 completed'
+        }
+
+        It 'two different queue files produce two separate state folders' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            $qSettings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+            Write-TestQueue -Path (Join-Path $root 'alpha-queue.json') -Config @{
+                settings = $qSettings
+                tasks    = @(@{ name = 'alpha task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+            Write-TestQueue -Path (Join-Path $root 'beta-queue.json') -Config @{
+                settings = $qSettings
+                tasks    = @(@{ name = 'beta task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+
+            Invoke-RunQueue -QueuePath (Join-Path $root 'alpha-queue.json') -ExtraPath $binDir | Out-Null
+            Invoke-RunQueue -QueuePath (Join-Path $root 'beta-queue.json')  -ExtraPath $binDir | Out-Null
+
+            $alphaState = Join-Path $root '.limitshift-alpha-queue'
+            $betaState  = Join-Path $root '.limitshift-beta-queue'
+
+            Test-Path (Join-Path $alphaState 'status\task-01.done') | Should -BeTrue
+            Test-Path (Join-Path $betaState  'status\task-01.done') | Should -BeTrue
+            $alphaState | Should -Not -Be $betaState
+        }
+
+        It 'stale lock file (dead PID) does not block a new run' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'stale lock task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+
+            $stateDir = Join-Path $root '.limitshift-q'
+            New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+            $lockPath = Join-Path $stateDir 'limitshift.lock'
+            '99999999' | Set-Content -LiteralPath $lockPath -Encoding UTF8 -NoNewline
+
+            $run = Invoke-RunQueue -QueuePath $qPath -ExtraPath $binDir
+
+            $run.ExitCode | Should -Be 0
+            $run.Output   | Should -Match 'Task 1 completed'
+        }
+
+        It 'lock file with live PID blocks a concurrent run with exit 2' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'lock live task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
+            }
+
+            $stateDir = Join-Path $root '.limitshift-q'
+            New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+            $lockPath = Join-Path $stateDir 'limitshift.lock'
+
+            # Start a background process to get a live PID, write it to the lock file
+            $mockProc = Start-Process -FilePath $script:__limitshiftPowerShellExe `
+                -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 5') `
+                -PassThru -WindowStyle Hidden
+            $mockProc.Id | Set-Content -LiteralPath $lockPath -Encoding UTF8 -NoNewline
+
+            $run = Invoke-RunQueue -QueuePath $qPath -ExtraPath $binDir
+
+            $mockProc.Kill()
+
+            $run.ExitCode | Should -Be 2
+            $run.Output   | Should -Match '(?i)Another LimitShift|already running|PID \d+'
+        }
+    }
 }

@@ -2329,6 +2329,176 @@ $out"
   fi
 }
 
+run_queue_path_filename_resolves_from_script_dir_test() {
+  local desc="bare filename with --queue-path resolves from the script's directory"
+  local root="$TMP_ROOT/queue-path-filename"
+  local project_dir="$root/project"
+  # Copy the runner to a temp dir so its SCRIPT_DIR is $root, then place a queue next to it.
+  local script_copy="$root/limitshift.sh"
+  local queue_name="myproject-queue.json"
+
+  mkdir -p "$root/bin" "$project_dir"
+  cp "$SCRIPT" "$script_copy"
+  write_fake_claude_success "$root/bin"
+
+  cat > "$root/$queue_name" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 1, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "bare filename task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  local out exit_code state_dir
+  out=$(PATH="$root/bin:$PATH" bash "$script_copy" --queue-path "$queue_name" 2>&1)
+  exit_code=$?
+  state_dir="$root/.limitshift-myproject-queue"
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ -f "$state_dir/status/task-01.done" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code state_dir=$state_dir
+$out"
+  fi
+}
+
+run_queue_path_absolute_test() {
+  local desc="absolute path with --queue-path works regardless of cwd"
+  local root="$TMP_ROOT/queue-path-absolute"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/abs-queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 1, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "absolute path task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 completed'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_queue_separate_state_dirs_test() {
+  local desc="two different queue files produce separate .limitshift-<name> state folders"
+  local root="$TMP_ROOT/separate-state-dirs"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_success "$bin_dir"
+
+  local make_queue
+  make_queue() {
+    local path="$1" task_name="$2"
+    cat > "$path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 1, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "$task_name", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+  }
+
+  make_queue "$root/alpha-queue.json" "alpha task"
+  make_queue "$root/beta-queue.json" "beta task"
+
+  PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$root/alpha-queue.json" >/dev/null 2>&1
+  PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$root/beta-queue.json" >/dev/null 2>&1
+
+  if [ -f "$root/.limitshift-alpha-queue/status/task-01.done" ] &&
+     [ -f "$root/.limitshift-beta-queue/status/task-01.done" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "done markers or state dirs missing; found: $(ls -d "$root"/.limitshift-* 2>/dev/null | tr '\n' ' ')"
+  fi
+}
+
+run_queue_lock_stale_pid_proceeds_test() {
+  local desc="stale lock file (dead PID) does not block a new run"
+  local root="$TMP_ROOT/lock-stale"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local state_dir="$root/.limitshift-queue"
+  local lock_path="$state_dir/limitshift.lock"
+
+  mkdir -p "$bin_dir" "$project_dir" "$state_dir"
+  write_fake_claude_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 1, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "stale lock task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  # Write a lock file with a guaranteed-dead PID
+  echo "99999999" > "$lock_path"
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 completed'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_queue_lock_live_pid_blocks_test() {
+  local desc="lock file with live PID blocks a concurrent run with exit 2"
+  local root="$TMP_ROOT/lock-live"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local state_dir="$root/.limitshift-queue"
+  local lock_path="$state_dir/limitshift.lock"
+
+  mkdir -p "$bin_dir" "$project_dir" "$state_dir"
+  write_fake_claude_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 1, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "lock live task", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it" } ]
+}
+EOF
+
+  # Write a lock file with a live PID (a background sleep process)
+  sleep 5 &
+  local mock_pid=$!
+  echo "$mock_pid" > "$lock_path"
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$queue_path" 2>&1)
+  exit_code=$?
+
+  kill "$mock_pid" 2>/dev/null || true
+  wait "$mock_pid" 2>/dev/null || true
+
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qiE 'already running|Another LimitShift|PID'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code (expected 2)
+$out"
+  fi
+}
+
 run_shipped_examples_validate_test() {
   local repo_root="$HERE/.."
   local root="$TMP_ROOT/shipped-examples"
@@ -2359,10 +2529,12 @@ run_shipped_examples_validate_test() {
 
 check "valid minimal config validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-minimal.json" --validate-only
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
+check "--queue-path alias: valid config validates" 0 "Config OK"           -- bash "$SCRIPT" --queue-path "$CONFIGS/valid-minimal.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
 check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-field.json" --validate-only
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
 check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
+check "--queue-path: missing file gives copy hint" 2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue-path "$HERE/nope.json" --validate-only
 run_dry_run_state_test
 run_codex_limit_resume_test
 run_duplicate_name_test
@@ -2415,6 +2587,11 @@ run_agy_transcript_capture_test
 run_copilot_prompt_as_arg_test
 run_copilot_limit_detection_test
 run_unknown_cli_rejected_test
+run_queue_path_filename_resolves_from_script_dir_test
+run_queue_path_absolute_test
+run_queue_separate_state_dirs_test
+run_queue_lock_stale_pid_proceeds_test
+run_queue_lock_live_pid_blocks_test
 run_shipped_examples_validate_test
 run_levenshtein_test
 run_capability_discovery_test

@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Output-file encoding**: per-task output and the usage capture are written as **UTF-8 without BOM** (were UTF-16/Tee-Object), so they are greppable and parseable.
 
 ### Added
+- **`--queue-path` flag:** explicit alias for `--queue` in bash (PowerShell's `-QueuePath` already existed). A bare filename (no path separators) resolves from the script's own directory, so `--queue-path surgemesh-queue.json` just works next to the script.
+- **Isolated state per queue file:** each queue file always had its own `.limitshift-<name>/` folder; this is now the documented, first-class multi-queue workflow. Run one terminal per queue to parallelize projects.
+- **Concurrency lock:** a `limitshift.lock` file in the queue's state folder prevents two runners from using the same queue simultaneously. If a second run detects an active lock it exits with a clear error naming the queue and the running PID. Stale locks (dead PID) are silently cleared.
 - **Dynamic model validation:** runtime capability discovery queries `agy models` / `copilot models` and validates configured model names against the live list during `--validate-only` / `-ValidateOnly`. `claude`, `codex`, and `gemini` have no scriptable model list — they print an INFO message and are never blocked.
 - **Typo suggestions:** when a model name is not found in the discovered list, LimitShift suggests the nearest known model names using Levenshtein edit distance (threshold 4).
 - **Capability cache:** discovered model lists are cached under `.limitshift-<queue>/capabilities/<cli>.json` next to the queue file. Configure TTL with `settings.capabilityCacheHours` (default 24 h; set 0 to always refresh).

@@ -22,7 +22,10 @@ TASK_BLOCKED_MARKER="[[TASK_BLOCKED]]"
 usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
-  echo "  --queue <path>       Path to queue JSON file (default: limitshift-queue.json next to script)"
+  echo "  --queue-path <path>  Path to queue JSON file (default: limitshift-queue.json next to script)"
+  echo "                       A bare filename (no path separators) resolves from the script's folder,"
+  echo "                       making separate queues easy: --queue-path surgemesh-queue.json"
+  echo "  --queue <path>       Alias for --queue-path"
   echo "  --validate-only      Validate configuration syntax, paths, and binaries, then exit"
   echo "  --dry-run            Simulate execution by printing commands without running them"
   echo "  --show-raw           Print the raw CLI JSON to the console (default: only the response text)"
@@ -33,7 +36,7 @@ usage() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --queue) QUEUE_PATH="$2"; QUEUE_PATH_EXPLICIT=1; shift 2 ;;
+    --queue|--queue-path) QUEUE_PATH="$2"; QUEUE_PATH_EXPLICIT=1; shift 2 ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --show-raw) SHOW_RAW=1; shift ;;
@@ -65,9 +68,15 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-# Convert to absolute path
+# Convert to absolute path. A bare filename (no directory separator) resolves from the script's
+# directory, so `--queue-path surgemesh-queue.json` works the same as placing the file next to
+# the script. A relative path WITH separators (e.g. ../queues/my.json) resolves from cwd.
 if [[ "$QUEUE_PATH" != /* ]] && [[ "$QUEUE_PATH" != [a-zA-Z]:\\* ]] && [[ "$QUEUE_PATH" != [a-zA-Z]:/* ]]; then
-  QUEUE_PATH="$(pwd)/$QUEUE_PATH"
+  if [[ "$QUEUE_PATH" != */* ]] && [[ "$QUEUE_PATH" != *\\* ]]; then
+    QUEUE_PATH="$SCRIPT_DIR/$QUEUE_PATH"
+  else
+    QUEUE_PATH="$(pwd)/$QUEUE_PATH"
+  fi
 fi
 
 # Normalize path separators if on Windows (e.g. from C:\some\path to C:/some/path)
@@ -1712,7 +1721,23 @@ if [ "$DRY_RUN" -ne 1 ]; then
   check_cli_binaries
 fi
 
-initialize_runner_state
+LOCK_PATH="$RUNNER_STATE_PATH/limitshift.lock"
+# Pre-check: fail fast if a live lock is held. The directory may not exist yet if migration hasn't
+# run; in that case the lock file can't exist either, so -f returns false and we skip the block.
+if [ -f "$LOCK_PATH" ]; then
+  existing_pid=$(cat "$LOCK_PATH" 2>/dev/null || true)
+  if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+    echo "ERROR: Another LimitShift process is already running with this queue (PID $existing_pid)." >&2
+    echo "       Queue: $QUEUE_PATH" >&2
+    echo "       To force-unlock: rm \"$LOCK_PATH\"" >&2
+    exit 2
+  fi
+fi
+
+initialize_runner_state  # migration + mkdir -p must run before we write the lock
+
+echo $$ > "$LOCK_PATH"
+trap 'rm -f "$LOCK_PATH"' EXIT
 
 # Start logging
 # Since bash does not have Start-Transcript, we can redirect all script output to log file in addition to stdout

@@ -254,6 +254,33 @@ Because LimitShift is just a terminal command, you can chain it with anything yo
 ./limitshift.sh; sleep 60; systemctl poweroff   # Linux
 ```
 
+### Run multiple queues in parallel
+
+Each queue file gets its own isolated state folder. The recommended workflow for multiple projects is **one queue JSON per project, one terminal per queue**:
+
+```powershell
+# terminal 1
+.\limitshift.ps1 -QueuePath surgemesh-queue.json
+
+# terminal 2
+.\limitshift.ps1 -QueuePath papertrade-queue.json
+```
+```bash
+# terminal 1
+./limitshift.sh --queue-path surgemesh-queue.json
+
+# terminal 2
+./limitshift.sh --queue-path papertrade-queue.json
+```
+
+**Name resolution:** a bare filename (no path separators) is looked up next to the script, so `-QueuePath surgemesh-queue.json` and `-QueuePath C:\path\to\surgemesh-queue.json` are both valid.
+
+**State isolation:** each queue's sessions, outputs, status markers, and log live in `.limitshift-<queue-name>/` next to its JSON file. Two queues never share state, even when run side by side.
+
+**Concurrency lock:** if you accidentally start the same queue twice, the second run detects the lock file left by the first and exits immediately with an error naming the queue and the running PID. Once the first run finishes (or is killed), the lock is released and you can start again. To force-unlock a stale lock after an unexpected crash, delete `.limitshift-<queue-name>/limitshift.lock`.
+
+**Mixed-project queues:** you can still put tasks for multiple projects inside one queue using per-task `projectPath` values — this remains fully supported. Separate queue files are recommended when you want parallel execution or clearer state separation.
+
 ---
 
 ## About the name
@@ -358,7 +385,7 @@ More autonomy means more risk — run only against Git-backed folders.
 | --- | --- |
 | `-ValidateOnly` / `--validate-only` | Check the config; change nothing |
 | `-DryRun` / `--dry-run` | Print the exact commands; don't run or mark tasks done |
-| `-QueuePath <file>` / `--queue <file>` | Use a custom queue file |
+| `-QueuePath <file>` / `--queue-path <file>` | Use a named or custom queue file (bare filename resolves from script folder) |
 | `-ShowRawOutput` / `--show-raw` | Print the raw CLI output to the console |
 
 ## Where LimitShift saves state
