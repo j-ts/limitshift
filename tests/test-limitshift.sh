@@ -1573,6 +1573,115 @@ run_effort_empty_string_normalized_test() {
   check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
 }
 
+run_effort_copilot_rejected_test() {
+  local desc="invalid effort on copilot is rejected naming the task"
+  local root="$TMP_ROOT/effort-copilot"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "copilot" '"minimal"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: copilot effort must be one of low, medium, high, xhigh, max'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_copilot_ok_test() {
+  local desc="copilot with effort high validates"
+  local root="$TMP_ROOT/effort-copilot-high"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "copilot" '"high"'
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+# A fake copilot that takes the prompt from the -p VALUE, records flags, and replies with JSONL.
+write_fake_copilot() {
+  local bin_dir="$1" log_file="$2"
+  cat > "$bin_dir/copilot" <<EOF
+#!/usr/bin/env bash
+set -u
+prompt=""; sid=""; mode="new"
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) sid="\$2"; mode="new"; shift 2 ;;
+    --resume) sid="\$2"; mode="resume"; shift 2 ;;
+    -p) prompt="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+{
+  printf 'RUN mode=%s sid=%s\n' "\$mode" "\$sid"
+  printf 'PROMPT1=%s\n' "\$(printf '%s' "\$prompt" | head -1)"
+} >> "$log_file"
+printf '{"type":"assistant.message","content":"Copilot reply.","interactionId":"%s"}\n' "\$sid"
+printf '{"type":"assistant.message","content":" [[TASK_COMPLETE]]","interactionId":"%s"}\n' "\$sid"
+exit 0
+EOF
+  chmod +x "$bin_dir/copilot"
+}
+
+run_copilot_prompt_as_arg_test() {
+  local desc="copilot receives prompt via -p, model/effort pass, JSONL parsed, task completes"
+  local root="$TMP_ROOT/copilot-arg"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"; local log_file="$root/copilot.log"
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_copilot "$bin_dir" "$log_file"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ {
+  "name": "copilot task",
+  "cli": "copilot",
+  "projectPath": "$project_dir",
+  "model": "gpt-4o",
+  "effort": "high",
+  "prompt": "Hello Copilot",
+  "extraArgs": ["--allow-all"]
+} ] }
+EOF
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Copilot reply. [[TASK_COMPLETE]]' &&
+     grep -q 'RUN mode=new sid=' "$log_file" &&
+     grep -q 'PROMPT1=Hello Copilot' "$log_file"; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- console ---
+$out
+--- copilot.log ---
+$(cat "$log_file" 2>/dev/null)"
+  fi
+}
+
+run_copilot_limit_detection_test() {
+  local desc="copilot limit detection identifies usage limit from JSONL error"
+  local root="$TMP_ROOT/copilot-limit"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+  cat > "$bin_dir/copilot" <<EOF
+#!/usr/bin/env bash
+printf '{"type":"error","message":"Usage limit reached.","interactionId":"cp-lim"}\n'
+exit 1
+EOF
+  chmod +x "$bin_dir/copilot"
+  cat > "$queue_path" <<EOF
+{ "settings": { "maxRunsPerTask": 1, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "copilot limit", "cli": "copilot", "projectPath": "$project_dir", "prompt": "p" } ] }
+EOF
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  if printf '%s' "$out" | grep -qi 'paused by a usage limit on copilot'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
 # Local-model (Ollama) support.
 run_ollama_claude_dryrun_test() {
   local desc="claude local-Ollama task is launched via 'ollama launch claude --model ... --yes -- ...'"
@@ -1857,10 +1966,6 @@ $out"
 }
 
 run_shipped_examples_validate_test() {
-  # Task 7: every shipped example file (legacy name, simple, advanced) must pass
-  # --validate-only. The examples carry placeholder projectPath values that do not
-  # exist on this machine and validation requires projectPath to exist, so copy each
-  # example to a temp file and rewrite every task's projectPath to a real temp dir first.
   local repo_root="$HERE/.."
   local root="$TMP_ROOT/shipped-examples"
   local project_dir="$root/project"
@@ -1880,7 +1985,6 @@ run_shipped_examples_validate_test() {
       fail "$desc" "missing example file: $src"
       continue
     fi
-    # Rewrite ALL task projectPath values (advanced has multiple) to the temp dir.
     if ! jq --arg pp "$project_dir" '(.tasks[].projectPath) = $pp' "$src" > "$dst" 2>/dev/null; then
       fail "$desc" "could not rewrite projectPath in $src"
       continue
@@ -1893,7 +1997,7 @@ check "valid minimal config validates"           0 "Config OK"             -- ba
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
 check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-field.json" --validate-only
-check "unknown cli rejected listing allowed"     2 "claude, codex, gemini, agy" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
+check "unknown cli rejected listing allowed"     2 "claude, codex, gemini, agy, copilot" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
 check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
 run_dry_run_state_test
@@ -1932,6 +2036,8 @@ run_effort_claude_haiku_null_ok_test
 run_effort_codex_none_rejected_test
 run_effort_codex_high_ok_test
 run_effort_empty_string_normalized_test
+run_effort_copilot_rejected_test
+run_effort_copilot_ok_test
 run_ollama_claude_dryrun_test
 run_ollama_claude_passthrough_extra_test
 run_ollama_codex_passthrough_test
@@ -1943,6 +2049,8 @@ run_agy_prompt_as_arg_test
 run_agy_resume_continue_test
 run_agy_limit_keyword_not_misread_test
 run_agy_transcript_capture_test
+run_copilot_prompt_as_arg_test
+run_copilot_limit_detection_test
 run_shipped_examples_validate_test
 
 echo

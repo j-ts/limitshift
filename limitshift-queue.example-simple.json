@@ -8,6 +8,14 @@
       "prompt": "Add an 'Installation' section to README.md with the steps to install this project.",
       "completionCheck": false,
       "extraArgs": ["--permission-mode", "acceptEdits"]
+    },
+    {
+      "name": "Audit codebase with Copilot",
+      "cli": "copilot",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "prompt": "Audit the codebase for security issues and write findings to security-audit.md.",
+      "completionCheck": false,
+      "extraArgs": ["--allow-tool=read,write"]
     }
   ]
 }

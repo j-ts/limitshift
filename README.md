@@ -18,7 +18,7 @@
 
 ## What is LimitShift?
 
-LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, or Antigravity (`agy`)** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
+LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, Antigravity (`agy`), or GitHub Copilot (`copilot`)** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
 You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** Start a big list before bed and wake up to the work done (or as far as it got).
 
@@ -34,7 +34,7 @@ You don't need to be a programmer. You do need to open a terminal once or twice 
 | --- | --- | --- |
 | You hit a usage limit mid-task | You stop and lose your place | **Waits for the reset, then resumes the same conversation** |
 | A long list of changes | Babysit each one by hand | **Queue them once and walk away** |
-| More than one AI tool | Switch tools manually | **Mix `claude`, `codex`, `gemini`, `agy` in one queue** |
+| More than one AI tool | Switch tools manually | **Mix `claude`, `codex`, `gemini`, `agy`, `copilot` in one queue** |
 | Overnight / unattended runs | Not really possible | **Start before bed, done by morning** |
 | Running a local model | Look up the flags every time | **Built-in [Ollama](#run-with-local-models-through-ollama) support** |
 
@@ -43,7 +43,7 @@ You don't need to be a programmer. You do need to open a terminal once or twice 
 ## Key Features
 
 - **Usage-limit aware** — detects the cap, works out when it resets, waits, and resumes the *same* session so the AI keeps its memory.
-- **Four CLIs, one queue** — `claude`, `codex`, `gemini`, and Antigravity (`agy`), mixable task by task.
+- **Five CLIs, one queue** — `claude`, `codex`, `gemini`, Antigravity (`agy`), and `copilot`, mixable task by task.
 - **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
 - **[Completion checking](#completion-checking)** — keeps nudging a task across several rounds until the AI signals it's genuinely done.
 - **[Local models via Ollama](#run-with-local-models-through-ollama)** — run `claude` or `codex` against a model on your own machine.
@@ -72,6 +72,7 @@ No command-line experience needed — this uses buttons, links, and copy-paste.
    | [Claude](https://www.npmjs.com/package/@anthropic-ai/claude-code) | `npm install -g @anthropic-ai/claude-code` |
    | [Codex](https://www.npmjs.com/package/@openai/codex) | `npm install -g @openai/codex` |
    | [Gemini](https://www.npmjs.com/package/@google/gemini-cli) | `npm install -g @google/gemini-cli` |
+   | [Copilot](https://github.com/features/copilot#cli) | [Install GitHub Copilot CLI](https://github.com/github/gh-copilot) and run `copilot login` |
 
    **[Antigravity (`agy`)](https://antigravity.google)** — Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise) — installs **without Node**: on **Windows** run `irm https://antigravity.google/cli/install.ps1 | iex`, on **Mac/Linux** run `curl -fsSL https://antigravity.google/cli/install.sh | bash`.
 4. **Get LimitShift's files without Git** using the free [GitHub Desktop](https://desktop.github.com) app: **File → Clone repository → URL**, paste `https://github.com/j-ts/limitshift`, and clone it somewhere you'll remember. (Or click the green **Code → Download ZIP** on the project page and unzip it.)
@@ -91,6 +92,8 @@ cd limitshift
 
 # install whichever CLIs you use:
 npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
+# GitHub Copilot CLI (requires GitHub CLI 'gh' to be installed first):
+gh extension install github/gh-copilot && copilot login
 
 # Antigravity (agy) — Google's Gemini CLI successor — installs separately (no npm):
 #   Windows:   irm https://antigravity.google/cli/install.ps1 | iex
@@ -274,7 +277,7 @@ The queue file is `limitshift-queue.json` (copy an example and edit). `settings`
 | `settings.completionCheck` | boolean | no | `true` | See [Completion checking](#completion-checking) |
 | `settings.maxStalls` | integer | no | `2` | Fail a task after this many identical no-marker replies in a row |
 | `tasks[].name` | string | **yes** | — | Human-readable task name |
-| `tasks[].cli` | string | **yes** | — | `claude`, `codex`, `gemini`, or `agy` |
+| `tasks[].cli` | string | **yes** | — | `claude`, `codex`, `gemini`, `agy`, or `copilot` |
 | `tasks[].projectPath` | string | **yes** | — | Folder the CLI runs in (must exist) |
 | `tasks[].prompt` | string | **yes** | — | The task prompt |
 | `tasks[].model` | string or array | no | — | See [Models](#models) and [Model rotation](#model-rotation) |
@@ -286,14 +289,17 @@ Windows paths in JSON need **doubled backslashes** (`"C:\\Users\\me\\repo"`) or 
 
 ## Models
 
+> **Tested with:** Claude Code **2.1.170** · Codex CLI **0.136.0** · Gemini CLI **0.46.0** · Antigravity `agy` **1.0.8**. These are the builds LimitShift has been verified against; other recent versions should work too.
+
 Model aliases passed through to each CLI:
 
 - **claude:** `opus`, `sonnet`, `haiku` (or full ids like `claude-opus-4-8`). *(`fable` is currently disabled.)*
 - **codex:** `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`.
 - **gemini:** `gemini-3.*` (e.g. `gemini-3.1-pro-preview`, `gemini-3-flash-preview`), `gemini-2.5-*`.
 - **agy:** run `agy models` to see what your account can use (e.g. `gemini-3.1-pro`, `gemini-3.5-flash`, `claude-sonnet`, `gpt-oss-120b`). agy has no headless output mode (it draws its reply on screen), so LimitShift reads agy's answer back from its own local conversation history; and it resumes only its most recent conversation, so keep agy work to one linear chain of tasks — LimitShift handles the rest. Just have agy installed and signed in.
+- **copilot:** run `copilot models` to list what your account can use — passed through as `--model`. Use `extraArgs` for permission tool-use flags.
 
-**Effort** (`tasks[].effort`): claude `low`/`medium`/`high`/`xhigh`/`max`; codex `minimal`/`low`/`medium`/`high`/`xhigh`. Gemini, Antigravity (`agy`), and Claude Haiku have no effort flag — leave it `null`.
+**Effort** (`tasks[].effort`): claude `low`/`medium`/`high`/`xhigh`/`max`; codex `minimal`/`low`/`medium`/`high`/`xhigh`; copilot `low`/`medium`/`high`/`xhigh`/`max`. Gemini, Antigravity (`agy`), and Claude Haiku have no effort flag — leave it `null`.
 
 ## Permissions
 
@@ -303,6 +309,7 @@ Headless runs can't answer permission prompts — set your choice in `extraArgs`
 - Codex: `--sandbox workspace-write` (or `--dangerously-bypass-approvals-and-sandbox`)
 - Gemini: `--approval-mode auto_edit` (or `--approval-mode yolo`)
 - Antigravity (`agy`): `--dangerously-skip-permissions` (its only headless auto-approve)
+- Copilot: `--allow-tool=read,write,shell(*)` (or `--allow-all` for YOLO mode)
 
 More autonomy means more risk — run only against Git-backed folders.
 
@@ -327,7 +334,7 @@ Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `
 | --- | --- |
 | `Config file is not valid JSON` | Check for trailing/missing commas or bad escaping (use forward slashes in paths) |
 | `Task N is missing required JSON property` | Add the missing `name`, `cli`, `projectPath`, or `prompt` |
-| `Allowed values: claude, codex, gemini, agy` | Fix the `cli` value |
+| `Allowed values: claude, codex, gemini, agy, copilot` | Fix the `cli` value |
 | `Project path does not exist` | Fix the path or create the folder |
 | `not found on PATH` | Install the named CLI and retry |
 | `jq is required but not installed` | Install `jq` (`brew install jq` / `sudo apt install jq`) |
@@ -347,8 +354,8 @@ bash tests/test-limitshift.sh
 ## Glossary
 
 - **Terminal** — the app where you type commands (PowerShell on Windows; Terminal on Mac/Linux).
-- **CLI** — the command-line version of an AI tool (Claude Code, Codex, Gemini, Antigravity).
-- **Node.js / npm** — Node.js (from [nodejs.org](https://nodejs.org)) includes `npm`, used to install the claude/codex/gemini CLIs. LimitShift itself doesn't need Node, and Antigravity installs without it.
+- **CLI** — the command-line version of an AI tool (Claude Code, Codex, Gemini, Antigravity, Copilot).
+- **Node.js / npm** — Node.js (from [nodejs.org](https://nodejs.org)) includes `npm`, used to install the claude/codex/gemini CLIs. LimitShift itself doesn't need Node, and Antigravity and Copilot install without it.
 - **Headless / background** — running a tool with no one watching, so it can't ask questions — why you set permissions and trust folders ahead of time.
 - **Queue / task** — your whole list (the `.json` file) / one item in it.
 - **Session** — one ongoing conversation; resuming keeps the AI's memory.

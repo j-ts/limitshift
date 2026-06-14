@@ -34,6 +34,15 @@
       "extraArgs": ["--permission-mode", "acceptEdits"],
       "completionCheck": true,
       "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths. End with [[TASK_COMPLETE]] on its own line when done, or [[TASK_BLOCKED]] <reason> if you cannot finish."
+    },
+    {
+      "name": "Audit codebase with Copilot",
+      "cli": "copilot",
+      "model": ["gpt-4o", "claude-3.5-sonnet"],
+      "effort": "high",
+      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths. End with [[TASK_COMPLETE]] on its own line when done, or [[TASK_BLOCKED]] <reason> if you cannot finish.",
+      "extraArgs": ["--allow-tool=read,write"]
     }
   ]
 }

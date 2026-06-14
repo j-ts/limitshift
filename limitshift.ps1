@@ -150,7 +150,7 @@ function Add-RunsCsvRow {
     [System.IO.File]::AppendAllText($RunsCsvPath, $row + [Environment]::NewLine, $utf8NoBom)
 }
 
-$AllowedClis = @('claude', 'codex', 'gemini', 'agy')
+$AllowedClis = @('claude', 'codex', 'gemini', 'agy', 'copilot')
 
 # Local-model (Ollama) support. A task targets a local Ollama model when its extraArgs carry the
 # provider marker (`--oss` / `--local-provider ollama`) — the same flags codex understands natively.
@@ -343,6 +343,12 @@ function Read-QueueConfig {
                         throw "Task ${n}: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only."
                     }
                 }
+                'copilot' {
+                    $copilotEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+                    if ($copilotEfforts -notcontains $effort) {
+                        throw "Task ${n}: copilot effort must be one of low, medium, high, xhigh, max (or null)."
+                    }
+                }
             }
         }
 
@@ -392,6 +398,7 @@ function Test-CliBinariesAvailable {
                "  codex  : npm install -g @openai/codex`n" +
                "  gemini : npm install -g @google/gemini-cli`n" +
                "  agy    : irm https://antigravity.google/cli/install.ps1 | iex   (Antigravity CLI; macOS/Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash)`n" +
+               "  copilot: install GitHub Copilot CLI and run: copilot login`n" +
                "  ollama : https://ollama.com/download  (only needed for local models)")
     }
 }
@@ -1184,6 +1191,17 @@ function Get-CliArguments {
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
         }
+        'copilot' {
+            # GitHub Copilot CLI: prompt via -p, JSONL output.
+            $cliArgs = @('--output-format', 'json', '--stream', 'off', '--no-ask-user')
+            if ($Mode -eq 'New')    { $cliArgs += @('--name', $SessionId) }
+            if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
+            $cliArgs += @('-p', $Prompt)
+            if ($model)       { $cliArgs += @('--model', $model) }
+            if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
+            $cliArgs += $Task.ExtraArgs
+            return $cliArgs
+        }
     }
     throw "No argument builder for cli '$($Task.Cli)'"
 }
@@ -1292,7 +1310,7 @@ function Get-AgyResponseFromTranscript {
 
 function ConvertFrom-CliOutput {
     param(
-        [ValidateSet('claude','codex','gemini','agy')] [string]$Cli,
+        [ValidateSet('claude','codex','gemini','agy','copilot')] [string]$Cli,
         [string]$OutputText,
         [int]$ExitCode,
         # agy only: its plain-text response on stdout, captured separately from stderr so a trailing
@@ -1306,6 +1324,7 @@ function ConvertFrom-CliOutput {
         codex  = '(?i)(usage limit|rate limit|too many requests|try again (at|in)|quota)'
         gemini = '(?i)(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)'
         agy    = '(?i)(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))'
+        copilot = '(?i)(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)'
     }
 
     $limitRegex = $LimitPatterns[$Cli]
@@ -1396,6 +1415,33 @@ function ConvertFrom-CliOutput {
             } else { $null }
             return New-CliResult -Ok $hasResponse -IsLimit $isLimit -Text $text -SessionId $null -ErrorText $errorText
         }
+        'copilot' {
+            $textParts = @(); $sessionId = $null; $errorText = $null
+            foreach ($line in ($OutputText -split "`r?`n")) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $evt = $null
+                try { $evt = $line | ConvertFrom-Json } catch { continue }
+                $eventType = [string](Get-ObjectPropertyValue -Object $evt -Name 'type' -Default $null)
+                if ($eventType -eq 'assistant.message') {
+                    $content = [string](Get-ObjectPropertyValue -Object $evt -Name 'content' -Default '')
+                    if (-not [string]::IsNullOrEmpty($content)) { $textParts += $content }
+                }
+                $sid = [string](Get-ObjectPropertyValue -Object $evt -Name 'interactionId' -Default $null)
+                if ($null -ne $sid) { $sessionId = $sid }
+                $err = Get-ObjectPropertyValue -Object $evt -Name 'error' -Default $null
+                if ($null -ne $err) {
+                    $errorText = [string](Get-ObjectPropertyValue -Object $err -Name 'message' -Default $errorText)
+                }
+                elseif ($eventType -eq 'error') {
+                    $errorText = [string](Get-ObjectPropertyValue -Object $evt -Name 'message' -Default $errorText)
+                }
+            }
+            $text = $textParts -join ''
+            $isError = ($null -ne $errorText) -or ($ExitCode -ne 0)
+            $isLimit = $isError -and (("$errorText $OutputText") -match $limitRegex)
+            return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
+                -SessionId $sessionId -ErrorText $errorText
+        }
     }
 }
 
@@ -1428,7 +1474,7 @@ function Invoke-CliTaskRun {
 
     Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
     Write-Host "Command: $(Format-CommandForDisplay -Command $exe -Arguments $arguments)"
-    $promptChannel = if ($Task.Cli -eq 'agy') { 'passed as the -p argument' } else { 'sent via stdin' }
+    $promptChannel = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { 'passed as the -p argument' } else { 'sent via stdin' }
     Write-Host "(prompt $promptChannel; full text in the output file)"
 
     if ($DryRun) {
@@ -1440,12 +1486,12 @@ function Invoke-CliTaskRun {
     # Log the full prompt before the run; the displayed command line no longer contains it.
     [System.IO.File]::AppendAllText($outputFilePath, $prompt + [Environment]::NewLine + [Environment]::NewLine, $utf8NoBom)
 
-    # agy takes the prompt as the -p argument (not stdin); the other CLIs read it from stdin.
-    # agy still needs a CLOSED/EOF stdin: under Start-Process an inherited (unredirected) stdin
-    # handle makes agy block reading it indefinitely. Hand it an empty stdin so it gets immediate
-    # EOF — this mirrors limitshift.sh, which runs agy with `</dev/null`.
+    # agy and copilot take the prompt as the -p argument (not stdin); the other CLIs read it from stdin.
+    # agy and copilot still need a CLOSED/EOF stdin: under Start-Process an inherited (unredirected) stdin
+    # handle makes them block reading it indefinitely. Hand them an empty stdin so they get immediate
+    # EOF — this mirrors limitshift.sh, which runs them with `</dev/null`.
     $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath }
-    $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy') { '' } else { $prompt }
+    $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { '' } else { $prompt }
     $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText

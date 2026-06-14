@@ -201,6 +201,17 @@ Describe 'limitshift.ps1' {
             $cfg.Tasks[0].Effort | Should -Be 'high'
         }
 
+        # copilot: accepts low, medium, high, xhigh, max
+        It 'accepts copilot with effort high' {
+            $queuePath = New-EffortQueue -Task @{ name = 'cp'; cli = 'copilot'; prompt = 'p'; effort = 'high' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -Be 'high'
+        }
+        It 'rejects an out-of-set copilot effort listing the allowed values' {
+            $queuePath = New-EffortQueue -Task @{ name = 'cp'; cli = 'copilot'; prompt = 'p'; effort = 'minimal' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: copilot effort must be one of low, medium, high, xhigh, max*'
+        }
+        }
         It 'normalizes an empty-string effort to null (treated as no effort)' {
             $queuePath = New-EffortQueue -Task @{ name = 'g'; cli = 'gemini'; prompt = 'p'; effort = '' }
             $cfg = Read-QueueConfig -Path $queuePath
@@ -664,8 +675,28 @@ Describe 'limitshift.ps1' {
                 Model = $null; Effort = $null; Prompt = 'unused'; ExtraArgs = @()
             }
 
-            $args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'hi there'
+            args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'hi there'
             ($args -join ' ') | Should -Be '-p hi there'
+        }
+
+        It 'builds a copilot new-session command with session id as --name and JSONL flags' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'copilot'; ProjectPath = 'C:\proj'
+                Model = 'm'; Effort = 'high'; Prompt = 'p'; ExtraArgs = @('--verbose')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 'sid-123' -Prompt 'do it'
+            ($args -join ' ') | Should -Be '--output-format json --stream off --no-ask-user --name sid-123 -p do it --model m --effort high --verbose'
+        }
+
+        It 'builds a copilot resume command with session id as --resume' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'copilot'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = 'p'; ExtraArgs = @()
+            }
+
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'sid-123' -Prompt 'continue'
+            ($args -join ' ') | Should -Be '--output-format json --stream off --no-ask-user --resume sid-123 -p continue'
         }
     }
 
@@ -946,7 +977,8 @@ exit 0
             New-Item -ItemType Directory -Path $binPath -Force | Out-Null
 
             $stubPath = Join-Path $binPath 'echo-stdin.cmd'
-            '@powershell -NoProfile -Command "[Console]::In.ReadToEnd() | Write-Output"' |
+            '@
+powershell -NoProfile -Command "[Console]::In.ReadToEnd() | Write-Output"' |
                 Set-Content -LiteralPath $stubPath -Encoding Ascii
 
             $prompt = "line one with `"double quotes`"`r`nline two`r`n`r`n[[TASK_COMPLETE]]"
@@ -1048,6 +1080,33 @@ exit 0
             $result.IsLimit | Should -Be $true
         }
 
+        It 'parses copilot JSONL, extracting interactionId and content' {
+            $out = @'
+        {"type":"assistant.message","content":"I will help you with that.","interactionId":"cp-123"}
+        {"type":"assistant.message","content":"\nOK [[TASK_COMPLETE]]","interactionId":"cp-123"}
+'@
+
+            $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 0
+            $result.Ok | Should -Be $true
+            $result.SessionId | Should -Be 'cp-123'
+            $result.Text | Should -Be "I will help you with that.`nOK [[TASK_COMPLETE]]"
+        }
+
+        It 'detects a copilot usage limit from an error event' {
+            $out = '{"type":"error","message":"Usage limit reached. Please try again in 5 minutes.","interactionId":"cp-lim"}'
+            $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 1
+            $result.Ok | Should -Be $false
+            $result.IsLimit | Should -Be $true
+            $result.SessionId | Should -Be 'cp-lim'
+        }
+
+        It 'detects a copilot usage limit from an error object' {
+            $out = '{"error":{"message":"Rate limit exceeded","code":"rate_limit_exceeded"},"interactionId":"cp-lim2"}'
+            $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 1
+            $result.Ok | Should -Be $false
+            $result.IsLimit | Should -Be $true
+        }
+        }
         It 'parses an agy plain-text success from stdout and exposes the completion marker' {
             $out = "Antigravity did the work.`nOK [[TASK_COMPLETE]]"
             $result = ConvertFrom-CliOutput -Cli agy -OutputText $out -ExitCode 0 -StdOut $out
@@ -1128,11 +1187,13 @@ exit 0
 
         It 'parses gemini JSON followed by warning noise without adding parser errors' {
             $before = $Error.Count
-            $result = ConvertFrom-CliOutput -Cli gemini -OutputText @'
+            $out = @'
 {"session_id":"g-1","response":"OK\n[[TASK_COMPLETE]]"}
 Warning: 256-color support not detected. Using a terminal with at least 256-color support is recommended for a better visual experience.
 Ripgrep is not available. Falling back to GrepTool.
-'@ -ExitCode 0
+'@
+
+            $result = ConvertFrom-CliOutput -Cli gemini -OutputText $out -ExitCode 0
 
             $result.Ok | Should -Be $true
             $result.SessionId | Should -Be 'g-1'

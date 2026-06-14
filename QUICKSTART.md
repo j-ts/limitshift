@@ -3,7 +3,7 @@
 > **Set expectations.** There is no guarantee a task finishes exactly as you intended — the result depends on the model, your prompt, and the project. Treat the first run as a draft, refine with follow-up tasks or a better prompt, and **always run against a git-controlled folder** so you can review and revert.
 
 1. **Get the files** - Clone or download this folder.
-2. **Trust each project once** - Open every target project in `claude`, `codex`, `gemini`, or `agy` interactively once so the CLI can finish its trust/onboarding prompt for that folder.
+2. **Trust each project once** - Open every target project in `claude`, `codex`, `gemini`, `agy`, or `copilot` interactively once so the CLI can finish its trust/onboarding prompt for that folder.
 3. **Create your queue** - Copy `limitshift-queue.example-simple.json` to `limitshift-queue.json` and edit it (use a plain-text editor like Notepad, not Word). It is one task with the required fields (`name`, `cli`, `projectPath`, `prompt`) plus `"completionCheck": false` (run the prompt once, only wait if you hit a usage limit) and a permission flag so the AI can actually edit files:
 
    ```json
@@ -37,7 +37,9 @@ The console prints only the agent's reply under a `--- agent response ---` heade
 
 **Antigravity (`agy`):** the fourth supported CLI — Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts. Install it without Node (`irm https://antigravity.google/cli/install.ps1 | iex` on Windows, `curl -fsSL https://antigravity.google/cli/install.sh | bash` on Mac/Linux), set `"cli": "agy"`, and use `["--dangerously-skip-permissions"]` as its permission flag. agy has no `effort` (leave it `null`) and no Ollama path.
 
-**Local models:** to run a task on a local [Ollama](https://ollama.com) model, set `model` to the Ollama model name and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. This works for `codex` and `claude` **only** (for claude, LimitShift runs it via `ollama launch claude --model <model> --yes -- …`). See the README's [Run with local models through Ollama](README.md#run-with-local-models-through-ollama).
+**GitHub Copilot CLI (`copilot`):** the fifth supported CLI. Install it via GitHub CLI (`gh extension install github/gh-copilot`) and run `copilot login`. Set `"cli": "copilot"`, and use `["--allow-tool=read,write,shell(*)"]` (or `["--allow-all"]` for YOLO mode) as its permission flag. Copilot supports `effort` levels `low`, `medium`, `high`, `xhigh`, `max`.
+
+**Local models:** to run a task on a local [Ollama](https://ollama.com) model, set `model` to the Ollama model name and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. This works for `codex` and `claude` **only** (for claude, LimitShift runs it via `ollama launch claude --model <model> --yes -- …`). See the README's [Run with local models through Ollama](README.md#run-with-local-models-through-ollama). (agy and copilot have no Ollama path.)
 
 The scripts were renamed from `run-ai.ps1` / `run-ai.sh`; the old names still work for one release as deprecated forwarders that call the new scripts.
 

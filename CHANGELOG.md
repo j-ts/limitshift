@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Output-file encoding**: per-task output and the usage capture are written as **UTF-8 without BOM** (were UTF-16/Tee-Object), so they are greppable and parseable.
 
 ### Added
+- **GitHub Copilot CLI Support**: Added `copilot` as a first-class fifth `cli`.
+  - Supports session persistence via `--name` (new) and `--resume` (resumed).
+  - Supports reasoning effort (`--effort` / `--reasoning-effort`) with levels `low`, `medium`, `high`, `xhigh`, `max`.
+  - Supports model selection via `--model`.
+  - Delivers prompt via `-p` argument; hands it an **empty/EOF stdin** so it cannot block.
+  - Robust structured JSONL output parsing and automated usage-limit recovery.
+  - Recommended permission flags: `--allow-tool=read,write,shell(*)` (automation mode: `--allow-all --no-ask-user`).
 - **Antigravity CLI (`agy`) support**: `agy` is now a first-class fourth `cli`, alongside `claude`, `codex`, and `gemini` — Google's official successor to Gemini CLI for individual Google AI Pro/Ultra accounts. Its rough edges are handled transparently:
   - **No headless output → read from agy's transcript store.** In `-p`/`--print` mode agy renders its reply to a TTY, so a captured/redirected stdout is empty and there is no `--output-format json`. LimitShift instead recovers the reply from agy's own conversation store: `~/.gemini/antigravity-cli/cache/last_conversations.json` maps the absolute workspace path to a conversation id, and the **last `PLANNER_RESPONSE`** in `…/brain/<id>/.system_generated/logs/transcript.jsonl` is the agent's user-facing message (which is what completion-marker / stall detection then runs on). It falls back to the captured stdout when no transcript reply is found. The store location can be overridden with `LIMITSHIFT_AGY_DATA_DIR`. Because output capture no longer depends on the exit code (which is unreliable under redirection), an agy run is treated as successful exactly when a response was recovered.
   - **No per-conversation session ids.** Resume continues the most recent conversation with `agy -c` (driven by a sentinel session marker), so agy tasks are inherently sequential.

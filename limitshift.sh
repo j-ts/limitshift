@@ -228,8 +228,8 @@ read_queue_config() {
     done
     cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
     case "$cli" in
-      claude|codex|gemini|agy) ;;
-      *) echo "Task $n has unknown cli \"$cli\". Allowed values: claude, codex, gemini, agy" >&2; exit 2 ;;
+      claude|codex|gemini|agy|copilot) ;;
+      *) echo "Task $n has unknown cli \"$cli\". Allowed values: claude, codex, gemini, agy, copilot" >&2; exit 2 ;;
     esac
     path=$(task_field "$i" "projectPath")
     # Normalize path separators for checking directory existence on unix/git-bash
@@ -301,6 +301,12 @@ read_queue_config() {
             *) echo "Task $n: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only." >&2; exit 2 ;;
           esac
           ;;
+        copilot)
+          case "$effort" in
+            low|medium|high|xhigh|max) ;;
+            *) echo "Task $n: copilot effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
+          esac
+          ;;
       esac
     fi
     i=$((i + 1))
@@ -338,6 +344,7 @@ check_cli_binaries() {
     echo "  codex  : npm install -g @openai/codex" >&2
     echo "  gemini : npm install -g @google/gemini-cli" >&2
     echo "  agy    : curl -fsSL https://antigravity.google/cli/install.sh | bash   (Antigravity CLI; Windows PowerShell: irm https://antigravity.google/cli/install.ps1 | iex)" >&2
+    echo "  copilot: install GitHub Copilot CLI and run: copilot login" >&2
     echo "  ollama : https://ollama.com/download  (only needed for local models)" >&2
     exit 2
   fi
@@ -961,6 +968,25 @@ build_cli_args() {
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
       done < <(get_task_extra_args "$idx")
       ;;
+    copilot)
+      # GitHub Copilot CLI: prompt via -p, JSONL output.
+      CLI_ARGS+=("--output-format" "json" "--stream" "off" "--no-ask-user")
+      if [ "$mode" = "New" ]; then
+        CLI_ARGS+=("--name" "$session_id")
+      elif [ "$mode" = "Resume" ]; then
+        CLI_ARGS+=("--resume" "$session_id")
+      fi
+      CLI_ARGS+=("-p" "$prompt")
+      if [ -n "$model" ]; then
+        CLI_ARGS+=("--model" "$model")
+      fi
+      if [ -n "$effort" ]; then
+        CLI_ARGS+=("--effort" "$effort")
+      fi
+      while IFS= read -r arg; do
+        if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
+      done < <(get_task_extra_args "$idx")
+      ;;
   esac
 }
 
@@ -1017,6 +1043,7 @@ parse_cli_output() {
     codex)  limit_regex='(usage limit|rate limit|too many requests|try again (at|in)|quota)' ;;
     gemini) limit_regex='(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)' ;;
     agy)    limit_regex='(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))' ;;
+    copilot) limit_regex='(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)' ;;
   esac
 
   case "$cli" in
@@ -1128,6 +1155,31 @@ parse_cli_output() {
         fi
       fi
       ;;
+    copilot)
+      local clean_jsonl
+      clean_jsonl=$(printf '%s' "$output" | grep -E '^\{')
+      if [ -z "$clean_jsonl" ] || ! printf '%s' "$clean_jsonl" | jq -s empty >/dev/null 2>&1; then
+        R_OK=0
+        if printf '%s' "$output" | grep -qiE "$limit_regex" >/dev/null 2>&1; then
+          R_IS_LIMIT=1
+        fi
+        R_TEXT="$output"
+        R_ERROR_TEXT="$output"
+        return
+      fi
+
+      R_SESSION_ID=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.interactionId // empty) | last // empty')
+      R_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(select(.type=="assistant.message") | .content // "") | join("")')
+      R_ERROR_TEXT=$(printf '%s' "$clean_jsonl" | jq -rs 'map(.error.message // select(.type=="error").message // empty) | last // empty')
+
+      if [ -n "$R_ERROR_TEXT" ] || [ "$exit_code" -ne 0 ]; then
+        R_OK=0
+        if printf '%s %s' "$R_ERROR_TEXT" "$output" | grep -qiE "$limit_regex" >/dev/null 2>&1; then
+          R_IS_LIMIT=1
+        fi
+        if [ -z "$R_ERROR_TEXT" ]; then R_ERROR_TEXT="$output"; fi
+      fi
+      ;;
   esac
 }
 
@@ -1205,13 +1257,13 @@ invoke_cli_task_run() {
 
   build_cli_args "$idx" "$mode" "$session_id" "$model_override" "$prompt_with_marker"
 
-  # Collapse any embedded newlines to a literal \n so a multi-line argument (agy carries the whole
+  # Collapse any embedded newlines to a literal \n so a multi-line argument (agy/copilot carries the whole
   # prompt as the -p value) stays a tidy one-line command echo, matching limitshift.ps1's display.
   local cmd_display
   cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
   echo "==== $mode run for task $((idx + 1)): $name [$cli] ===="
   echo "Command: $CLI_EXE ${cmd_display% }"
-  if [ "$cli" = "agy" ]; then
+  if [ "$cli" = "agy" ] || [ "$cli" = "copilot" ]; then
     echo "(prompt passed as the -p argument; full text in the output file)"
   else
     echo "(prompt sent via stdin; full text in the output file)"
@@ -1232,14 +1284,13 @@ invoke_cli_task_run() {
   local output_text exit_code agy_stdout=""
   local tmp_out tmp_err
   tmp_out=$(mktemp)
-  if [ "$cli" = "agy" ]; then
-    # agy takes the prompt as the -p argument (not stdin) and has no JSON output. Capture stdout and
-    # stderr separately so the plain-text response (stdout) is read cleanly and a trailing stderr
-    # line cannot displace the agent's [[TASK_COMPLETE]] last line. stdin is /dev/null (unused).
+  if [ "$cli" = "agy" ] || [ "$cli" = "copilot" ]; then
+    # agy and copilot take the prompt as the -p argument (not stdin). Capture stdout and
+    # stderr separately so the response is read cleanly. stdin is /dev/null (unused).
     tmp_err=$(mktemp)
     ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
     exit_code=$?
-    agy_stdout=$(cat "$tmp_out")
+    if [ "$cli" = "agy" ]; then agy_stdout=$(cat "$tmp_out"); fi
     output_text=$(cat "$tmp_out"; cat "$tmp_err")
     rm -f "$tmp_out" "$tmp_err"
   else

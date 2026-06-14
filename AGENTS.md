@@ -1,7 +1,7 @@
 # AGENTS.md - LimitShift agent guide
 
 This repository contains **LimitShift**, a small cross-platform queue runner for AI coding CLIs
-(`claude`, `codex`, `gemini`, and `agy`). Your most common task is to convert a user's rough draft into a
+(`claude`, `codex`, `gemini`, `agy`, and `copilot`). Your most common task is to convert a user's rough draft into a
 valid `limitshift-queue.json` that LimitShift can run.
 
 `agy` is the **Antigravity CLI**, Google's official successor to Gemini CLI for individual Google AI
@@ -50,7 +50,7 @@ the `cli`. (The user must have agy installed and signed in, same as any other CL
 Each task must include:
 
 - `name` - short human label.
-- `cli` - one of `claude`, `codex`, `gemini`, or `agy`; use the user's requested CLI when specified.
+- `cli` - one of `claude`, `codex`, `gemini`, `agy`, or `copilot`; use the user's requested CLI when specified.
 - `projectPath` - absolute folder for the CLI run. Windows paths need escaped backslashes
   (`"C:\\Users\\me\\project"`) or forward slashes (`"C:/Users/me/project"`).
 - `prompt` - concrete task instruction, including files to inspect/edit and completion criteria.
@@ -78,6 +78,9 @@ Useful optional fields:
   and no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
   checking (`completionCheck: true`) still works because the runner recovers agy's reply from its
   conversation transcript.
+- GitHub Copilot CLI (`copilot`): run `copilot models` to see what your account can use; pass the
+  chosen name as `model`. Effort: `low`, `medium`, `high`, `xhigh`, `max`. Copilot delivers prompts
+  via `-p` and returns structured JSONL.
 
 ## Permission Flags
 
@@ -88,6 +91,7 @@ Headless CLI runs cannot answer permission prompts. If a task should edit files,
 - Gemini: `["--approval-mode", "auto_edit"]`
 - Antigravity (`agy`): `["--dangerously-skip-permissions"]` (agy's only headless auto-approve; it
   has no softer "accept edits only" mode).
+- Copilot: `["--allow-tool=read,write,shell(*)"]` (or `["--allow-all"]` for YOLO mode).
 
 Without these flags, the agent may run read-only and leave the project unchanged.
 
@@ -105,8 +109,8 @@ shape works for both CLIs:
 
 A local task that should edit files still needs its permission flag in `extraArgs` — the
 local-provider flags only choose the model. List both, e.g.
-`["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]`. Gemini has no Ollama
-path here.
+`["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]`. Gemini, agy, and copilot
+have no Ollama path here.
 
 ## Prompt Quality Bar
 
