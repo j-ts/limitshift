@@ -1546,6 +1546,73 @@ $out"
   fi
 }
 
+run_model_claude_dot_rejected_test() {
+  local desc="claude model with a dot is rejected at validation (claude-opus-4.6)"
+  local root="$TMP_ROOT/model-claude-dot"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "model": "claude-opus-4.6", "projectPath": "$project_dir", "prompt": "p" } ] }
+EOF
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && \
+     printf '%s' "$out" | grep -qE 'Task 1: claude model "claude-opus-4\.6" contains a dot' && \
+     printf '%s' "$out" | grep -qF 'claude-opus-4-6'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_claude_dot_in_list_rejected_test() {
+  local desc="claude rejects a dotted model anywhere in the rotation list"
+  local root="$TMP_ROOT/model-claude-dot-list"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "model": ["claude-opus-4-6", "claude-sonnet-4.6"], "projectPath": "$project_dir", "prompt": "p" } ] }
+EOF
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && \
+     printf '%s' "$out" | grep -qE 'Task 1: claude model "claude-sonnet-4\.6" contains a dot'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_model_claude_hyphen_ok_test() {
+  local desc="claude with a hyphenated model id validates"
+  local root="$TMP_ROOT/model-claude-hyphen"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "model": "claude-opus-4-6", "projectPath": "$project_dir", "prompt": "p" } ] }
+EOF
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_model_claude_alias_ok_test() {
+  local desc="claude with a bare alias (opus) validates"
+  local root="$TMP_ROOT/model-claude-alias"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "model": "opus", "projectPath": "$project_dir", "prompt": "p" } ] }
+EOF
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_model_claude_ollama_dot_ok_test() {
+  local desc="claude in Ollama mode allows a dotted model (qwen3.5:9b) because it goes to ollama launch --model"
+  local root="$TMP_ROOT/model-claude-ollama-dot"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "model": "qwen3.5:9b", "projectPath": "$project_dir", "prompt": "p", "extraArgs": ["--oss", "--local-provider", "ollama"] } ] }
+EOF
+  check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
 run_effort_claude_haiku_null_ok_test() {
   local desc="claude haiku with effort null validates"
   local root="$TMP_ROOT/effort-haiku-null"; local project_dir="$root/project"; local queue_path="$root/queue.json"
@@ -2633,6 +2700,11 @@ run_effort_claude_xhigh_ok_test
 run_effort_claude_outofset_rejected_test
 run_effort_claude_haiku_rejected_test
 run_effort_claude_haiku_in_list_rejected_test
+run_model_claude_dot_rejected_test
+run_model_claude_dot_in_list_rejected_test
+run_model_claude_hyphen_ok_test
+run_model_claude_alias_ok_test
+run_model_claude_ollama_dot_ok_test
 run_effort_claude_haiku_null_ok_test
 run_effort_codex_none_rejected_test
 run_effort_codex_high_ok_test

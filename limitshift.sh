@@ -747,6 +747,21 @@ read_queue_config() {
       fi
     fi
 
+    # Claude headless (-p) doesn't expand dotted aliases the way the TUI does, so a queue model
+    # like "claude-opus-4.6" reaches the API verbatim and 404s mid-run. Reject the dot form at
+    # validation. Ollama-launched claude tasks pass the model to `ollama launch --model`, where
+    # dots are normal (e.g. "qwen3.5:9b"), so skip them.
+    if [ "$cli" = "claude" ] && ! is_ollama_task "$i"; then
+      while IFS= read -r m; do
+        case "$m" in
+          *.*)
+            echo "Task $n: claude model \"$m\" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. \"claude-opus-4-6\") or an alias (\"opus\", \"sonnet\", \"haiku\")." >&2
+            exit 2
+            ;;
+        esac
+      done < <(get_task_models "$i")
+    fi
+
     local effort
     effort=$(task_field "$i" "effort")
     if [ -n "$effort" ]; then

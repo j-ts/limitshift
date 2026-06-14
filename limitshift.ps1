@@ -844,6 +844,18 @@ function Read-QueueConfig {
             throw "Task ${n}: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set `"model`" to your Ollama model, e.g. `"qwen3.5:9b`"."
         }
 
+        # Claude headless (-p) doesn't expand dotted aliases the way the TUI does, so a queue model
+        # like "claude-opus-4.6" reaches the API verbatim and 404s mid-run. Reject the dot form at
+        # validation. Ollama-launched claude tasks pass the model to `ollama launch --model`, where
+        # dots are normal (e.g. "qwen3.5:9b"), so skip them.
+        if ($cli -eq 'claude' -and -not (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs)) {
+            foreach ($m in $models) {
+                if ($m -like '*.*') {
+                    throw "Task ${n}: claude model `"$m`" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. `"claude-opus-4-6`") or an alias (`"opus`", `"sonnet`", `"haiku`")."
+                }
+            }
+        }
+
         # Effort normalization: treat absent, JSON null, and "" all as "no effort" (null).
         $effort = $null
         if ($t.PSObject.Properties['effort'] -and $null -ne $t.effort) {

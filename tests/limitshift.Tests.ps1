@@ -197,6 +197,33 @@ Describe 'limitshift.ps1' {
             $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
         }
 
+        # claude headless (-p) does not expand dotted aliases the way the TUI does. Reject the dot
+        # form at validation so users do not see a 404 mid-run. Ollama-launched tasks are exempt
+        # because the model goes to `ollama launch --model`, where dots are normal (qwen3.5:9b).
+        It 'rejects a claude model with a dot, naming the task and suggesting the hyphenated form' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = 'claude-opus-4.6' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: claude model "claude-opus-4.6" contains a dot*claude-opus-4-6*'
+        }
+        It 'rejects a dotted claude model anywhere in the rotation list' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = @('claude-opus-4-6', 'claude-sonnet-4.6') }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: claude model "claude-sonnet-4.6" contains a dot*'
+        }
+        It 'accepts a claude model with a hyphenated id' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = 'claude-opus-4-6' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Model | Should -Be 'claude-opus-4-6'
+        }
+        It 'accepts a claude model alias (opus)' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = 'opus' }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Model | Should -Be 'opus'
+        }
+        It 'allows a dotted model in Ollama mode (passed to ollama launch --model, not claude)' {
+            $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = $null; model = 'qwen3.5:9b'; extraArgs = @('--oss', '--local-provider', 'ollama') }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Model | Should -Be 'qwen3.5:9b'
+        }
+
         # codex: none is plan-mode only
         It 'rejects codex effort none with a plan-mode-only hint, naming the task' {
             $queuePath = New-EffortQueue -Task @{ name = 'x'; cli = 'codex'; prompt = 'p'; effort = 'none' }
