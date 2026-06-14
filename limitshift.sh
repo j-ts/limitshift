@@ -522,10 +522,10 @@ ui_rest_with_summary() {
   ui_rest "$wake_epoch"
   now=$(date +%s)
   elapsed=$((now - start))
-  if [ "$elapsed" -ge 1 ]; then
-    printf '\n'
-    ui_beat "$GLYPH_MOON" "Hit a usage limit on ${cli}, rested for $(ui_format_duration "$elapsed")" "$UI_BLUE"
-  fi
+  # Always print the beat - the wrapper is only ever called when a real limit was hit, and the
+  # downstream code (and tests) need a "Hit a usage limit" line whether or not we actually slept.
+  printf '\n'
+  ui_beat "$GLYPH_MOON" "Hit a usage limit on ${cli}, rested for $(ui_format_duration "$elapsed")" "$UI_BLUE"
 }
 
 # --- Demo flow (no CLIs run) -------------------------------------------------
@@ -1275,11 +1275,10 @@ wait_for_limit_reset() {
     printf '\n'
   fi
   local wake_time=$((reset_time + RESET_BUFFER_MINUTES * 60))
-  local now; now=$(date +%s)
-  local sleep_seconds=$((wake_time - now))
-  if [ "$sleep_seconds" -gt 0 ]; then
-    ui_rest_with_summary "$cli" "$wake_time"
-  fi
+  # Always call the wrapper, even when the reset is "in 0s" (a real case some CLIs emit and
+  # what stubs in the test suite produce). The wrapper prints the "Hit a usage limit" beat
+  # regardless and skips the actual sleep when wake_time is already in the past.
+  ui_rest_with_summary "$cli" "$wake_time"
 }
 
 get_task_key() {
@@ -1736,16 +1735,20 @@ invoke_cli_task_run() {
     ui_task_header "$((idx + 1))" "$UI_TASK_TOTAL" "$cli" "$mode" "$model_override" "$name" "$prompt"
   fi
 
+  if [ "$DRY_RUN" -eq 1 ]; then
+    # Dry-run prints the assembled command at column 0 so it's greppable - the whole point of
+    # dry-run is "show me what would run". Format matches the pre-preview-UI style intentionally.
+    local cmd_display
+    cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
+    printf 'Command: %s %s\n' "$CLI_EXE" "${cmd_display% }"
+    R_OK=1; R_IS_LIMIT=0; R_TEXT="[dry-run]"; R_SESSION_ID=""; R_ERROR_TEXT=""
+    return
+  fi
   if [ "$SHOW_RAW" -eq 1 ]; then
     local cmd_display
     cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
     ui_color "$UI_DIM" "  $GLYPH_DOT command: $CLI_EXE ${cmd_display% }"
     printf '\n'
-  fi
-
-  if [ "$DRY_RUN" -eq 1 ]; then
-    R_OK=1; R_IS_LIMIT=0; R_TEXT="[dry-run]"; R_SESSION_ID=""; R_ERROR_TEXT=""
-    return
   fi
 
   printf '%s\n\n' "$prompt_with_marker" >> "$output_file_path"

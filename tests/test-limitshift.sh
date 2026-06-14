@@ -157,8 +157,8 @@ EOF
   first_call="$(sed -n '1p' "$log_file")"
   second_call="$(sed -n '2p' "$log_file")"
 
-  if printf '%s' "$out" | grep -q 'paused by a usage limit on codex' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+  if printf '%s' "$out" | grep -q 'Hit a usage limit on codex' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      printf '%s' "$first_call" | grep -q -- '--sandbox workspace-write' &&
      ! printf '%s' "$first_call" | grep -q -- ' -C ' &&
      printf '%s' "$second_call" | grep -q '^exec resume thr-limit --json -m gpt-5.4 -c model_reasoning_effort=high --skip-git-repo-check ' &&
@@ -529,7 +529,7 @@ EOF
 
   if [ "$exit_code" -eq 0 ] &&
      [ -f "$status_dir/task-01.done" ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed'; then
+     printf '%s' "$out" | grep -q 'Task 1 done'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
@@ -621,7 +621,7 @@ EOF
   exit_code=$?
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q -- '--- agent response ---' &&
+     printf '%s' "$out" | grep -q -- '✦ response' &&
      printf '%s' "$out" | grep -q 'Here is the clean answer' &&
      ! printf '%s' "$out" | grep -q '"session_id"' &&
      [ -f "$output_file" ] &&
@@ -1154,7 +1154,7 @@ EOF
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Using legacy queue filename ai-run-queue.json' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ -f "$root/.limitshift-ai-run-queue/status/task-01.done" ]; then
     pass "$desc"
   else
@@ -1327,7 +1327,7 @@ EOF
   local out exit_code
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      printf '%s' "$out" | grep -q 'Antigravity did the work.' &&
      grep -q 'cont=0 model=gemini-3.1-pro stdin_len=0' "$log_file" &&
      grep -q 'PROMPT1=Write hello to a file.' "$log_file"; then
@@ -1389,7 +1389,7 @@ EOF
   local out exit_code
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ "$(grep -c 'RUN cont=0' "$log_file")" = "1" ] &&
      [ "$(grep -c 'RUN cont=1' "$log_file")" = "1" ]; then
     pass "$desc"
@@ -1427,9 +1427,9 @@ EOF
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   runs=$(grep -c '^run$' "$log_file")
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ "$runs" = "1" ] &&
-     ! printf '%s' "$out" | grep -qi 'paused by a usage limit'; then
+     ! printf '%s' "$out" | grep -qi 'Hit a usage limit'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code runs=$runs
@@ -1466,7 +1466,7 @@ EOF
   local out exit_code
   out=$(LIMITSHIFT_AGY_DATA_DIR="$data_dir" AGY_STUB_PROJKEY="$project_dir" PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      printf '%s' "$out" | grep -q 'Recovered via transcript'; then
     pass "$desc"
   else
@@ -1658,7 +1658,7 @@ EOF
   local out exit_code
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      printf '%s' "$out" | grep -qF 'Copilot reply. [[TASK_COMPLETE]]' &&
      grep -q 'RUN mode=new sid=.* stdin_len=0' "$log_file" &&
      grep -q 'PROMPT1=Hello Copilot' "$log_file"; then
@@ -1689,7 +1689,7 @@ EOF
 EOF
   local out exit_code
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
-  if printf '%s' "$out" | grep -qi 'paused by a usage limit on copilot'; then
+  if printf '%s' "$out" | grep -qi 'Hit a usage limit on copilot'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
@@ -1741,8 +1741,8 @@ EOF
   first_call="$(sed -n '1p' "$log_file" 2>/dev/null)"
   second_call="$(sed -n '3p' "$log_file" 2>/dev/null)"
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -qi 'paused by a usage limit on copilot' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -qi 'Hit a usage limit on copilot' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      printf '%s' "$first_call" | grep -q 'RUN mode=new sid=' &&
      printf '%s' "$second_call" | grep -q 'RUN mode=resume sid=cp-resume stdin_len=0'; then
     pass "$desc"
@@ -1924,7 +1924,7 @@ EOF
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'switching to m-second' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ "$first" = "m-first" ] &&
      [ "$second" = "m-second" ] &&
      [ "$saved_idx" = "1" ]; then
@@ -1984,8 +1984,8 @@ EOF
   m3=$(sed -n '3p' "$model_log" 2>/dev/null)
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'paused by a usage limit' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Hit a usage limit' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ "$m1" = "m-first" ] && [ "$m2" = "m-second" ] && [ "$m3" = "m-first" ]; then
     pass "$desc"
   else
@@ -2041,9 +2041,9 @@ EOF
   m2=$(sed -n '2p' "$model_log" 2>/dev/null)
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'paused by a usage limit' &&
+     printf '%s' "$out" | grep -q 'Hit a usage limit' &&
      ! printf '%s' "$out" | grep -q 'switching to' &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ "$m1" = "only-model" ] && [ "$m2" = "only-model" ]; then
     pass "$desc"
   else
@@ -2420,7 +2420,7 @@ EOF
   state_dir="$root/.limitshift-myproject-queue"
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
      [ -f "$state_dir/status/task-01.done" ]; then
     pass "$desc"
   else
@@ -2450,7 +2450,7 @@ EOF
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$queue_path" 2>&1)
   exit_code=$?
 
-  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 completed'; then
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 done'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
@@ -2518,7 +2518,7 @@ EOF
   out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$queue_path" 2>&1)
   exit_code=$?
 
-  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 completed'; then
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Task 1 done'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code

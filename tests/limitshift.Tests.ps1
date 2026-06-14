@@ -853,7 +853,7 @@ exit 0
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'switching to m-second'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
                 $models[0] | Should -Be 'm-first'
@@ -910,8 +910,8 @@ exit 0
                 $env:PATH = "$binPath;$oldPath"
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'paused by a usage limit'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Hit a usage limit'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
                 $models[0] | Should -Be 'm-first'
@@ -964,9 +964,9 @@ exit 0
                 $env:PATH = "$binPath;$oldPath"
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'paused by a usage limit'
+                $run.Output | Should -Match 'Hit a usage limit'
                 $run.Output | Should -Not -Match 'switching to'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $models = @(Get-Content -LiteralPath $modelLog | Where-Object { $_ })
                 $models[0] | Should -Be 'only-model'
@@ -1372,8 +1372,8 @@ exit 0
                 )
 
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'Task 1 completed'
-                $run.Output | Should -Match 'prompt sent via stdin'
+                $run.Output | Should -Match 'Task 1 done'
+                $run.Output | Should -Match 'full prompt saved to the output file'
 
                 $statusPath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
@@ -1485,8 +1485,8 @@ exit 0
                 $env:PATH = "$binPath;$oldPath"
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'paused by a usage limit on copilot'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Hit a usage limit on copilot'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $log = Get-Content -LiteralPath $logFile -Raw
                 $log | Should -Match 'RUN mode=new sid='
@@ -1546,7 +1546,7 @@ exit 0
                 )
 
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
@@ -1615,8 +1615,8 @@ exit 0
                 )
 
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'paused by a usage limit'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Hit a usage limit'
+                $run.Output | Should -Match 'Task 1 done'
 
                 $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
@@ -1735,7 +1735,7 @@ exit 0
                 )
 
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match '--- agent response ---'
+                $run.Output | Should -Match '✦ response'
                 $run.Output | Should -Match 'Here is the clean answer'
                 $run.Output | Should -Not -Match '"session_id"'
                 $run.Output | Should -Not -Match '"result"'
@@ -2116,7 +2116,7 @@ exit 0
                 )
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Using legacy queue filename ai-run-queue.json'
-                $run.Output | Should -Match 'Task 1 completed'
+                $run.Output | Should -Match 'Task 1 done'
 
                 # The legacy queue was actually used: its state folder (.ai-run-queue) was created.
                 $donePath = Join-Path $root '.limitshift-ai-run-queue\status\task-01.done'
@@ -2400,7 +2400,7 @@ exit 0
             $stateDir = Join-Path $root '.limitshift-myproject-queue'
 
             $run.ExitCode | Should -Be 0
-            $run.Output   | Should -Match 'Task 1 completed'
+            $run.Output   | Should -Match 'Task 1 done'
             Test-Path (Join-Path $stateDir 'status\task-01.done') | Should -BeTrue
         }
 
@@ -2421,7 +2421,7 @@ exit 0
             $run = Invoke-RunQueue -QueuePath $qPath -ExtraPath $binDir
 
             $run.ExitCode | Should -Be 0
-            $run.Output   | Should -Match 'Task 1 completed'
+            $run.Output   | Should -Match 'Task 1 done'
         }
 
         It 'two different queue files produce two separate state folders' {
@@ -2475,7 +2475,7 @@ exit 0
             $run = Invoke-RunQueue -QueuePath $qPath -ExtraPath $binDir
 
             $run.ExitCode | Should -Be 0
-            $run.Output   | Should -Match 'Task 1 completed'
+            $run.Output   | Should -Match 'Task 1 done'
         }
 
         It 'lock file with live PID blocks a concurrent run with exit 2' {

@@ -2059,12 +2059,14 @@ function Invoke-CliTaskRun {
     if (-not $Quiet) {
         Write-UiTaskHeader -TaskNumber ($TaskIndex + 1) -TaskTotal $script:UiTaskTotal -Task $Task -Mode $Mode -Model $ModelOverride -PromptText $Task.Prompt
     }
+    if ($DryRun) {
+        # Dry-run prints the assembled command at column 0 so it's greppable - the whole point of
+        # dry-run is "show me what would run". Format matches the pre-preview-UI style intentionally.
+        Write-Host "Command: $(Format-CommandForDisplay -Command $exe -Arguments $arguments)"
+        return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
+    }
     if ($ShowRawOutput) {
         Write-Host ("  " + $script:GlyphDot + " command: " + (Format-CommandForDisplay -Command $exe -Arguments $arguments)) -ForegroundColor DarkGray
-    }
-
-    if ($DryRun) {
-        return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
     }
 
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
@@ -2175,10 +2177,10 @@ function Wait-ForLimitReset {
         Write-Host ("     no reset time in the error " + $script:GlyphDot + " waiting the configured " + $Settings.LimitWaitMinutes + " min") -ForegroundColor DarkGray
     }
     $wakeTime = $resetTime.AddMinutes($Settings.ResetBufferMinutes)
-    $sleepSeconds = [int]($wakeTime - (Get-Date)).TotalSeconds
-    if ($sleepSeconds -gt 0) {
-        Invoke-UiRestWithSummary -Cli ([string]$Task.Cli) -WakeTime $wakeTime
-    }
+    # Always call the wrapper, even when the reset is "in 0s" (a real case some CLIs emit and
+    # what stubs in the test suite produce). The wrapper prints the "Hit a usage limit" beat
+    # regardless and skips the actual sleep when WakeTime is already in the past.
+    Invoke-UiRestWithSummary -Cli ([string]$Task.Cli) -WakeTime $wakeTime
 }
 
 function Test-QueuePreflight {
@@ -2416,6 +2418,10 @@ catch {
 }
 
 if ($ValidateOnly) {
+    $capsDir = Join-Path $RunnerStatePath 'capabilities'
+    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
+    if (-not $modelValidationPassed) { exit 2 }
+    if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
     Write-Host "Config OK: $QueuePath"
     Write-Host "Tasks: $($config.Tasks.Count)"
     foreach ($t in $config.Tasks) {
@@ -2442,11 +2448,6 @@ if (Test-Path -LiteralPath $LockPath) {
 try {
     Initialize-RunnerState  # migration + mkdir must happen before we write the lock
     $PID | Set-Content -LiteralPath $LockPath -Encoding UTF8 -NoNewline
-
-    $capsDir = Join-Path $RunnerStatePath 'capabilities'
-    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
-    if (-not $modelValidationPassed) { exit 2 }
-    if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
 
     $Tasks = $config.Tasks
     $ResetBufferMinutes = $config.Settings.ResetBufferMinutes
