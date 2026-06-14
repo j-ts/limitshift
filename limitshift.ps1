@@ -3,7 +3,9 @@ param(
     [switch]$ValidateOnly,
     [switch]$DryRun,
     [switch]$ShowRawOutput,
-    [switch]$LoadFunctionsOnly
+    [switch]$LoadFunctionsOnly,
+    [switch]$RefreshCapabilities,
+    [switch]$ProbeModels
 )
 
 $ErrorActionPreference = 'Stop'
@@ -209,13 +211,16 @@ function Read-QueueConfig {
     }
 
     $defaults = @{
-        StopOnError       = $true
-        MaxRunsPerTask    = 20
-        MaxRetriesOnError = 2
-        LimitWaitMinutes  = 30
-        ResetBufferMinutes = 2
-        CompletionCheck   = $true
-        MaxStalls         = 2
+        StopOnError           = $true
+        MaxRunsPerTask        = 20
+        MaxRetriesOnError     = 2
+        LimitWaitMinutes      = 30
+        ResetBufferMinutes    = 2
+        CompletionCheck       = $true
+        MaxStalls             = 2
+        ModelValidation       = 'strictWhenDiscoverable'
+        CapabilityCacheHours  = 24
+        ProbeModels           = $false
     }
     $settings = $defaults.Clone()
     $settingsNode = $parsed.PSObject.Properties['settings']
@@ -1196,7 +1201,7 @@ function Get-CliArguments {
             $cliArgs = @()
             if ($Mode -eq 'New')    { $cliArgs += @('--name', $SessionId) }
             if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
-            $cliArgs += @('--output-format', 'json', '--stream', 'off', '--no-ask-user')
+            $cliArgs += @('--output-format=json', '--stream=off', '--no-ask-user')
             $cliArgs += @('-p', $Prompt)
             if ($model)       { $cliArgs += @('--model', $model) }
             if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
@@ -1423,7 +1428,8 @@ function ConvertFrom-CliOutput {
                 $evt = $null
                 try { $evt = $line | ConvertFrom-Json } catch { continue }
                 $eventType = [string](Get-ObjectPropertyValue -Object $evt -Name 'type' -Default $null)
-                if ($eventType -eq 'assistant.message') {
+                if ($eventType -in @('assistant.message','assistant','message','response','completion','final') -or
+                    ([string](Get-ObjectPropertyValue -Object $evt -Name 'role' -Default '') -eq 'assistant')) {
                     foreach ($contentName in @('content', 'text', 'message')) {
                         $content = [string](Get-ObjectPropertyValue -Object $evt -Name $contentName -Default $null)
                         if (-not [string]::IsNullOrEmpty($content)) { $textParts += $content; break }
@@ -1613,6 +1619,207 @@ function Test-QueuePreflight {
     return $config
 }
 
+function Get-EditDistance {
+    param([string]$s, [string]$t)
+    $m = $s.Length; $n = $t.Length
+    $d = New-Object 'int[,]' ($m + 1), ($n + 1)
+    for ($i = 0; $i -le $m; $i++) { $d.SetValue($i, $i, 0) }
+    for ($j = 0; $j -le $n; $j++) { $d.SetValue($j, 0, $j) }
+    for ($i = 1; $i -le $m; $i++) {
+        for ($j = 1; $j -le $n; $j++) {
+            $cost = if ($s[$i - 1] -eq $t[$j - 1]) { 0 } else { 1 }
+            $a = $d.GetValue($i - 1, $j) + 1
+            $b = $d.GetValue($i, $j - 1) + 1
+            $c = $d.GetValue($i - 1, $j - 1) + $cost
+            $d.SetValue([Math]::Min([Math]::Min($a, $b), $c), $i, $j)
+        }
+    }
+    return $d.GetValue($m, $n)
+}
+
+function Get-ModelSuggestions {
+    param([string]$ModelName, [string[]]$Models, [int]$MaxSuggestions = 3, [int]$MaxDistance = 4)
+    $inputLower = $ModelName.ToLower()
+    $scored = $Models | ForEach-Object {
+        [pscustomobject]@{ Model = $_; Distance = (Get-EditDistance $inputLower $_.ToLower()) }
+    } | Sort-Object Distance | Where-Object { $_.Distance -le $MaxDistance }
+    return @($scored | Select-Object -First $MaxSuggestions | ForEach-Object { $_.Model })
+}
+
+function Get-AvailableModels {
+    param([string]$Cli)
+    $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $result = [pscustomobject]@{
+        Cli                    = $Cli
+        SupportsModelDiscovery = $false
+        Models                 = [string[]]@()
+        Source                 = ''
+        DiscoveredAt           = $ts
+        Error                  = ''
+    }
+    switch ($Cli) {
+        { $_ -in @('agy', 'copilot') } {
+            $listCmd = $_
+            if (Get-Command $listCmd -ErrorAction SilentlyContinue) {
+                try {
+                    $out = & $listCmd models 2>&1
+                    if ($LASTEXITCODE -eq 0 -and $out) {
+                        $models = [string[]]@()
+                        try {
+                            $json = ($out -join '') | ConvertFrom-Json -ErrorAction Stop
+                            if ($json -is [System.Array]) {
+                                $models = [string[]]@($json | ForEach-Object {
+                                    if ($_.id) { $_.id } elseif ($_.name) { $_.name } else { [string]$_ }
+                                } | Where-Object { $_ })
+                            }
+                        }
+                        catch {
+                            $models = [string[]]@($out | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                        }
+                        if ($models.Count -gt 0) {
+                            $result.SupportsModelDiscovery = $true
+                            $result.Models = $models
+                            $result.Source = "$listCmd models"
+                        }
+                        else { $result.Error = "$listCmd models: could not parse model list from output" }
+                    }
+                    else { $result.Error = "$listCmd models: exited $LASTEXITCODE" }
+                }
+                catch { $result.Error = "$listCmd models threw: $_" }
+            }
+            else { $result.Error = "$listCmd not on PATH" }
+        }
+        default { $result.Error = "$Cli does not expose a scriptable model list" }
+    }
+    return $result
+}
+
+function Save-CapabilityCache {
+    param([string]$Cli, [string]$CapsDir, $Caps)
+    if (-not (Test-Path $CapsDir)) { New-Item -ItemType Directory -Path $CapsDir -Force | Out-Null }
+    $Caps | ConvertTo-Json | Set-Content (Join-Path $CapsDir "$Cli.json") -Encoding UTF8
+}
+
+function Get-CliCapabilities {
+    param([string]$Cli, [string]$CapsDir, [int]$MaxAgeHours = 24, [switch]$Refresh)
+    $cacheFile = Join-Path $CapsDir "$Cli.json"
+    if (-not $Refresh -and (Test-Path $cacheFile)) {
+        try {
+            $cached = Get-Content $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $discoveredAt = [DateTime]::ParseExact(
+                $cached.DiscoveredAt, 'yyyy-MM-ddTHH:mm:ssZ', $null,
+                [System.Globalization.DateTimeStyles]::AssumeUniversal)
+            $ageHours = ([DateTime]::UtcNow - $discoveredAt).TotalHours
+            if ($ageHours -lt $MaxAgeHours) {
+                Write-Verbose "INFO: using cached $Cli capabilities (age: $([Math]::Floor($ageHours))h)"
+                return $cached
+            }
+        }
+        catch {}
+    }
+    $caps = Get-AvailableModels -Cli $Cli
+    Save-CapabilityCache -Cli $Cli -CapsDir $CapsDir -Caps $caps
+    return $caps
+}
+
+function Invoke-ModelValidation {
+    param(
+        $Config,
+        [string]$CapsDir,
+        [switch]$Refresh
+    )
+    $policy = $Config.Settings.ModelValidation
+    $cacheHours = $Config.Settings.CapabilityCacheHours
+    if ($policy -eq 'off') { return $true }
+
+    $hadError = $false
+    $capsCache = @{}
+
+    for ($i = 0; $i -lt $Config.Tasks.Count; $i++) {
+        $task = $Config.Tasks[$i]
+        $n = $i + 1
+        if ($task.Models.Count -eq 0) { continue }
+
+        if (-not $capsCache.ContainsKey($task.Cli)) {
+            $capsCache[$task.Cli] = Get-CliCapabilities -Cli $task.Cli -CapsDir $CapsDir `
+                -MaxAgeHours $cacheHours -Refresh:$Refresh
+        }
+        $caps = $capsCache[$task.Cli]
+
+        if ($caps.SupportsModelDiscovery) {
+            foreach ($model in $task.Models) {
+                if ($caps.Models -notcontains $model) {
+                    $suggestions = Get-ModelSuggestions -ModelName $model -Models $caps.Models
+                    $sugStr = if ($suggestions) { " (did you mean: $($suggestions -join ', ')?)" } else { '' }
+                    switch ($policy) {
+                        'strictWhenDiscoverable' {
+                            [Console]::Error.WriteLine("ERROR: Task ${n}: model `"$model`" is not available for $($task.Cli) according to $($caps.Source)${sugStr}")
+                            $hadError = $true
+                        }
+                        'warn' {
+                            Write-Warning "Task ${n}: model `"$model`" not found in $($task.Cli) model list (continuing)${sugStr}"
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            Write-Host "  INFO: Task ${n}: model validation skipped for $($task.Cli) ($($caps.Error))" -ForegroundColor DarkGray
+        }
+    }
+    return (-not $hadError)
+}
+
+function Invoke-ModelProbe {
+    param($Config)
+    Write-Host '--- model probe ---'
+    $seen = @{}
+    foreach ($task in $Config.Tasks) {
+        $modelsToProbe = if ($task.Models.Count -gt 0) { $task.Models } else { @('') }
+        foreach ($model in $modelsToProbe) {
+            $key = "$($task.Cli):$model"
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $modelFlag = if ($model) {
+                switch ($task.Cli) {
+                    'claude'  { @('--model', $model) }
+                    'codex'   { @('-m', $model) }
+                    'gemini'  { @('-m', $model) }
+                    default   { @('--model', $model) }
+                }
+            } else { @() }
+
+            $tmpDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "limitshift-probe-$([guid]::NewGuid())")
+            New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+            try {
+                $cliArgs = switch ($task.Cli) {
+                    'claude'  { @('--permission-mode', 'viewOnly', '--output-format', 'json') + $modelFlag + @('-p', 'Respond with only: OK') }
+                    'codex'   { @('exec', '--json') + $modelFlag + @('--skip-git-repo-check') }
+                    'gemini'  { $modelFlag }
+                    'agy'     { @('-p', 'Respond with only: OK', '--dangerously-skip-permissions') + $modelFlag }
+                    'copilot' { @('--name', 'limitshift-probe', '--allow-all') + $modelFlag }
+                    default   { @() }
+                }
+                $label = $task.Cli + $(if ($model) { " ($model)" })
+                $process = Start-Process -FilePath $task.Cli -ArgumentList $cliArgs `
+                    -WorkingDirectory $tmpDir -Wait -PassThru -NoNewWindow `
+                    -RedirectStandardOutput (Join-Path $tmpDir 'out.txt') `
+                    -RedirectStandardError  (Join-Path $tmpDir 'err.txt') `
+                    -ErrorAction SilentlyContinue
+                if ($process.ExitCode -eq 0) {
+                    Write-Host "  INFO: Probe $label`: OK" -ForegroundColor DarkGray
+                } else {
+                    $errLine = Get-Content (Join-Path $tmpDir 'err.txt') -TotalCount 1 -ErrorAction SilentlyContinue
+                    Write-Warning "Probe ${label}: failed (exit $($process.ExitCode)) - $errLine"
+                }
+            }
+            finally {
+                Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 try {
@@ -1624,6 +1831,10 @@ catch {
 }
 
 if ($ValidateOnly) {
+    $capsDir = Join-Path $RunnerStatePath 'capabilities'
+    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
+    if (-not $modelValidationPassed) { exit 2 }
+    if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
     Write-Host "Config OK: $QueuePath"
     Write-Host "Tasks: $($config.Tasks.Count)"
     foreach ($t in $config.Tasks) {

@@ -692,7 +692,7 @@ Describe 'limitshift.ps1' {
             }
 
             $args = Get-CliArguments -Task $task -Mode New -SessionId 'sid-123' -Prompt 'do it'
-            ($args -join ' ') | Should -Be '--name sid-123 --output-format json --stream off --no-ask-user -p do it --model m --effort high --verbose'
+            ($args -join ' ') | Should -Be '--name sid-123 --output-format=json --stream=off --no-ask-user -p do it --model m --effort high --verbose'
         }
 
         It 'builds a copilot resume command with session id as --resume' {
@@ -702,7 +702,7 @@ Describe 'limitshift.ps1' {
             }
 
             $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'sid-123' -Prompt 'continue'
-            ($args -join ' ') | Should -Be '--resume sid-123 --output-format json --stream off --no-ask-user -p continue'
+            ($args -join ' ') | Should -Be '--resume sid-123 --output-format=json --stream=off --no-ask-user -p continue'
         }
     }
 
@@ -1120,7 +1120,7 @@ plain trailing text
 '@
             $result = ConvertFrom-CliOutput -Cli copilot -OutputText $out -ExitCode 1
             $result.Ok | Should -Be $false
-            $result.Text | Should -Match 'unexpected.event'
+            $result.Text | Should -Be 'plain trailing text'
             $result.SessionId | Should -Be 'cp-raw'
         }
         It 'parses an agy plain-text success from stdout and exposes the completion marker' {
@@ -2060,6 +2060,185 @@ exit 0
             finally {
                 $env:PATH = $oldPath
             }
+        }
+    }
+
+    Context 'Capability discovery' {
+        It 'Get-EditDistance returns 0 for identical strings' {
+            Get-EditDistance 'gpt-5.4' 'gpt-5.4' | Should -Be 0
+        }
+
+        It 'Get-EditDistance returns 1 for one substitution' {
+            Get-EditDistance 'got-5' 'gpt-5' | Should -Be 1
+        }
+
+        It 'Get-ModelSuggestions returns nearest model within threshold' {
+            $suggestions = Get-ModelSuggestions -ModelName 'gpt-5' -Models @('gpt-5.4', 'gpt-5.5', 'gemini-pro')
+            $suggestions | Should -Contain 'gpt-5.4'
+        }
+
+        It 'Get-ModelSuggestions returns empty when no close match' {
+            $suggestions = Get-ModelSuggestions -ModelName 'zzzzz-99' -Models @('gpt-5.4', 'gpt-5.5')
+            $suggestions | Should -BeNullOrEmpty
+        }
+
+        It 'Save-CapabilityCache writes json; Get-CliCapabilities reads it back within TTL' {
+            $root = New-TestRoot
+            $capsDir = Join-Path $root 'caps'
+            $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $caps = [pscustomobject]@{
+                Cli                    = 'agy'
+                SupportsModelDiscovery = $true
+                Models                 = [string[]]@('m1', 'm2')
+                Source                 = 'agy models'
+                DiscoveredAt           = $ts
+                Error                  = ''
+            }
+            Save-CapabilityCache -Cli 'agy' -CapsDir $capsDir -Caps $caps
+            $loaded = Get-CliCapabilities -Cli 'agy' -CapsDir $capsDir -MaxAgeHours 24
+            $loaded.Models.Count | Should -Be 2
+        }
+
+        It 'Get-CliCapabilities ignores stale cache (MaxAgeHours=0) and re-discovers' {
+            $root = New-TestRoot
+            $capsDir = Join-Path $root 'caps'
+            New-Item -ItemType Directory -Path $capsDir -Force | Out-Null
+            $staleJson = '{"Cli":"agy","SupportsModelDiscovery":true,"Models":["stale"],"Source":"agy models","DiscoveredAt":"2000-01-01T00:00:00Z","Error":""}'
+            Set-Content (Join-Path $capsDir 'agy.json') $staleJson -Encoding UTF8
+            # agy not on PATH → re-discovers with supportsModelDiscovery=false
+            $caps = Get-CliCapabilities -Cli 'agy' -CapsDir $capsDir -MaxAgeHours 0
+            $caps.SupportsModelDiscovery | Should -BeFalse
+        }
+
+        It 'Get-CliCapabilities returns supportsModelDiscovery=false for claude' {
+            $root = New-TestRoot
+            $capsDir = Join-Path $root 'caps'
+            $caps = Get-CliCapabilities -Cli 'claude' -CapsDir $capsDir -MaxAgeHours 24
+            $caps.SupportsModelDiscovery | Should -BeFalse
+        }
+    }
+
+    Context 'Model validation (validate-only)' {
+        BeforeAll {
+            function Invoke-ValidateOnly {
+                param([string]$QueuePath, [switch]$RefreshCapabilities, [switch]$ProbeModels, [string]$ExtraPath = '')
+                $scriptArgs = @('-NoProfile', '-File', $script:__limitshiftScriptPath,
+                                '-QueuePath', $QueuePath, '-ValidateOnly')
+                if ($RefreshCapabilities) { $scriptArgs += '-RefreshCapabilities' }
+                if ($ProbeModels)          { $scriptArgs += '-ProbeModels' }
+                $oldPath = $env:PATH
+                if ($ExtraPath) { $env:PATH = "$ExtraPath;$oldPath" }
+                try { return Invoke-RunnerProcess -Arguments $scriptArgs }
+                finally { $env:PATH = $oldPath }
+            }
+
+            function New-AgyStub {
+                param([string]$Root, [string[]]$Models)
+                $binDir = Join-Path $Root 'bin'
+                New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+                $stub = Join-Path $binDir 'agy.ps1'
+                $lines = ($Models | ForEach-Object { "Write-Output '$_'" }) -join "`n"
+                Set-Content $stub "if (`$args -contains 'models') {`n$lines`nexit 0`n}`nexit 1" -Encoding UTF8
+                return $binDir
+            }
+        }
+
+        It 'strictWhenDiscoverable fails when model not in discovered list' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = New-AgyStub -Root $root -Models @('real-model')
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'strictWhenDiscoverable' }
+                tasks    = @(@{ name='t'; cli='agy'; projectPath=$projectPath; model='typo-model'; prompt='p'; extraArgs=@('--dangerously-skip-permissions') })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath -ExtraPath $binDir
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'not available'
+        }
+
+        It 'warn mode continues despite unknown model and prints WARNING' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = New-AgyStub -Root $root -Models @('known-model')
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'warn' }
+                tasks    = @(@{ name='t'; cli='agy'; projectPath=$projectPath; model='unknown-model'; prompt='p'; extraArgs=@('--dangerously-skip-permissions') })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath -ExtraPath $binDir
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match '(?i)warning'
+            $result.Output | Should -Match 'Config OK'
+        }
+
+        It 'off mode skips model checks entirely' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = New-AgyStub -Root $root -Models @('known-model')
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'off' }
+                tasks    = @(@{ name='t'; cli='agy'; projectPath=$projectPath; model='anything'; prompt='p'; extraArgs=@('--dangerously-skip-permissions') })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath -ExtraPath $binDir
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'Config OK'
+        }
+
+        It 'undiscoverable CLI (claude) prints INFO and does not fail' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Set-Content (Join-Path $binDir 'claude.ps1') 'exit 0' -Encoding UTF8
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='claude-opus-4-8'; prompt='p'; extraArgs=@('--permission-mode','acceptEdits') })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath -ExtraPath $binDir
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match '(?i)INFO'
+            $result.Output | Should -Match 'Config OK'
+        }
+
+        It '-RefreshCapabilities ignores stale cache and re-discovers' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $binDir = New-AgyStub -Root $root -Models @('fresh-model')
+            $qPath = Join-Path $root 'q.json'
+            $capsDir = Join-Path $root '.limitshift-q\capabilities'
+            New-Item -ItemType Directory -Path $capsDir -Force | Out-Null
+            $stale = '{"Cli":"agy","SupportsModelDiscovery":true,"Models":["stale-model"],"Source":"agy models","DiscoveredAt":"2000-01-01T00:00:00Z","Error":""}'
+            Set-Content (Join-Path $capsDir 'agy.json') $stale -Encoding UTF8
+            Write-TestQueue -Path $qPath -Config @{
+                tasks = @(@{ name='t'; cli='agy'; projectPath=$projectPath; model='fresh-model'; prompt='p'; extraArgs=@('--dangerously-skip-permissions') })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath -RefreshCapabilities -ExtraPath $binDir
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'Config OK'
+        }
+
+        It '-ProbeModels is opt-in: normal -ValidateOnly does not probe' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binDir = Join-Path $root 'bin'
+            $probeLog = Join-Path $root 'probe.txt'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            $probeLogEscaped = $probeLog -replace '\\', '\\'
+            Set-Content (Join-Path $binDir 'claude.ps1') "if (`$args -contains '-p') { [System.IO.File]::AppendAllText('$probeLogEscaped', 'PROBE_RAN') }`nexit 0" -Encoding UTF8
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p'; extraArgs=@('--permission-mode','acceptEdits') })
+            }
+            Invoke-ValidateOnly -QueuePath $qPath -ExtraPath $binDir | Out-Null
+            (Test-Path $probeLog) | Should -BeFalse
         }
     }
 
