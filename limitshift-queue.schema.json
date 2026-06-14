@@ -37,14 +37,14 @@
         "additionalProperties": false,
         "properties": {
           "name": { "type": "string", "minLength": 1 },
-          "cli": { "enum": ["claude", "codex", "gemini"] },
+          "cli": { "enum": ["claude", "codex", "gemini", "agy"] },
           "projectPath": { "type": "string", "minLength": 1 },
           "model": {
             "oneOf": [
               { "type": "string" },
               { "type": "array", "items": { "type": "string" }, "minItems": 1 }
             ],
-            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: fable, opus, sonnet, haiku, claude-fable-5, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash."
+            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: fable, opus, sonnet, haiku, claude-fable-5, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash; agy (Antigravity CLI): run 'agy models' to list what your account can use (e.g. gemini-3.1-pro, gemini-3.5-flash, claude-sonnet, gpt-oss-120b) — passed through as '--model'. Local Ollama models (e.g. qwen3.5:9b, nemotron-3-nano:4b) are also accepted; pair them with extraArgs [\"--oss\", \"--local-provider\", \"ollama\"] to run locally. A local claude task requires a model (it is passed to 'ollama launch --model')."
           },
           "effort": {
             "enum": [null, "minimal", "low", "medium", "high", "xhigh", "max"],
@@ -59,7 +59,8 @@
             "oneOf": [
               { "type": "string" },
               { "type": "array", "items": { "type": "string" } }
-            ]
+            ],
+            "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy has no Ollama path.)"
           }
         },
         "allOf": [
@@ -73,6 +74,20 @@
                 "effort": {
                   "enum": [null],
                   "description": "Gemini CLI has no effort flag. Must be null (or omitted). For Gemini 3+ models use thinkingLevel, and for Gemini 2.5 models use thinkingBudget, via settings or generation config — not via this field."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "cli": { "const": "agy" } },
+              "required": ["cli"]
+            },
+            "then": {
+              "properties": {
+                "effort": {
+                  "enum": [null],
+                  "description": "Antigravity CLI (agy) has no --effort flag. Must be null (or omitted)."
                 }
               }
             }

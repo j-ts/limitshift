@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# LimitShift — runs queued prompts against claude / codex / gemini CLIs,
+# LimitShift — runs queued prompts against claude / codex / gemini / agy CLIs,
 # waiting out usage limits and resuming sessions. macOS (bash 3.2+) and Linux.
 
 set -u
@@ -108,6 +108,26 @@ get_task_extra_args() {
   jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
+# Local-model (Ollama) support. A task targets a local Ollama model when its extraArgs carry the
+# provider marker (`--oss` / `--local-provider ollama`) — the same flags codex understands natively.
+# codex passes them straight through; claude has no native Ollama flag, so LimitShift runs it via
+# `ollama launch claude --model <model> --yes -- <claude args>`. Returns 0 (true) only for claude,
+# since codex reaches Ollama on its own and needs no launcher wrapper.
+is_ollama_task() {
+  local idx="$1" cli arg lower
+  cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
+  if [ "$cli" != "claude" ]; then
+    return 1
+  fi
+  while IFS= read -r arg; do
+    lower=$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')
+    if [ "$lower" = "ollama" ] || [ "$lower" = "--oss" ]; then
+      return 0
+    fi
+  done < <(get_task_extra_args "$idx")
+  return 1
+}
+
 # Task 6: emit the task's model list, one model per line. A single string is a 1-element list; an
 # array is that list in order; absent/null emits nothing. Mirrors limitshift.ps1's Models parsing.
 get_task_models() {
@@ -208,8 +228,8 @@ read_queue_config() {
     done
     cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
     case "$cli" in
-      claude|codex|gemini) ;;
-      *) echo "Task $n has unknown cli \"$cli\". Allowed values: claude, codex, gemini" >&2; exit 2 ;;
+      claude|codex|gemini|agy) ;;
+      *) echo "Task $n has unknown cli \"$cli\". Allowed values: claude, codex, gemini, agy" >&2; exit 2 ;;
     esac
     path=$(task_field "$i" "projectPath")
     # Normalize path separators for checking directory existence on unix/git-bash
@@ -234,6 +254,15 @@ read_queue_config() {
       fi
     fi
 
+    # Local Ollama mode (claude): the model is selected by `ollama launch --model`, so it is required.
+    # (codex reaches Ollama natively and needs no model-for-launcher.)
+    if [ "$cli" = "claude" ] && is_ollama_task "$i"; then
+      if [ -z "$(get_task_models "$i" | sed -n '1p')" ]; then
+        echo "Task $n: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set \"model\" to your Ollama model, e.g. \"qwen3.5:9b\"." >&2
+        exit 2
+      fi
+    fi
+
     # Task 6b: enforce the SAME per-CLI effort rules the schema declares (editor-only), so a
     # misconfigured queue fails at validation (exit 2) instead of mid-run. task_field maps both an
     # absent field and JSON null/"" to "" (via `// empty` + tr), so a non-empty effort is a real value.
@@ -243,6 +272,10 @@ read_queue_config() {
       case "$cli" in
         gemini)
           echo "Task $n: gemini has no effort flag; set \"effort\": null (use thinkingLevel/thinkingBudget via gemini settings instead)." >&2
+          exit 2
+          ;;
+        agy)
+          echo "Task $n: agy (Antigravity CLI) has no --effort flag; set \"effort\": null." >&2
           exit 2
           ;;
         claude)
@@ -275,14 +308,27 @@ read_queue_config() {
 }
 
 check_cli_binaries() {
-  local cli unique_clis missing_clis=()
+  local cli unique_clis missing_clis=() i needs_ollama=0 tcli
   unique_clis=$(jq -r '.tasks[].cli' "$QUEUE_PATH" | tr '[:upper:]' '[:lower:]' | tr -d '\r' | sort -u)
   for cli in $unique_clis; do
     if ! command -v "$cli" >/dev/null 2>&1; then
       missing_clis+=("$cli")
     fi
   done
-  
+
+  # A claude task targeting a local Ollama model is launched via `ollama`, so it must be present too.
+  i=0
+  while [ "$i" -lt "$TASK_COUNT" ]; do
+    tcli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
+    if [ "$tcli" = "claude" ] && is_ollama_task "$i"; then
+      needs_ollama=1
+    fi
+    i=$((i + 1))
+  done
+  if [ "$needs_ollama" -eq 1 ] && ! command -v ollama >/dev/null 2>&1; then
+    missing_clis+=("ollama")
+  fi
+
   if [ ${#missing_clis[@]} -gt 0 ]; then
     local missing_str
     missing_str=$(IFS=, ; echo "${missing_clis[*]}")
@@ -291,6 +337,8 @@ check_cli_binaries() {
     echo "  claude : npm install -g @anthropic-ai/claude-code" >&2
     echo "  codex  : npm install -g @openai/codex" >&2
     echo "  gemini : npm install -g @google/gemini-cli" >&2
+    echo "  agy    : curl -fsSL https://antigravity.google/cli/install.sh | bash   (Antigravity CLI; Windows PowerShell: irm https://antigravity.google/cli/install.ps1 | iex)" >&2
+    echo "  ollama : https://ollama.com/download  (only needed for local models)" >&2
     exit 2
   fi
 }
@@ -739,7 +787,7 @@ get_saved_task_session_id() {
 }
 
 new_task_session_id() {
-  local uuid
+  local idx="$1" uuid
   if command -v uuidgen >/dev/null 2>&1; then
     uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
   elif [ -f /proc/sys/kernel/random/uuid ]; then
@@ -750,6 +798,10 @@ new_task_session_id() {
       uuid="mock-uuid-$RANDOM-$RANDOM"
     fi
   fi
+  # Persist the id up front (mirrors limitshift.ps1's New-TaskSessionId). claude passes it as
+  # --session-id and also echoes it back in its JSON; agy has no output id, so writing it here is
+  # what makes the NEXT run resume (the sentinel that triggers agy -c).
+  printf '%s' "$uuid" > "$(get_task_session_file_path "$idx")"
   printf '%s' "$uuid"
 }
 
@@ -792,7 +844,7 @@ save_task_failed_marker() {
 }
 
 build_cli_args() {
-  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}"
+  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" prompt="${5:-}"
   local cli model effort project_path
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
   # Task 6: the -m/--model value is the current rotation model (Models[currentModelIndex]) when the
@@ -806,25 +858,57 @@ build_cli_args() {
   project_path=$(task_field "$idx" "projectPath")
 
   CLI_ARGS=()
+  # CLI_EXE is the executable to run. It is the cli name except for a local Ollama claude task,
+  # which is launched through `ollama` (set below). Callers read CLI_EXE after build_cli_args.
+  CLI_EXE="$cli"
 
   case "$cli" in
     claude)
-      CLI_ARGS+=("-p")
+      # Local Ollama mode: claude has no native Ollama flag, so when extraArgs request the ollama
+      # provider we run claude through `ollama launch claude --model <m> --yes -- <args>`. The model
+      # goes to the launcher's --model (not claude's), and the ollama control tokens
+      # (--oss / --local-provider ollama) are stripped from what claude itself receives.
+      local ollama=0
+      if is_ollama_task "$idx"; then ollama=1; fi
+
+      local claude_args=()
+      claude_args+=("-p")
       if [ "$mode" = "New" ]; then
-        CLI_ARGS+=("--session-id" "$session_id")
+        claude_args+=("--session-id" "$session_id")
       elif [ "$mode" = "Resume" ]; then
-        CLI_ARGS+=("--resume" "$session_id")
+        claude_args+=("--resume" "$session_id")
       fi
-      CLI_ARGS+=("--output-format" "json")
-      if [ -n "$model" ]; then
-        CLI_ARGS+=("--model" "$model")
+      claude_args+=("--output-format" "json")
+      if [ -n "$model" ] && [ "$ollama" -eq 0 ]; then
+        claude_args+=("--model" "$model")
       fi
       if [ -n "$effort" ]; then
-        CLI_ARGS+=("--effort" "$effort")
+        claude_args+=("--effort" "$effort")
       fi
       while IFS= read -r arg; do
-        if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
+        if [ -n "$arg" ]; then
+          if [ "$ollama" -eq 1 ]; then
+            local lower
+            lower=$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')
+            case "$lower" in
+              --oss|--local-provider|ollama) continue ;;
+            esac
+          fi
+          claude_args+=("$arg")
+        fi
       done < <(get_task_extra_args "$idx")
+
+      if [ "$ollama" -eq 1 ]; then
+        CLI_EXE="ollama"
+        CLI_ARGS=("launch" "claude")
+        if [ -n "$model" ]; then
+          CLI_ARGS+=("--model" "$model")
+        fi
+        CLI_ARGS+=("--yes" "--")
+        CLI_ARGS+=("${claude_args[@]}")
+      else
+        CLI_ARGS=("${claude_args[@]}")
+      fi
       ;;
     codex)
       CLI_ARGS+=("exec")
@@ -862,11 +946,28 @@ build_cli_args() {
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
       done < <(get_task_extra_args "$idx")
       ;;
+    agy)
+      # Antigravity CLI: no JSON output and no per-conversation session ids. The prompt is the value
+      # of -p (agy does not read it from stdin); resume continues the most recent conversation with
+      # -c (there is no id to pass). No effort flag (rejected at validation).
+      if [ "$mode" = "Resume" ]; then
+        CLI_ARGS+=("-c")
+      fi
+      CLI_ARGS+=("-p" "$prompt")
+      if [ -n "$model" ]; then
+        CLI_ARGS+=("--model" "$model")
+      fi
+      while IFS= read -r arg; do
+        if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
+      done < <(get_task_extra_args "$idx")
+      ;;
   esac
 }
 
 parse_cli_output() {
   local cli="$1" output="$2" exit_code="$3"
+  # agy passes its plain-text stdout as $output and the combined stdout+stderr as $4 (limit haystack).
+  local combined="${4:-$output}"
   R_OK=1
   R_IS_LIMIT=0
   R_TEXT=""
@@ -878,6 +979,7 @@ parse_cli_output() {
     claude) limit_regex='(you'\''ve hit your .{0,40}limit|usage limit)' ;;
     codex)  limit_regex='(usage limit|rate limit|too many requests|try again (at|in)|quota)' ;;
     gemini) limit_regex='(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)' ;;
+    agy)    limit_regex='(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))' ;;
   esac
 
   case "$cli" in
@@ -969,6 +1071,21 @@ parse_cli_output() {
         fi
       fi
       ;;
+    agy)
+      # agy has no structured output: the response is its plain-text stdout (passed as $output); fall
+      # back to the combined stream if stdout is empty (mirrors limitshift.ps1). There is no session id
+      # to capture (resume is the -c flag), so R_SESSION_ID stays empty. A usage limit only counts when
+      # the run FAILED (exit != 0) — exactly like claude/codex — so a successful response mentioning
+      # "429"/"rate limit"/"quota" is not misread as a limit.
+      if [ -n "$output" ]; then R_TEXT="$output"; else R_TEXT="$combined"; fi
+      if [ "$exit_code" -ne 0 ]; then
+        R_OK=0
+        R_ERROR_TEXT="$combined"
+        if printf '%s' "$combined" | grep -qiE "$limit_regex" >/dev/null 2>&1; then
+          R_IS_LIMIT=1
+        fi
+      fi
+      ;;
   esac
 }
 
@@ -1044,11 +1161,19 @@ invoke_cli_task_run() {
     prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$prompt" "$marker_block")
   fi
 
-  build_cli_args "$idx" "$mode" "$session_id" "$model_override"
+  build_cli_args "$idx" "$mode" "$session_id" "$model_override" "$prompt_with_marker"
 
+  # Collapse any embedded newlines to a literal \n so a multi-line argument (agy carries the whole
+  # prompt as the -p value) stays a tidy one-line command echo, matching limitshift.ps1's display.
+  local cmd_display
+  cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
   echo "==== $mode run for task $((idx + 1)): $name [$cli] ===="
-  echo "Command: $cli ${CLI_ARGS[@]}"
-  echo "(prompt sent via stdin; full text in the output file)"
+  echo "Command: $CLI_EXE ${cmd_display% }"
+  if [ "$cli" = "agy" ]; then
+    echo "(prompt passed as the -p argument; full text in the output file)"
+  else
+    echo "(prompt sent via stdin; full text in the output file)"
+  fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
     R_OK=1
@@ -1062,14 +1187,25 @@ invoke_cli_task_run() {
   # Log the full prompt before the run; the displayed command line no longer contains it.
   printf '%s\n\n' "$prompt_with_marker" >> "$output_file_path"
 
-  local output_text exit_code
-  local tmp_out
+  local output_text exit_code agy_stdout=""
+  local tmp_out tmp_err
   tmp_out=$(mktemp)
-  ( cd "$project_path" && printf '%s' "$prompt_with_marker" | "$cli" "${CLI_ARGS[@]}" ) > "$tmp_out" 2>&1
-  exit_code=$?
-  
-  output_text=$(cat "$tmp_out")
-  rm -f "$tmp_out"
+  if [ "$cli" = "agy" ]; then
+    # agy takes the prompt as the -p argument (not stdin) and has no JSON output. Capture stdout and
+    # stderr separately so the plain-text response (stdout) is read cleanly and a trailing stderr
+    # line cannot displace the agent's [[TASK_COMPLETE]] last line. stdin is /dev/null (unused).
+    tmp_err=$(mktemp)
+    ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
+    exit_code=$?
+    agy_stdout=$(cat "$tmp_out")
+    output_text=$(cat "$tmp_out"; cat "$tmp_err")
+    rm -f "$tmp_out" "$tmp_err"
+  else
+    ( cd "$project_path" && printf '%s' "$prompt_with_marker" | "$CLI_EXE" "${CLI_ARGS[@]}" ) > "$tmp_out" 2>&1
+    exit_code=$?
+    output_text=$(cat "$tmp_out")
+    rm -f "$tmp_out"
+  fi
 
   # The FULL raw output always goes to the per-task output file.
   if [ -n "$output_text" ]; then
@@ -1077,7 +1213,12 @@ invoke_cli_task_run() {
   fi
 
   # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
-  parse_cli_output "$cli" "$output_text" "$exit_code"
+  # agy: pass stdout as the response text and the combined stdout+stderr as the limit/error haystack.
+  if [ "$cli" = "agy" ]; then
+    parse_cli_output "$cli" "$agy_stdout" "$exit_code" "$output_text"
+  else
+    parse_cli_output "$cli" "$output_text" "$exit_code"
+  fi
 
   local console_text=""
   if [ "$SHOW_RAW" -eq 1 ]; then
@@ -1253,7 +1394,9 @@ run_queue() {
 
       local task_cli
       task_cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
-      if [ "$task_cli" = "claude" ] && [ "$DRY_RUN" -eq 0 ]; then
+      # Local Ollama claude runs never hit Anthropic usage limits, so skip the cloud /usage
+      # pre-check (it would otherwise query — and consume — the cloud account).
+      if [ "$task_cli" = "claude" ] && ! is_ollama_task "$i" && [ "$DRY_RUN" -eq 0 ]; then
         wait_until_claude_ready "$mustWaitForFreshSession"
       fi
 
@@ -1271,7 +1414,10 @@ run_queue() {
       if [ -z "$savedSessionId" ]; then
         runMode="New"
         sessionId=""
-        if [ "$task_cli" = "claude" ]; then
+        # claude is given a session id up front (passed as --session-id). agy has no id to pass, but
+        # we still mint a sentinel marker file so the NEXT run resumes (agy -c continues the most
+        # recent conversation); the value itself is never sent to agy.
+        if [ "$task_cli" = "claude" ] || [ "$task_cli" = "agy" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
         invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel"

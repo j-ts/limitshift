@@ -1,8 +1,15 @@
 # AGENTS.md - LimitShift agent guide
 
 This repository contains **LimitShift**, a small cross-platform queue runner for AI coding CLIs
-(`claude`, `codex`, and `gemini`). Your most common task is to convert a user's rough draft into a
+(`claude`, `codex`, `gemini`, and `agy`). Your most common task is to convert a user's rough draft into a
 valid `limitshift-queue.json` that LimitShift can run.
+
+`agy` is the **Antigravity CLI**, Google's official successor to Gemini CLI for individual Google AI
+Pro/Ultra accounts (Gemini CLI stays for enterprise). It is fully supported, with two caveats baked
+into the runner: it has **no JSON output mode** (LimitShift reads its plain-text stdout), and it has
+**no per-conversation session IDs** — resume works only by continuing the most recent conversation
+(`agy -c`), so agy tasks are inherently sequential. Both are handled for you; you just pick `agy` as
+the `cli`.
 
 ## Default Scope
 
@@ -41,7 +48,7 @@ valid `limitshift-queue.json` that LimitShift can run.
 Each task must include:
 
 - `name` - short human label.
-- `cli` - one of `claude`, `codex`, or `gemini`; use the user's requested CLI when specified.
+- `cli` - one of `claude`, `codex`, `gemini`, or `agy`; use the user's requested CLI when specified.
 - `projectPath` - absolute folder for the CLI run. Windows paths need escaped backslashes
   (`"C:\\Users\\me\\project"`) or forward slashes (`"C:/Users/me/project"`).
 - `prompt` - concrete task instruction, including files to inspect/edit and completion criteria.
@@ -64,6 +71,10 @@ Useful optional fields:
 - Gemini: use `gemini-3-flash-preview` or `gemini-2.5-flash` for speed; use
   `gemini-2.5-pro` or `gemini-3.1-pro-preview` for depth. Omit `effort` or set it to `null`.
   Model arrays are especially useful for Gemini limit rotation.
+- Antigravity (`agy`): run `agy models` to see what the account can use; pass the chosen name as
+  `model`. Omit `effort` or set it to `null` (agy has no `--effort` flag). agy has no JSON output and
+  no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
+  checking (`completionCheck: true`) still works because the runner reads agy's plain-text reply.
 
 ## Permission Flags
 
@@ -72,8 +83,27 @@ Headless CLI runs cannot answer permission prompts. If a task should edit files,
 - Claude: `["--permission-mode", "acceptEdits"]`
 - Codex: `["--sandbox", "workspace-write"]`
 - Gemini: `["--approval-mode", "auto_edit"]`
+- Antigravity (`agy`): `["--dangerously-skip-permissions"]` (agy's only headless auto-approve; it
+  has no softer "accept edits only" mode).
 
 Without these flags, the agent may run read-only and leave the project unchanged.
+
+## Local Models (Ollama)
+
+To run a task against a local Ollama model, set `model` to the Ollama model name (e.g. `qwen3.5:9b`
+or `nemotron-3-nano:4b`) and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. The same
+shape works for both CLIs:
+
+- `codex` reaches Ollama natively — the flags pass straight through to `codex exec`.
+- `claude` has no native Ollama flag, so LimitShift runs it via
+  `ollama launch claude --model <model> --yes -- <claude args>`. The `model` is therefore
+  **required** for a local `claude` task (validation rejects it otherwise), and `ollama` must be on
+  PATH alongside `claude`.
+
+A local task that should edit files still needs its permission flag in `extraArgs` — the
+local-provider flags only choose the model. List both, e.g.
+`["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]`. Gemini has no Ollama
+path here.
 
 ## Prompt Quality Bar
 

@@ -150,7 +150,45 @@ function Add-RunsCsvRow {
     [System.IO.File]::AppendAllText($RunsCsvPath, $row + [Environment]::NewLine, $utf8NoBom)
 }
 
-$AllowedClis = @('claude', 'codex', 'gemini')
+$AllowedClis = @('claude', 'codex', 'gemini', 'agy')
+
+# Local-model (Ollama) support. A task targets a local Ollama model when its extraArgs carry the
+# provider marker (`--oss` / `--local-provider ollama`) — the same flags codex understands natively.
+# codex passes them straight through; claude has no native Ollama flag, so LimitShift runs it via
+# `ollama launch claude --model <model> --yes -- <claude args>`. Keep one config shape for both CLIs.
+$OllamaControlArgs = @('--oss', '--local-provider', 'ollama')
+
+function Test-ExtraArgsRequestOllama {
+    param([string[]]$ExtraArgs)
+    if ($null -eq $ExtraArgs) { return $false }
+    foreach ($a in $ExtraArgs) {
+        $t = ([string]$a).Trim().ToLowerInvariant()
+        if ($t -eq 'ollama' -or $t -eq '--oss') { return $true }
+    }
+    return $false
+}
+
+# Only claude needs the `ollama launch` wrapper; codex reaches Ollama on its own, so it is never
+# "ollama mode" for the purposes of executable/arg rewriting.
+function Test-IsOllamaTask {
+    param($Task)
+    if ($Task.Cli -ne 'claude') { return $false }
+    return (Test-ExtraArgsRequestOllama -ExtraArgs $Task.ExtraArgs)
+}
+
+function Remove-OllamaControlArgs {
+    param([string[]]$ExtraArgs)
+    if ($null -eq $ExtraArgs) { return @() }
+    return @($ExtraArgs | Where-Object {
+        $OllamaControlArgs -notcontains (([string]$_).Trim().ToLowerInvariant())
+    })
+}
+
+function Get-CliExecutable {
+    param($Task)
+    if (Test-IsOllamaTask -Task $Task) { return 'ollama' }
+    return $Task.Cli
+}
 
 function Read-QueueConfig {
     param([string]$Path)
@@ -261,6 +299,12 @@ function Read-QueueConfig {
         }
         $model = if ($models.Count -gt 0) { $models[0] } else { $null }
 
+        # Local Ollama mode (claude): the model is selected by `ollama launch --model`, so it is
+        # required. (codex reaches Ollama natively and needs no model-for-launcher.)
+        if ($cli -eq 'claude' -and (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs) -and $models.Count -eq 0) {
+            throw "Task ${n}: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set `"model`" to your Ollama model, e.g. `"qwen3.5:9b`"."
+        }
+
         # Effort normalization: treat absent, JSON null, and "" all as "no effort" (null).
         $effort = $null
         if ($t.PSObject.Properties['effort'] -and $null -ne $t.effort) {
@@ -275,6 +319,9 @@ function Read-QueueConfig {
             switch ($cli) {
                 'gemini' {
                     throw "Task ${n}: gemini has no effort flag; set `"effort`": null (use thinkingLevel/thinkingBudget via gemini settings instead)."
+                }
+                'agy' {
+                    throw "Task ${n}: agy (Antigravity CLI) has no --effort flag; set `"effort`": null."
                 }
                 'claude' {
                     $claudeEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
@@ -325,8 +372,15 @@ function Read-QueueConfig {
 function Test-CliBinariesAvailable {
     param($Tasks)
 
+    $needed = @()
+    foreach ($t in $Tasks) {
+        $needed += $t.Cli
+        # A claude task targeting a local Ollama model is launched via `ollama`, so it must be present too.
+        if (Test-IsOllamaTask -Task $t) { $needed += 'ollama' }
+    }
+
     $missing = @()
-    foreach ($cli in ($Tasks | ForEach-Object { $_.Cli } | Sort-Object -Unique)) {
+    foreach ($cli in ($needed | Sort-Object -Unique)) {
         if (-not (Get-Command $cli -ErrorAction SilentlyContinue)) {
             $missing += $cli
         }
@@ -336,7 +390,9 @@ function Test-CliBinariesAvailable {
                "Install instructions:`n" +
                "  claude : npm install -g @anthropic-ai/claude-code`n" +
                "  codex  : npm install -g @openai/codex`n" +
-               "  gemini : npm install -g @google/gemini-cli")
+               "  gemini : npm install -g @google/gemini-cli`n" +
+               "  agy    : irm https://antigravity.google/cli/install.ps1 | iex   (Antigravity CLI; macOS/Linux: curl -fsSL https://antigravity.google/cli/install.sh | bash)`n" +
+               "  ollama : https://ollama.com/download  (only needed for local models)")
     }
 }
 
@@ -823,6 +879,46 @@ function Format-CommandForDisplay {
     return (($Command + ' ' + ($renderedArgs -join ' ')).Trim())
 }
 
+# Build a single Windows command-line string from an argument array, quoting per the standard
+# CommandLineToArgvW rules (the "Everyone quotes command line arguments the wrong way" algorithm).
+# Start-Process -ArgumentList given an *array* joins with spaces and does NOT quote elements that
+# contain spaces, so a path like "C:\Program Files\..." or a project folder with a space splits.
+# Passing a single pre-quoted string instead makes Start-Process use it verbatim as the command line.
+function ConvertTo-WindowsArgString {
+    param([string[]]$Arguments)
+
+    $parts = foreach ($arg in @($Arguments)) {
+        $s = [string]$arg
+        if ($s.Length -gt 0 -and $s -notmatch '[ \t\n\r\v"]') {
+            $s
+        }
+        else {
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.Append('"')
+            for ($i = 0; $i -lt $s.Length; $i++) {
+                $backslashes = 0
+                while ($i -lt $s.Length -and $s[$i] -eq '\') { $backslashes++; $i++ }
+                if ($i -eq $s.Length) {
+                    [void]$sb.Append('\', $backslashes * 2)
+                    break
+                }
+                elseif ($s[$i] -eq '"') {
+                    [void]$sb.Append('\', $backslashes * 2 + 1)
+                    [void]$sb.Append('"')
+                }
+                else {
+                    [void]$sb.Append('\', $backslashes)
+                    [void]$sb.Append($s[$i])
+                }
+            }
+            [void]$sb.Append('"')
+            $sb.ToString()
+        }
+    }
+
+    return ($parts -join ' ')
+}
+
 function Invoke-NativeProcess {
     param(
         [string]$Command,
@@ -843,11 +939,16 @@ function Invoke-NativeProcess {
     }
 
     $launcherPath = $commandPath
-    $launcherArguments = @($Arguments)
+    $launcherArguments = $null
     $wrapperPath = $null
     $argumentsPath = $null
     $extension = [System.IO.Path]::GetExtension($commandPath).ToLowerInvariant()
 
+    # Shim launchers (.ps1/.cmd/.bat — e.g. the npm wrappers for codex/gemini) cannot be
+    # Start-Process'd with arbitrary args directly, so we ferry the args through a JSON file and
+    # re-apply them inside a child PowerShell. Those CLIs receive their prompt on stdin, so their
+    # argument list is simple. Native executables (the claude winget shim, agy.exe) take a single
+    # canonical command-line string instead — see the else branch.
     if (@('.ps1', '.cmd', '.bat') -contains $extension) {
         $wrapperPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-wrapper-" + [guid]::NewGuid() + ".ps1")
         $argumentsPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-args-" + [guid]::NewGuid() + ".json")
@@ -876,7 +977,9 @@ exit `$LASTEXITCODE
 "@ | Set-Content -LiteralPath $wrapperPath -Encoding UTF8
 
         $launcherPath = (Get-Command powershell.exe -ErrorAction Stop).Source
-        $launcherArguments = @(
+        # Single quoted string (not an array): the wrapper path, command path, and working directory
+        # may all contain spaces, and Start-Process only honours quoting when ArgumentList is one string.
+        $launcherArguments = ConvertTo-WindowsArgString -Arguments @(
             '-NoProfile',
             '-ExecutionPolicy', 'Bypass',
             '-File', $wrapperPath,
@@ -884,6 +987,12 @@ exit `$LASTEXITCODE
             '-ArgumentsPath', $argumentsPath,
             '-WorkingDirectory', $WorkingDirectory
         )
+    }
+    else {
+        # Native executable (claude winget shim, agy.exe, ...): pass a single canonical command-line
+        # string so spaces, quotes, and newlines in arguments survive CreateProcess / CommandLineToArgvW.
+        # This is what lets agy carry its whole multi-line prompt as the value of -p.
+        $launcherArguments = ConvertTo-WindowsArgString -Arguments @($Arguments)
     }
 
     $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stdout-" + [guid]::NewGuid() + ".txt")
@@ -893,13 +1002,16 @@ exit `$LASTEXITCODE
     try {
         $startProcessParams = @{
             FilePath               = $launcherPath
-            ArgumentList           = $launcherArguments
             WorkingDirectory       = $WorkingDirectory
             NoNewWindow            = $true
             Wait                   = $true
             PassThru               = $true
             RedirectStandardOutput = $stdoutPath
             RedirectStandardError  = $stderrPath
+        }
+        # Start-Process rejects an empty/null ArgumentList; only add it when there are real args.
+        if (-not [string]::IsNullOrEmpty($launcherArguments)) {
+            $startProcessParams['ArgumentList'] = $launcherArguments
         }
 
         if ($PSBoundParameters.ContainsKey('StdinText') -and $null -ne $StdinText) {
@@ -985,9 +1097,13 @@ function Save-TaskFailedMarker {
         Set-Content -LiteralPath (Join-Path $StatusStatePath "$taskKey.failed") -Encoding UTF8
 }
 
-# The prompt is intentionally NOT part of the argument list: it is delivered via stdin
-# (see Invoke-NativeProcess -StdinText). Passing multi-line prompts as process arguments
-# truncates them on Windows (Start-Process + cmd shim layers cannot carry embedded newlines).
+# For claude/codex/gemini the prompt is intentionally NOT part of the argument list: it is
+# delivered via stdin (see Invoke-NativeProcess -StdinText). Passing multi-line prompts as process
+# arguments truncates them on Windows (Start-Process + cmd shim layers cannot carry embedded
+# newlines). agy is the exception: it has no stdin prompt mode (`-p` REQUIRES its value), so the
+# prompt is passed as the -p argument. agy.exe is a native executable, so Invoke-NativeProcess passes
+# its arguments as a single canonical command-line string (ConvertTo-WindowsArgString) — that is what
+# carries the multi-line -p value through CreateProcess / CommandLineToArgvW intact.
 function Get-CliArguments {
     param(
         $Task,
@@ -995,7 +1111,9 @@ function Get-CliArguments {
         [string]$SessionId,
         # Task 6: the current rotation model. When omitted, fall back to $Task.Model (the first
         # model in the list). The caller (the task loop) passes Models[currentModelIndex].
-        [string]$ModelOverride
+        [string]$ModelOverride,
+        # agy only: the prompt becomes the value of -p (the other CLIs receive it on stdin).
+        [string]$Prompt
     )
 
     $model = if ($PSBoundParameters.ContainsKey('ModelOverride') -and -not [string]::IsNullOrWhiteSpace($ModelOverride)) {
@@ -1007,12 +1125,24 @@ function Get-CliArguments {
 
     switch ($Task.Cli) {
         'claude' {
+            # Local Ollama mode: claude has no native Ollama flag, so when extraArgs request the
+            # ollama provider we run claude through `ollama launch claude --model <m> --yes -- <args>`.
+            # The model goes to the launcher's --model (not claude's), and the ollama control tokens
+            # (--oss / --local-provider ollama) are stripped from what claude itself receives.
+            $ollama = Test-IsOllamaTask -Task $Task
             $cliArgs = @('-p')
             if ($Mode -eq 'New')    { $cliArgs += @('--session-id', $SessionId) }
             if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
             $cliArgs += @('--output-format', 'json')
-            if ($model)       { $cliArgs += @('--model', $model) }
+            if ($model -and -not $ollama) { $cliArgs += @('--model', $model) }
             if ($Task.Effort) { $cliArgs += @('--effort', $Task.Effort) }
+            if ($ollama) {
+                $cliArgs += @(Remove-OllamaControlArgs -ExtraArgs $Task.ExtraArgs)
+                $launcher = @('launch', 'claude')
+                if ($model) { $launcher += @('--model', $model) }
+                $launcher += @('--yes', '--')
+                return $launcher + $cliArgs
+            }
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
         }
@@ -1040,6 +1170,17 @@ function Get-CliArguments {
             }
             $cliArgs += @('--output-format', 'json')
             if ($model) { $cliArgs += @('-m', $model) }
+            $cliArgs += $Task.ExtraArgs
+            return $cliArgs
+        }
+        'agy' {
+            # Antigravity CLI: no JSON output and no per-conversation session ids. The prompt is the
+            # value of -p (agy does not read it from stdin); resume continues the most recent
+            # conversation with -c (there is no id to pass). No effort flag (rejected at validation).
+            $cliArgs = @()
+            if ($Mode -eq 'Resume') { $cliArgs += '-c' }
+            $cliArgs += @('-p', $Prompt)
+            if ($model) { $cliArgs += @('--model', $model) }
             $cliArgs += $Task.ExtraArgs
             return $cliArgs
         }
@@ -1095,15 +1236,20 @@ function ConvertFrom-JsonTolerant {
 
 function ConvertFrom-CliOutput {
     param(
-        [ValidateSet('claude','codex','gemini')] [string]$Cli,
+        [ValidateSet('claude','codex','gemini','agy')] [string]$Cli,
         [string]$OutputText,
-        [int]$ExitCode
+        [int]$ExitCode,
+        # agy only: its plain-text response on stdout, captured separately from stderr so a trailing
+        # diagnostic line cannot displace the agent's [[TASK_COMPLETE]] last line. Optional/empty for
+        # the JSON CLIs (they parse $OutputText directly).
+        [string]$StdOut
     )
 
     $LimitPatterns = @{
         claude = '(?i)(you''ve hit your .{0,40}limit|usage limit)'
         codex  = '(?i)(usage limit|rate limit|too many requests|try again (at|in)|quota)'
         gemini = '(?i)(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)'
+        agy    = '(?i)(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))'
     }
 
     $limitRegex = $LimitPatterns[$Cli]
@@ -1175,6 +1321,23 @@ function ConvertFrom-CliOutput {
             return New-CliResult -Ok ($ExitCode -eq 0) -IsLimit $false -Text $text -SessionId $sessionId `
                 -ErrorText $(if ($ExitCode -ne 0) { $OutputText } else { $null })
         }
+        'agy' {
+            # agy has no structured output: the response is its plain-text stdout. Use the captured
+            # stdout for the response (so trailing stderr/diagnostics never displace the agent's
+            # [[TASK_COMPLETE]] last line); fall back to the combined OutputText if stdout was not
+            # captured separately. Limit/error detection scans everything the process emitted. agy
+            # has no session id to capture (resume is a flag, -c), so SessionId is always null.
+            $text = if (-not [string]::IsNullOrEmpty($StdOut)) { $StdOut } else { $OutputText }
+            $text = ([string]$text).Trim()
+            # A usage limit only counts when the RUN failed (exit != 0) — exactly like claude/codex.
+            # Without this gate, a SUCCESSFUL agy response that merely mentions "429"/"rate limit"/
+            # "quota" (common in coding tasks) would be misread as a usage limit, because agy has no
+            # structured output and the limit regex is scanned against the agent's own plain-text stdout.
+            $isError = ($ExitCode -ne 0)
+            $isLimit = $isError -and ($OutputText -match $limitRegex)
+            return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text -SessionId $null `
+                -ErrorText $(if ($isError) { $OutputText } else { $null })
+        }
     }
 }
 
@@ -1200,13 +1363,15 @@ function Invoke-CliTaskRun {
         $prompt = Get-ResumePrompt -Task $Task
     }
 
-    $cliArgsParams = @{ Task = $Task; Mode = $Mode; SessionId = $SessionId }
+    $cliArgsParams = @{ Task = $Task; Mode = $Mode; SessionId = $SessionId; Prompt = $prompt }
     if ($PSBoundParameters.ContainsKey('ModelOverride')) { $cliArgsParams['ModelOverride'] = $ModelOverride }
     $arguments = Get-CliArguments @cliArgsParams
+    $exe = Get-CliExecutable -Task $Task
 
     Write-Step "$Mode run for task $($TaskIndex + 1): $($Task.Name) [$($Task.Cli)]"
-    Write-Host "Command: $(Format-CommandForDisplay -Command $Task.Cli -Arguments $arguments)"
-    Write-Host "(prompt sent via stdin; full text in the output file)"
+    Write-Host "Command: $(Format-CommandForDisplay -Command $exe -Arguments $arguments)"
+    $promptChannel = if ($Task.Cli -eq 'agy') { 'passed as the -p argument' } else { 'sent via stdin' }
+    Write-Host "(prompt $promptChannel; full text in the output file)"
 
     if ($DryRun) {
         return New-CliResult -Ok $true -IsLimit $false -Text '[dry-run]' -SessionId $null -ErrorText $null
@@ -1217,7 +1382,10 @@ function Invoke-CliTaskRun {
     # Log the full prompt before the run; the displayed command line no longer contains it.
     [System.IO.File]::AppendAllText($outputFilePath, $prompt + [Environment]::NewLine + [Environment]::NewLine, $utf8NoBom)
 
-    $processResult = Invoke-NativeProcess -Command $Task.Cli -Arguments $arguments -WorkingDirectory $Task.ProjectPath -StdinText $prompt
+    # agy takes the prompt as the -p argument (not stdin); the other CLIs read it from stdin.
+    $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath }
+    if ($Task.Cli -ne 'agy') { $invokeParams['StdinText'] = $prompt }
+    $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
 
@@ -1227,7 +1395,8 @@ function Invoke-CliTaskRun {
     }
 
     # Parse first (Task 2b), then show only the agent's response (or the error) on the console.
-    $result = ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode
+    # agy is plain-text: pass its stdout separately so the parser reads the response from stdout only.
+    $result = ConvertFrom-CliOutput -Cli $Task.Cli -OutputText $outputText -ExitCode $exitCode -StdOut $processResult.StdOut
 
     $consoleText = Get-ConsoleOutputText -Result $result -RawOutput $outputText -ShowRawOutput:$ShowRawOutput
     if (-not [string]::IsNullOrWhiteSpace($consoleText)) {
@@ -1396,7 +1565,9 @@ try {
                 throw "Task $taskNumber exceeded maxRunsPerTask=$($config.Settings.MaxRunsPerTask)"
             }
 
-            if ($task.Cli -eq 'claude' -and -not $DryRun) {
+            # Local Ollama claude runs never hit Anthropic usage limits, so skip the cloud /usage
+            # pre-check (it would otherwise query — and consume — the cloud account).
+            if ($task.Cli -eq 'claude' -and -not (Test-IsOllamaTask -Task $task) -and -not $DryRun) {
                 Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
             }
 
@@ -1409,7 +1580,10 @@ try {
             if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
                 $runMode = 'New'
                 $sessionId = $null
-                if ($task.Cli -eq 'claude') { $sessionId = New-TaskSessionId -TaskIndex $i }
+                # claude is given a session id up front (passed as --session-id). agy has no id to
+                # pass, but we still mint a sentinel marker file so the NEXT run resumes (agy -c
+                # continues the most recent conversation); the value itself is never sent to agy.
+                if ($task.Cli -eq 'claude' -or $task.Cli -eq 'agy') { $sessionId = New-TaskSessionId -TaskIndex $i }
                 $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel
             }
             else {

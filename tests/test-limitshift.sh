@@ -1233,6 +1233,196 @@ run_effort_gemini_null_ok_test() {
   check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
 }
 
+run_effort_agy_rejected_test() {
+  local desc="effort on agy is rejected naming the task"
+  local root="$TMP_ROOT/effort-agy"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  write_effort_queue "$queue_path" "$project_dir" "agy" '"high"'
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qE 'Task 1: agy .Antigravity CLI. has no --effort flag'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_effort_agy_null_ok_test() {
+  local desc="agy with effort null validates"
+  local root="$TMP_ROOT/effort-agy-null"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  local bin_dir="$root/bin"
+  mkdir -p "$project_dir" "$bin_dir"
+  # agy is not installed on most CI PATHs, and --validate-only checks the binary; provide a stub.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$bin_dir/agy"; chmod +x "$bin_dir/agy"
+  write_effort_queue "$queue_path" "$project_dir" "agy" 'null'
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -qE 'Config OK'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+# A fake agy that takes the prompt from the -p VALUE (agy does not read stdin), records each run's
+# flags + stdin length, and replies on stdout with the completion marker.
+write_fake_agy() {
+  local bin_dir="$1" log_file="$2"
+  cat > "$bin_dir/agy" <<EOF
+#!/usr/bin/env bash
+set -u
+prompt=""; cont=0; model=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -c) cont=1; shift ;;
+    -p) prompt="\$2"; shift 2 ;;
+    --model) model="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+sin=\$(cat)
+{
+  printf 'RUN cont=%s model=%s stdin_len=%s\n' "\$cont" "\$model" "\${#sin}"
+  printf 'PROMPT1=%s\n' "\$(printf '%s' "\$prompt" | head -1)"
+} >> "$log_file"
+printf '%s\n' 'Antigravity did the work.'
+printf '%s\n' 'OK [[TASK_COMPLETE]]'
+exit 0
+EOF
+  chmod +x "$bin_dir/agy"
+}
+
+run_agy_prompt_as_arg_test() {
+  local desc="agy receives the prompt as the -p value (not stdin), model passes, task completes"
+  local root="$TMP_ROOT/agy-arg"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"; local log_file="$root/agy.log"
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_agy "$bin_dir" "$log_file"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ {
+  "name": "agy task",
+  "cli": "agy",
+  "projectPath": "$project_dir",
+  "model": "gemini-3.1-pro",
+  "prompt": "Write hello to a file.",
+  "extraArgs": ["--dangerously-skip-permissions"]
+} ] }
+EOF
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$out" | grep -q 'Antigravity did the work.' &&
+     grep -q 'cont=0 model=gemini-3.1-pro stdin_len=0' "$log_file" &&
+     grep -q 'PROMPT1=Write hello to a file.' "$log_file"; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- console ---
+$out
+--- agy.log ---
+$(cat "$log_file" 2>/dev/null)"
+  fi
+}
+
+# A fake agy whose first run (no -c) returns NO marker (forcing a resume), and whose second run
+# (with -c) returns the completion marker. Lets us assert that resume adds -c.
+write_fake_agy_tworun() {
+  local bin_dir="$1" log_file="$2"
+  cat > "$bin_dir/agy" <<EOF
+#!/usr/bin/env bash
+set -u
+cont=0
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -c) cont=1; shift ;;
+    -p) shift 2 ;;
+    --model) shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+printf 'RUN cont=%s\n' "\$cont" >> "$log_file"
+if [ "\$cont" = "1" ]; then
+  printf '%s\n' 'Finished now.'
+  printf '%s\n' '[[TASK_COMPLETE]]'
+else
+  printf '%s\n' 'Still working, no marker yet.'
+fi
+exit 0
+EOF
+  chmod +x "$bin_dir/agy"
+}
+
+run_agy_resume_continue_test() {
+  local desc="agy resume run adds -c (continue) after a no-marker first run"
+  local root="$TMP_ROOT/agy-resume"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"; local log_file="$root/agy.log"
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_agy_tworun "$bin_dir" "$log_file"
+  cat > "$queue_path" <<EOF
+{ "settings": { "maxRunsPerTask": 4, "maxStalls": 5 },
+  "tasks": [ {
+    "name": "agy resume",
+    "cli": "agy",
+    "projectPath": "$project_dir",
+    "prompt": "do a multi-step thing",
+    "extraArgs": ["--dangerously-skip-permissions"]
+} ] }
+EOF
+  local out exit_code
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ "$(grep -c 'RUN cont=0' "$log_file")" = "1" ] &&
+     [ "$(grep -c 'RUN cont=1' "$log_file")" = "1" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- console ---
+$out
+--- agy.log ---
+$(cat "$log_file" 2>/dev/null)"
+  fi
+}
+
+run_agy_limit_keyword_not_misread_test() {
+  local desc="agy success mentioning a limit keyword (429) is not misread as a usage limit"
+  local root="$TMP_ROOT/agy-limitword"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"; local log_file="$root/agy.log"
+  mkdir -p "$bin_dir" "$project_dir"; : > "$log_file"
+  # Exit 0, marker present, response text mentions limit keywords. Must complete in ONE run.
+  cat > "$bin_dir/agy" <<EOF
+#!/usr/bin/env bash
+set -u
+while [ \$# -gt 0 ]; do case "\$1" in -c) shift ;; -p) shift 2 ;; --model) shift 2 ;; *) shift ;; esac; done
+cat >/dev/null
+echo run >> "$log_file"
+printf '%s\n' 'Implemented retry-on-429 and rate limit handling in client.py.'
+printf '%s\n' '[[TASK_COMPLETE]]'
+exit 0
+EOF
+  chmod +x "$bin_dir/agy"
+  cat > "$queue_path" <<EOF
+{ "settings": { "maxRunsPerTask": 3, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "agy 429", "cli": "agy", "projectPath": "$project_dir", "prompt": "fix retries", "extraArgs": ["--dangerously-skip-permissions"] } ] }
+EOF
+  local out exit_code runs
+  PATH="$bin_dir:$PATH" out=$(bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  runs=$(grep -c '^run$' "$log_file")
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     [ "$runs" = "1" ] &&
+     ! printf '%s' "$out" | grep -qi 'paused by a usage limit'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code runs=$runs
+$out"
+  fi
+}
+
 run_effort_claude_ultracode_rejected_test() {
   local desc="claude ultracode is rejected with an interactive-only hint naming the task"
   local root="$TMP_ROOT/effort-ultracode"; local project_dir="$root/project"; local queue_path="$root/queue.json"
@@ -1340,6 +1530,107 @@ run_effort_empty_string_normalized_test() {
   mkdir -p "$project_dir"
   write_effort_queue "$queue_path" "$project_dir" "gemini" '""'
   check "$desc" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+# Local-model (Ollama) support.
+run_ollama_claude_dryrun_test() {
+  local desc="claude local-Ollama task is launched via 'ollama launch claude --model ... --yes -- ...'"
+  local root="$TMP_ROOT/ollama-claude"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "Claude local", "cli": "claude", "model": "qwen3.5:9b", "projectPath": "$project_dir", "prompt": "p", "completionCheck": false, "extraArgs": ["--oss", "--local-provider", "ollama"] }
+  ]
+}
+EOF
+  local out exit_code cmd
+  out=$(bash "$SCRIPT" --queue "$queue_path" --dry-run 2>&1); exit_code=$?
+  cmd=$(printf '%s' "$out" | grep '^Command:')
+  if [ "$exit_code" -eq 0 ] && \
+     printf '%s' "$cmd" | grep -qE '^Command: ollama launch claude --model qwen3\.5:9b --yes -- -p ' && \
+     printf '%s' "$cmd" | grep -q -- '--output-format json' && \
+     ! printf '%s' "$cmd" | grep -q -- '--oss' && \
+     ! printf '%s' "$cmd" | grep -q -- '--local-provider'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_ollama_claude_passthrough_extra_test() {
+  local desc="claude local-Ollama task keeps non-ollama extraArgs after the -- and drops the ollama tokens"
+  local root="$TMP_ROOT/ollama-claude-extra"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "Claude local", "cli": "claude", "model": "qwen3.5:9b", "projectPath": "$project_dir", "prompt": "p", "completionCheck": false, "extraArgs": ["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"] }
+  ]
+}
+EOF
+  local out exit_code cmd tail
+  out=$(bash "$SCRIPT" --queue "$queue_path" --dry-run 2>&1); exit_code=$?
+  cmd=$(printf '%s' "$out" | grep '^Command:')
+  # Everything after the ' -- ' separator is what claude itself receives.
+  tail=$(printf '%s' "$cmd" | sed 's/^.* -- //')
+  if [ "$exit_code" -eq 0 ] && \
+     printf '%s' "$tail" | grep -q -- '--permission-mode acceptEdits' && \
+     ! printf '%s' "$tail" | grep -q -- '--oss' && \
+     ! printf '%s' "$tail" | grep -q -- '--local-provider' && \
+     ! printf '%s' "$tail" | grep -q -- '--model'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_ollama_codex_passthrough_test() {
+  local desc="codex local-Ollama task passes --oss/--local-provider through unchanged (no ollama launch)"
+  local root="$TMP_ROOT/ollama-codex"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "Codex local", "cli": "codex", "model": "nemotron-3-nano:4b", "projectPath": "$project_dir", "prompt": "p", "completionCheck": false, "extraArgs": ["--oss", "--local-provider", "ollama"] }
+  ]
+}
+EOF
+  local out exit_code cmd
+  out=$(bash "$SCRIPT" --queue "$queue_path" --dry-run 2>&1); exit_code=$?
+  cmd=$(printf '%s' "$out" | grep '^Command:')
+  if [ "$exit_code" -eq 0 ] && \
+     printf '%s' "$cmd" | grep -qE '^Command: codex exec --json -m nemotron-3-nano:4b ' && \
+     printf '%s' "$cmd" | grep -q -- '--oss --local-provider ollama' && \
+     ! printf '%s' "$cmd" | grep -q -- 'ollama launch'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_ollama_claude_no_model_rejected_test() {
+  local desc="local-Ollama claude task without a model is rejected at validation"
+  local root="$TMP_ROOT/ollama-nomodel"; local project_dir="$root/project"; local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "Claude local", "cli": "claude", "projectPath": "$project_dir", "prompt": "p", "completionCheck": false, "extraArgs": ["--oss", "--local-provider", "ollama"] }
+  ]
+}
+EOF
+  local out exit_code
+  out=$(bash "$SCRIPT" --queue "$queue_path" --validate-only 2>&1); exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -qF 'a local Ollama claude task needs a model'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
 }
 
 write_rotation_gemini() {
@@ -1561,7 +1852,7 @@ check "valid minimal config validates"           0 "Config OK"             -- ba
 check "valid full config validates"              0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --validate-only
 check "trailing comma rejected with explanation" 2 "not valid JSON"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-trailing-comma.json" --validate-only
 check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-field.json" --validate-only
-check "unknown cli rejected listing allowed"     2 "claude, codex, gemini" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
+check "unknown cli rejected listing allowed"     2 "claude, codex, gemini, agy" -- bash "$SCRIPT" --queue "$CONFIGS/broken-bad-cli.json" --validate-only
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
 check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
 run_dry_run_state_test
@@ -1589,6 +1880,8 @@ run_model_empty_array_rejected_test
 run_model_non_string_rejected_test
 run_effort_gemini_rejected_test
 run_effort_gemini_null_ok_test
+run_effort_agy_rejected_test
+run_effort_agy_null_ok_test
 run_effort_claude_ultracode_rejected_test
 run_effort_claude_xhigh_ok_test
 run_effort_claude_outofset_rejected_test
@@ -1598,9 +1891,16 @@ run_effort_claude_haiku_null_ok_test
 run_effort_codex_none_rejected_test
 run_effort_codex_high_ok_test
 run_effort_empty_string_normalized_test
+run_ollama_claude_dryrun_test
+run_ollama_claude_passthrough_extra_test
+run_ollama_codex_passthrough_test
+run_ollama_claude_no_model_rejected_test
 run_model_rotation_switch_test
 run_model_rotation_exhaust_test
 run_model_single_string_test
+run_agy_prompt_as_arg_test
+run_agy_resume_continue_test
+run_agy_limit_keyword_not_misread_test
 run_shipped_examples_validate_test
 
 echo

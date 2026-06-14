@@ -149,6 +149,17 @@ Describe 'limitshift.ps1' {
             $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
         }
 
+        # agy: effort must be null/absent (Antigravity CLI has no --effort flag)
+        It 'rejects agy with an effort, naming the task' {
+            $queuePath = New-EffortQueue -Task @{ name = 'a'; cli = 'agy'; prompt = 'p'; effort = 'high' }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: agy (Antigravity CLI) has no --effort flag*'
+        }
+        It 'accepts agy with effort null' {
+            $queuePath = New-EffortQueue -Task @{ name = 'a'; cli = 'agy'; prompt = 'p'; effort = $null }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].Effort | Should -BeNullOrEmpty
+        }
+
         # claude: ultracode is rejected explicitly
         It 'rejects claude ultracode with an interactive-only hint, naming the task' {
             $queuePath = New-EffortQueue -Task @{ name = 'c'; cli = 'claude'; prompt = 'p'; effort = 'ultracode' }
@@ -568,6 +579,94 @@ Describe 'limitshift.ps1' {
             $args = Get-CliArguments -Task $task -Mode New -SessionId 's'
             ($args -join ' ') | Should -Be '-p --session-id s --output-format json'
         }
+
+        It 'wraps a local-Ollama claude task in "ollama launch claude --model ... --yes -- ..."' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = 'qwen3.5:9b'; Effort = $null
+                Prompt = 'do the thing'; ExtraArgs = @('--oss', '--local-provider', 'ollama')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 'abc-123'
+            ($args -join ' ') | Should -Be 'launch claude --model qwen3.5:9b --yes -- -p --session-id abc-123 --output-format json'
+            (Get-CliExecutable -Task $task) | Should -Be 'ollama'
+            # The model goes to `ollama launch --model`, not to claude's own --model after the separator.
+            $sepIndex = [array]::IndexOf($args, '--')
+            ($args[($sepIndex + 1)..($args.Count - 1)]) | Should -Not -Contain '--model'
+        }
+
+        It 'keeps non-ollama claude extraArgs after the -- and strips the ollama control tokens' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = 'qwen3.5:9b'; Effort = $null
+                Prompt = 'x'; ExtraArgs = @('--oss', '--local-provider', 'ollama', '--permission-mode', 'acceptEdits')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'sess-1'
+            ($args -join ' ') | Should -Be 'launch claude --model qwen3.5:9b --yes -- -p --resume sess-1 --output-format json --permission-mode acceptEdits'
+            $args | Should -Not -Contain '--oss'
+            $args | Should -Not -Contain '--local-provider'
+        }
+
+        It 'leaves a cloud claude task (no ollama marker) unchanged and runs the claude executable' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'claude'; ProjectPath = 'C:\proj'
+                Model = 'sonnet'; Effort = $null; Prompt = 'x'; ExtraArgs = @('--permission-mode', 'acceptEdits')
+            }
+
+            (Get-CliExecutable -Task $task) | Should -Be 'claude'
+            (Test-IsOllamaTask -Task $task) | Should -BeFalse
+            (Get-CliArguments -Task $task -Mode New -SessionId 's') -join ' ' |
+                Should -Be '-p --session-id s --output-format json --model sonnet --permission-mode acceptEdits'
+        }
+
+        It 'does not wrap codex even when its extraArgs request ollama (codex reaches Ollama natively)' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'codex'; ProjectPath = 'C:\proj'
+                Model = 'nemotron-3-nano:4b'; Effort = $null
+                Prompt = 'x'; ExtraArgs = @('--oss', '--local-provider', 'ollama')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode New -SessionId $null
+            ($args -join ' ') | Should -Be 'exec --json -m nemotron-3-nano:4b --oss --local-provider ollama'
+            (Get-CliExecutable -Task $task) | Should -Be 'codex'
+            (Test-IsOllamaTask -Task $task) | Should -BeFalse
+        }
+
+        It 'builds an agy new-session command with the multi-line prompt as the -p value (no -c, no --output-format)' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'agy'; ProjectPath = 'C:\proj'
+                Model = 'gemini-3.1-pro'; Effort = $null
+                Prompt = 'unused'; ExtraArgs = @('--dangerously-skip-permissions')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt "line1`nline2"
+            ($args -join '|') | Should -Be "-p|line1`nline2|--model|gemini-3.1-pro|--dangerously-skip-permissions"
+            $args | Should -Not -Contain '-c'
+            $args | Should -Not -Contain '--output-format'
+        }
+
+        It 'builds an agy resume command that prepends -c and keeps the prompt as the -p value' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'agy'; ProjectPath = 'C:\proj'
+                Model = 'gemini-3.1-pro'; Effort = $null
+                Prompt = 'unused'; ExtraArgs = @('--dangerously-skip-permissions')
+            }
+
+            $args = Get-CliArguments -Task $task -Mode Resume -SessionId 's' -Prompt 'keep going'
+            ($args -join ' ') | Should -Be '-c -p keep going --model gemini-3.1-pro --dangerously-skip-permissions'
+            $args[0] | Should -Be '-c'
+        }
+
+        It 'omits --model for an agy task that sets no model' {
+            $task = [pscustomobject]@{
+                Name = 't'; Cli = 'agy'; ProjectPath = 'C:\proj'
+                Model = $null; Effort = $null; Prompt = 'unused'; ExtraArgs = @()
+            }
+
+            $args = Get-CliArguments -Task $task -Mode New -SessionId 's' -Prompt 'hi there'
+            ($args -join ' ') | Should -Be '-p hi there'
+        }
     }
 
     Context 'Model rotation (Task 6) — config parsing and arg building' {
@@ -629,6 +728,20 @@ Describe 'limitshift.ps1' {
                 )
             }
             { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1*model*'
+        }
+
+        It 'rejects a local-Ollama claude task that has no model, naming the task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(
+                    @{ name = 'c'; cli = 'claude'; projectPath = $projectPath; prompt = 'p'
+                       extraArgs = @('--oss', '--local-provider', 'ollama') }
+                )
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1: a local Ollama claude task needs a model*'
         }
 
         It 'Get-CliArguments honors a ModelOverride (the current rotation model)' {
@@ -846,6 +959,29 @@ exit 0
         }
     }
 
+    Context 'ConvertTo-WindowsArgString (native argument quoting)' {
+        # Used to pass agy's multi-line -p prompt (and any spaced path) to a native exe via a single
+        # canonical command line, since Start-Process -ArgumentList does not quote array elements.
+        It 'leaves a simple token unquoted' {
+            ConvertTo-WindowsArgString -Arguments @('-p') | Should -Be '-p'
+        }
+        It 'quotes an argument that contains spaces' {
+            ConvertTo-WindowsArgString -Arguments @('--model', 'a b') | Should -Be '--model "a b"'
+        }
+        It 'quotes a multi-line argument and keeps the newline inside the quotes' {
+            ConvertTo-WindowsArgString -Arguments @('-p', "l1`nl2") | Should -Be "-p `"l1`nl2`""
+        }
+        It 'escapes embedded double quotes per CommandLineToArgvW rules' {
+            ConvertTo-WindowsArgString -Arguments @('say "hi"') | Should -Be '"say \"hi\""'
+        }
+        It 'doubles a trailing backslash run that precedes the closing quote' {
+            ConvertTo-WindowsArgString -Arguments @('C:\a b\') | Should -Be '"C:\a b\\"'
+        }
+        It 'represents an empty argument as a pair of quotes' {
+            ConvertTo-WindowsArgString -Arguments @('') | Should -Be '""'
+        }
+    }
+
     Context 'Format-CommandForDisplay' {
         It 'renders multiline gemini prompts without gluing trailing flags onto the last prompt line' {
             $display = Format-CommandForDisplay -Command 'gemini' -Arguments @(
@@ -910,6 +1046,46 @@ exit 0
             $result = ConvertFrom-CliOutput -Cli gemini -OutputText (Get-Content -LiteralPath (Join-Path $script:__limitshiftOutputFixtures 'gemini-error.json') -Raw) -ExitCode 1
             $result.Ok | Should -Be $false
             $result.IsLimit | Should -Be $true
+        }
+
+        It 'parses an agy plain-text success from stdout and exposes the completion marker' {
+            $out = "Antigravity did the work.`nOK [[TASK_COMPLETE]]"
+            $result = ConvertFrom-CliOutput -Cli agy -OutputText $out -ExitCode 0 -StdOut $out
+            $result.Ok | Should -Be $true
+            $result.IsLimit | Should -Be $false
+            $result.SessionId | Should -BeNullOrEmpty
+            (Get-MarkerStatus -Text $result.Text).Status | Should -Be 'Done'
+        }
+
+        It 'reads the agy response from stdout only, so a trailing stderr line cannot hide the marker' {
+            # OutputText is the combined stream (stdout then a stderr diagnostic); StdOut is clean.
+            $result = ConvertFrom-CliOutput -Cli agy `
+                -OutputText "answer [[TASK_COMPLETE]]`n[warn] background log flushed" `
+                -ExitCode 0 -StdOut 'answer [[TASK_COMPLETE]]'
+            (Get-MarkerStatus -Text $result.Text).Status | Should -Be 'Done'
+        }
+
+        It 'detects an agy usage limit from the combined output' {
+            $result = ConvertFrom-CliOutput -Cli agy -OutputText 'Error: quota exceeded; try again in 5m' -ExitCode 1 -StdOut ''
+            $result.Ok | Should -Be $false
+            $result.IsLimit | Should -Be $true
+        }
+
+        It 'does NOT misread a successful agy response that mentions a limit keyword as a usage limit' {
+            # agy has no structured output, so the limit regex is scanned against the agent's own
+            # plain-text reply. A successful (exit 0) reply that talks about 429s/rate limits must
+            # stay Ok=true / IsLimit=false — the limit check is gated on a non-zero exit, like claude/codex.
+            $out = "Implemented retry-on-429 and rate limit handling in client.py.`nOK [[TASK_COMPLETE]]"
+            $result = ConvertFrom-CliOutput -Cli agy -OutputText $out -ExitCode 0 -StdOut $out
+            $result.Ok | Should -Be $true
+            $result.IsLimit | Should -Be $false
+            (Get-MarkerStatus -Text $result.Text).Status | Should -Be 'Done'
+        }
+
+        It 'treats a non-zero agy exit with no limit message as a plain error, not a limit' {
+            $result = ConvertFrom-CliOutput -Cli agy -OutputText 'something went wrong' -ExitCode 1 -StdOut 'something went wrong'
+            $result.Ok | Should -Be $false
+            $result.IsLimit | Should -Be $false
         }
 
         It 'survives non-JSON garbage output without throwing' {
