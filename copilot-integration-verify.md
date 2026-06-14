@@ -1,177 +1,214 @@
 # Copilot Backend Integration — Verification Report
 
-Commits reviewed: `88ecc73` (add backend support), `1664523` (add GitHub Copilot CLI as fifth supported CLI; fix multi-line prompt delivery and completion detection)
+Commit reviewed: `56f7222` ([copilot] add backend support)  
+Date: 2026-06-14
 
 ---
 
 ## Scope Reviewed
 
-| File | Lines | Status |
-|---|---|---|
-| `limitshift-queue.schema.json` | full diff | ✅ read |
-| `limitshift.ps1` | full (1865 lines) | ✅ read |
-| `limitshift.sh` | full (1678 lines) | ✅ read |
-| `tests/limitshift.Tests.ps1` | full (2105 lines) | ✅ read |
-| `tests/test-limitshift.sh` | full (2073 lines) | ✅ read |
-| `README.md` | copilot grep | ✅ read |
-| `QUICKSTART.md` | copilot grep | ✅ read |
-| `CHANGELOG.md` | full | ✅ read |
-| `AGENTS.md` | full | ✅ read |
-| `limitshift-queue.example.json` | copilot grep | ✅ read |
-| `limitshift-queue.example-simple.json` | copilot grep | ✅ read |
-| `limitshift-queue.example-workflow.json` | copilot grep | ✅ read |
-| `limitshift-queue.example-advanced.json` | full | ✅ read |
+| File | Coverage |
+|---|---|
+| `AGENTS.md` | complete |
+| `limitshift-queue.schema.json` | complete |
+| `limitshift.ps1` | complete (2076 lines) |
+| `limitshift.sh` | complete (1971 lines) |
+| `README.md` | complete |
+| `QUICKSTART.md` | complete |
+| `CHANGELOG.md` | complete |
+| `limitshift-queue.example-simple.json` | complete |
+| `limitshift-queue.example-workflow.json` | complete |
+| `limitshift-queue.example-advanced.json` | complete |
+| `tests/limitshift.Tests.ps1` | complete (2284 lines) |
+| `tests/test-limitshift.sh` | complete (2434 lines) |
 
 ---
 
 ## Verification Commands
 
-Execution of the required verification commands was **blocked by a user-configured hook** that requires explicit approval before running `bash *.sh`, `Invoke-Pester`, and nested `powershell.exe` processes. No commands were run; all status below is from static analysis only.
-
-| Command | Status |
+| Command | Result |
 |---|---|
-| `.\limitshift.ps1 -ValidateOnly` | ❌ blocked by hook — not run |
-| `Invoke-Pester tests/limitshift.Tests.ps1` | ❌ blocked by hook — not run |
-| `bash tests/test-limitshift.sh` | ❌ blocked by hook — not run |
-| `./limitshift.sh --validate-only` | ❌ blocked by hook — not run |
-| Copilot smoke test | ⏭️ skipped — copilot CLI not installed on this machine |
+| `.\limitshift.ps1 -ValidateOnly` | ✅ PASS — `Config OK` (1 copilot task in queue) |
+| `./limitshift.sh --validate-only` (Git Bash) | ✅ PASS — `Config OK` |
+| `Invoke-Pester tests/limitshift.Tests.ps1` | ✅ 157/158 PASS — 1 pre-existing failure, unrelated to copilot (see F-3) |
+| `bash tests/test-limitshift.sh` | ✅ 79/80 PASS — 1 pre-existing failure, unrelated to copilot (see F-3) |
 
-**To complete dynamic verification, run these four commands manually from the repo root. They must all exit 0 for full pass.**
+**Copilot smoke:** `copilot` v1.0.62 is installed at `/c/Users/JTs/AppData/Roaming/npm/copilot`.
+- `copilot --version` → `GitHub Copilot CLI 1.0.62` ✅
+- `copilot models` → **error: Invalid command format** (see finding F-1)
+- Live `-p` prompt smoke skipped — would consume credits; not required for this verification.
 
 ---
 
-## Checklist Results (Static Analysis)
+## Checklist Results
 
-### 1. Schema — PASS
+### 1 — Schema accepts `cli="copilot"` and rejects invalid effort — ✅ PASS
 
-- `"copilot"` added to `cli` enum: `limitshift-queue.schema.json:40`.
-- `allOf` conditional block (lines 96–108) enforces `effort ∈ {null, "low", "medium", "high", "xhigh", "max"}` for `cli=copilot`.
-- All pre-existing CLI effort conditions (gemini, agy, claude, codex) are unchanged.
+- `cli` enum in `limitshift-queue.schema.json:57` includes `"copilot"` alongside the four existing values.
+- `allOf` block (lines 113–125) enforces `effort ∈ {null, "low", "medium", "high", "xhigh", "max"}` when `cli=copilot`.
+- `"minimal"` (codex-only) is rejected for copilot. All pre-existing CLI effort rules are unchanged.
 
-### 2. PowerShell and Bash Validation — PASS
+### 2 — PS1 and Bash validation include copilot consistently — ✅ PASS
 
-- PS1 `$AllowedClis` at line 153 includes `'copilot'`.
-- PS1 effort block at lines 346–351: validates against `@('low','medium','high','xhigh','max')`, throws a task-numbered message on failure.
-- Bash `claude|codex|gemini|agy|copilot)` at line 231 in the CLI-allowlist branch.
-- Bash effort block at lines 304–309: `case` statement with same five values.
-- Both scripts include `copilot` consistently in all validation paths.
+- PS1 `$AllowedClis` (line 155): `@('claude','codex','gemini','agy','copilot')`.
+- PS1 effort block (lines 351–356): `$copilotEfforts = @('low','medium','high','xhigh','max')`.
+- Bash CLI allowlist (line 243): `claude|codex|gemini|agy|copilot`.
+- Bash effort case (lines 316–319): `low|medium|high|xhigh|max`.
+- Both runners produce identical task-numbered error messages on invalid effort.
 
-### 3. Binary Detection and Install Text — PASS
+### 3 — Binary detection and install text mention copilot — ✅ PASS
 
-- PS1 lines 395–404: `"  copilot: install GitHub Copilot CLI and run: copilot login\`n"`
-- Bash line 347: same message.
-- Both are listed alongside claude/codex/gemini/agy in the "missing CLI" install hint.
+- PS1 (lines 402–407): `"  copilot: install GitHub Copilot CLI and run: copilot login"`.
+- Bash (line 360): identical message.
+- Listed alongside claude/codex/gemini/agy in the "not found on PATH" hint.
 
-### 4. Argument Construction — PASS (with one doc-string discrepancy; see Findings)
+### 4 — New/resume argument shape is correct — ✅ PASS (with runtime risk; see F-2)
 
-PS1 `Get-CliArguments` copilot branch (lines 1194–1204):
+PS1 `Get-CliArguments` copilot case (lines 1199–1210):
 ```
---name <sessionId>          (New)    or
---resume <sessionId>        (Resume)
---output-format json --stream off --no-ask-user
--p <prompt>
---model <model>             (optional)
---effort <effort>           (optional)
-<extraArgs...>
+New:    --name <sessionId> --output-format=json --stream=off --no-ask-user -p <prompt> [--model m] [--effort e] <extraArgs>
+Resume: --resume <sessionId> --output-format=json --stream=off --no-ask-user -p <prompt> [--model m] [--effort e] <extraArgs>
 ```
-Bash `build_cli_args` copilot branch (lines 971–989): identical structure; args appended as separate array elements.
+Bash `build_cli_args` copilot case (lines 1259–1277): identical structure, args appended as separate array elements.
 
-Order is correct. `extraArgs` appended last. `--model` and `--effort` are conditional. New vs resume branch correctly uses `--name` vs `--resume`.
+Order matches spec: session flag first, then fixed JSONL/automation flags, then prompt, then optional flags, then extraArgs. Confirmed against `copilot --help` which shows `--name`, `--resume`, `--output-format`, `--stream`, `--no-ask-user`, `--model`, and `--effort`/`--reasoning-effort` as valid flags.
 
-### 5. Prompt Transport — PASS
+### 5 — Prompt transport excludes copilot from stdin — ✅ PASS
 
-- PS1 line 1488: copilot prompt channel set to `'passed as the -p argument'` (same branch as agy).
-- PS1 line 1505: copilot `StdinText` set to `''` (empty) — closes EOF so the process cannot block on an inherited stdin handle.
-- Bash lines 1266–1270: display says "(prompt passed as the -p argument; ...)".
-- Bash lines 1287–1291: copilot gets `</dev/null` for stdin, output captured separately.
+- PS1 (line 1494): `$promptChannel = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { 'passed as the -p argument' } else { 'sent via stdin' }`.
+- PS1 (line 1511): `$invokeParams['StdinText'] = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { '' } else { $prompt }`.
+- Bash prompt display (lines 1554–1557): includes copilot in `-p argument` branch.
+- Bash stdin: copilot (like agy) gets `</dev/null`-equivalent (empty string closes EOF).
 
-### 6. JSONL Parsing — PASS
+### 6 — JSONL parsing is tolerant, surfaces errors, detects limits, falls back — ✅ PASS
 
-PS1 `ConvertFrom-CliOutput` copilot branch (lines 1419–1456):
-- Iterates output lines; attempts JSON parse per line.
-- Extracts text from `content`, `text`, or `message` fields on `assistant.message` type events.
-- Captures session ID from six field names: `interactionId`, `session_id`, `sessionId`, `conversation_id`, `conversationId`, `thread_id`, `threadId` — robust to API evolution.
-- Surfaces errors from `error` object or `type=error` events.
-- Detects limits via regex (line 1328): `'(?i)(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)'`.
-- Falls back to raw output when no line parses as valid JSONL.
+PS1 `ConvertFrom-CliOutput` copilot case (lines 1424–1461):
+- Event types handled: `assistant.message`, `assistant`, `message`, `response`, `completion`, `final`, `role=assistant`.
+- Session ID fields: `interactionId`, `session_id`, `sessionId`, `conversation_id`, `conversationId`, `thread_id`, `threadId`.
+- Error paths: `error.message`/`text`/`detail` and `type=error` events.
+- Limit regex (line 1333): `'(?i)(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)'`.
+- Fallback: `$OutputText.Trim()` when no line matches known event shapes.
 
-Bash `parse_cli_output` copilot branch (lines 1158–1182): `jq` expressions with the same logic.
+Bash `parse_cli_output` copilot case (lines 1446–1469): `jq`-based parallel implementation with identical field-name lists.
 
-### 7. Documentation — PASS
+### 7 — Docs and examples mention copilot where relevant — ✅ PASS
 
-- **README**: 10+ copilot mentions; listed in feature table, install table (`gh extension install github/gh-copilot && copilot login`), field reference, effort reference, permission example, glossary, error table.
-- **QUICKSTART**: Section on copilot with effort levels and permission flags (`--allow-tool`, `--deny-tool`, `--no-ask-user`).
-- **CHANGELOG**: "Added GitHub Copilot CLI Support" section under [Unreleased] with all key behaviors documented.
-- **AGENTS.md**: copilot in enum (line 4), model guidance (line 83), effort (line 83), permission flags (line 94).
-- **All 4 example files**: each contains at least one `"cli": "copilot"` task (confirmed via grep).
+- **README.md**: copilot in the tool comparison table (line 37), install table (lines 75–76), permission examples (lines 156–158), CLI field reference (line 283), Models section (lines 302–305), Effort section (line 305), Discovery support table (line 321), Permissions reference (line 351), Troubleshooting table (line 377).
+- **QUICKSTART.md**: dedicated copilot paragraph (lines 39–40) with install steps, permission flags, and session/JSONL behavior.
+- **AGENTS.md**: copilot in CLI enum (line 53), model guidance (lines 85–89), permission flags (lines 99–100), local-models exclusion note (line 118).
+- **CHANGELOG.md**: full "GitHub Copilot CLI Support" entry in [Unreleased] (lines 23–30) with session, effort, model, prompt, JSONL, and permission details.
+- **Examples**: all three shipped examples contain a `"cli": "copilot"` task.
+  - `example-simple.json`: 2-task queue; second task is copilot with recommended edit flags.
+  - `example-workflow.json`: 3-task pipeline; second task is copilot fixing bugs.
+  - `example-advanced.json`: 4-task queue; fourth task is copilot with model array and `"effort": "high"`.
 
-### 8. Tests — PASS (with one gap; see Findings)
+### 8 — Tests cover all required behaviors — ✅ PASS
 
-**PS1 (`tests/limitshift.Tests.ps1`)**:
-- Effort: accepts `"high"`, rejects `"minimal"` — lines 211–220.
-- `Get-CliArguments`: New and Resume arg strings verified at lines 688–706.
-- `ConvertFrom-CliOutput`: success/limit/unknown-shape cases at lines 1089–1125.
-- `Invoke-CliTaskRun`: end-to-end `-p` delivery and `stdin_len=0` at lines 1392–1431.
-- Shipped examples: all four example files validate with `-ValidateOnly` at lines 2066–2103.
+**PS1 (tests/limitshift.Tests.ps1):**
+- Schema/effort: accepts `"high"`, rejects `"minimal"` (lines 211–225).
+- Arg construction (new): `--name`, JSONL flags, `-p`, model, effort (lines 688–706).
+- Arg construction (resume): `--resume` in place of `--name` (lines 688–706).
+- `ConvertFrom-CliOutput`: success parse (interactionId extracted, content concatenated), limit from error event, limit from error object, unknown-shape fallback (lines 1089–1125).
+- E2E prompt via `-p`, empty stdin (lines 1392–1431).
+- Shipped examples (including advanced with copilot task): all 4 validate with `-ValidateOnly` (lines 2245–2282).
 
-**Bash (`tests/test-limitshift.sh`)**:
-- Effort: `run_effort_copilot_rejected_test`, `run_effort_copilot_ok_test` — called at lines 2052–2053.
-- E2E `-p` delivery: `run_copilot_prompt_as_arg_test` — called at line 2065.
-- Limit detection: `run_copilot_limit_detection_test` — called at line 2066.
-- Shipped examples: `run_shipped_examples_validate_test` covers all four example files.
+**Bash (tests/test-limitshift.sh):**
+- Effort: `run_effort_copilot_rejected_test` (minimal rejected), `run_effort_copilot_ok_test` (high accepted).
+- `write_fake_copilot` stub emits real JSONL shapes (lines 1599–1624).
+- E2E `-p` delivery: `run_copilot_prompt_as_arg_test` (stdin_len=0, JSONL parsed, task completes) (lines 1626–1658).
+- Limit detection: `run_copilot_limit_detection_test` (lines 1660–1683).
+- Shipped examples: all 4 pass `--validate-only`.
 
-### 9. Regression of Existing CLIs — PASS
+All copilot-specific tests pass in the bash run. Pester tests ran in parallel; the one failure is the pre-existing state-migration test (see F-3).
 
-All existing test cases for claude, codex, gemini, and agy are intact. Copilot additions are purely additive to allowlists, enum values, `switch`/`case` branches, and test suites. No existing branches were modified.
+### 9 — Existing CLI behavior not regressed — ✅ PASS
+
+All claude, codex, gemini, and agy tests pass in both suites. Copilot additions are purely additive (new enum value, new allowlist entry, new `switch`/`case` branches, new test functions). No existing branches were modified.
 
 ---
 
 ## Findings
 
-### F1 — LOW — Schema doc-string says `=` form, implementation uses space form
+### F-1 — MEDIUM: `copilot models` subcommand does not exist in copilot v1.0.62
 
-**File:** `limitshift-queue.schema.json:104`
-**Text:** `"The runner passes this through to the CLI along with --model, --name / --resume, -p, --output-format=json, and --no-ask-user."`
-**Reality:** Both `limitshift.ps1:1199` and `limitshift.sh:978` build args as separate array elements: `--output-format json --stream off` (space-separated, not `=` form). The tests at `limitshift.Tests.ps1:693` also assert the space form.
+**Files:** `AGENTS.md:85`, `README.md:303`, `CHANGELOG.md` (discovery support item)
 
-**Risk:** The inconsistency is documentation-only if the GitHub Copilot CLI (built on cobra/pflag) accepts both forms — standard Go CLI libraries do. However, if the copilot CLI requires `=` form, `--output-format json` would be silently misinterpreted as a positional argument at runtime.
+Running `copilot models` returns:
+```
+error: Invalid command format.
+Did you mean: copilot -i "models"?
+For non-interactive mode, use the -p or --prompt option.
+```
 
-**Fix:** Either (a) update the schema description at line 104 to match the implementation (`--output-format json`), or (b) change the implementation to use `=` form (`--output-format=json --stream=off`) to match the schema description. The lower-risk choice is (a) since both implementations and all tests already use space form and are internally consistent. If the real copilot CLI is available, run `copilot agent run --output-format json --stream off --no-ask-user -p "test" 2>&1` to confirm it accepts the space form.
+The copilot CLI's `--help` lists these subcommands: `completion`, `help`, `init`, `login`, `mcp`, `plugin`, `update`, `version`. There is no `models` subcommand.
+
+**Runtime impact:** None. When `copilot models` fails, `discover_cli_models` (PS1 and bash) sets `supportsModelDiscovery = false`, and `--validate-only` prints an INFO message. Model names are passed through without validation, the same as `claude`/`codex`/`gemini`. The queue still runs.
+
+**Documentation impact:** Users who follow the docs ("run `copilot models` to list what your account can use") will get a confusing error. AGENTS.md, README.md, and CHANGELOG.md all contain this incorrect instruction.
+
+**Fix for next task:**
+- `AGENTS.md:85`: replace "run `copilot models` to see what your account can use" with guidance to check the GitHub Copilot settings page or the Copilot docs for available models; note that model names are passed through as `--model` without CLI-side validation.
+- `README.md` (Models section, copilot bullet): same replacement.
+- `CHANGELOG.md` (discovery support item): change "agy and copilot: parse `agy models` / `copilot models`" to note that only `agy` supports model discovery; copilot has no scriptable model list (INFO printed, same behavior as claude/codex/gemini).
+- Both `discover_cli_models` copilot cases: add a comment that `copilot models` does not exist and this branch is a no-op, retained for forward-compatibility if the CLI adds it.
 
 ---
 
-### F2 — LOW — No E2E test for "copilot resumes after usage limit"
+### F-2 — LOW-MEDIUM: `--resume <sessionId>` space form may not attach the session ID
 
-The test suites have unit-level tests for arg construction and JSONL parsing, and an E2E test that the prompt is delivered via `-p`. However, neither suite has a test analogous to the gemini limit-resume test (`limitshift.Tests.ps1:1498–1562`) or the agy resume test (`test-limitshift.sh: run_agy_resume_continue_test`) for copilot.
+**Files:** `limitshift.ps1:1204`, `limitshift.sh` (copilot resume branch)
 
-The copilot-specific resume path (JSONL session-id extraction → persisting `task-NN-session-id.txt` → next run using `--resume <id>`) is not exercised end-to-end.
+Both runners build the resume flag as space-separated array elements: `('--resume', $SessionId)` (PS1) / `("--resume" "$session_id")` (bash). This produces `--resume <sessionId>` on the command line.
 
-**Risk:** Low, because the JSONL parsing and arg-construction paths are both unit-tested. But a regression in session-id extraction field names would not be caught by CI.
+The copilot CLI help declares `--resume[=value]` (optional value). Commander.js optional-value options typically require the `=` form to attach a value; space form leaves the option valueless (treats the next token as a positional argument). All examples in `copilot --help` use `=`:
+```
+copilot --resume=<session-id>
+copilot --resume="my feature"
+```
 
-**Fix:** Add `run_copilot_resume_test` to `tests/test-limitshift.sh` (model the stub after the gemini one at lines 1799–1823: emit a limit JSON with a session-id field on run 1, then a success JSON on run 2; verify that run 2's args include `--resume <id>`). Add an equivalent Pester test to `tests/limitshift.Tests.ps1`.
+If the space form does not attach the session ID, resume runs would invoke the interactive session picker (or resume the most recent session with `--continue` behavior), silently breaking session continuity for copilot tasks.
+
+**Not confirmed:** A live test with `copilot --resume fake-id --output-format=json --stream=off --no-ask-user -p test` was not performed. If the CLI exits with "session not found: fake-id", the space form works. If it opens interactive mode or resumes a different session, it does not.
+
+**Fix (if confirmed broken):**
+```powershell
+# limitshift.ps1 — copilot resume branch
+$cliArgs += "--resume=$SessionId"
+```
+```bash
+# limitshift.sh — copilot resume branch
+args+=("--resume=$session_id")
+```
+
+**Suggested smoke test for next task:** Run `copilot --resume nonexistent-name --output-format=json --stream=off --no-ask-user -p "echo hi"` and check whether the output contains "nonexistent-name" in an error (space form parsed it) or starts an interactive/most-recent session (space form was ignored).
 
 ---
 
-## Copilot JSONL Sample
+### F-3 — LOW: State-folder migration test fails in both suites (pre-existing, unrelated to copilot)
 
-Skipped — the GitHub Copilot CLI is not installed on this machine. The parser handles multiple candidate field names for the session ID (`interactionId`, `session_id`, `sessionId`, `conversation_id`, `conversationId`, `thread_id`, `threadId`), which reduces the risk that an undocumented API field name causes silent session loss. The JSONL keys emitted by the real CLI should be captured and the parser field-name list trimmed to those that are actually used once the CLI is available.
+**Files:** `tests/limitshift.Tests.ps1:1989`, `tests/test-limitshift.sh` (state-migration test)
+
+Both suites fail "old .ai-runner-\<name\> state folder migrates to .limitshift-\<name\>, preserving contents". The runner exits 0 and completes the task, but the message `Migrated state folder .ai-runner-queue -> .limitshift-queue` does not appear in captured output. The migration notification is either written only to the log file (not stdout) or the detection logic is not firing when the test queue path and legacy folder are in a temp directory.
+
+This failure predates the copilot integration. It is unrelated to any copilot-specific code and appears identically in both bash and PowerShell suites.
+
+**Fix for next task:** Inspect the state-migration block in `limitshift.ps1` and `limitshift.sh`. Determine whether the migration message is written with `Write-Host`/`printf` (stdout) or only to the log file. If log-only, either add a stdout echo or update the test assertion to check the log file content instead of captured output.
+
+---
+
+## Copilot JSONL Sample Status
+
+`copilot` v1.0.62 is installed and authenticated. A live JSONL sample was not captured to avoid consuming credits. The parsed event and field-name sets reviewed in the code are broad (7 session-ID field names, 6 event-type patterns) and cover multiple plausible API shapes. Both `ok - copilot receives prompt via -p, model/effort pass, JSONL parsed, task completes` and `ok - copilot limit detection identifies usage limit from JSONL error` passed in the bash run.
+
+The actual JSONL keys emitted by the live CLI should be captured on first use and the parser's field-name lists trimmed to only those observed.
 
 ---
 
 ## Residual Risks
 
-1. **`--stream` flag**: The copilot CLI may not accept `--stream off`; if unknown flags cause a non-zero exit code, every run would be treated as an error rather than a successful no-streaming response. Requires smoke-test with the real CLI.
-
-2. **`--no-ask-user` placement**: The flag is hardcoded in the runner before `extraArgs`. If copilot's parser treats `--no-ask-user` as a subcommand-specific flag that must appear after subcommand-specific args, it could be ignored. Verify with `copilot agent run --no-ask-user -p "test"`.
-
-3. **Session-ID field**: The parser tries seven field names. Until a live JSONL sample is captured, there is no guarantee any of them match the actual field name the copilot CLI emits. Session loss on the first run would cause every subsequent run to start a new session rather than resuming.
-
-4. **`copilot agent run` vs `copilot` entrypoint**: The implementation calls the `copilot` binary directly. If the real entrypoint is `gh copilot` or `copilot agent`, the binary detection and launch path would fail. Verify the PATH-visible binary name.
-
----
-
-## Summary
-
-**Static analysis**: all 9 checklist items pass. Two low-severity findings (schema doc-string `=` vs space form; missing E2E resume test) and four residual runtime risks that can only be resolved by running the real copilot CLI. No regressions to existing CLI behavior are present.
-
-**Dynamic verification**: blocked by a user-configured hook requiring approval for `powershell.exe`, `bash *.sh`, and `Invoke-Pester` subprocesses. The four verification commands listed above must be run manually to confirm the static analysis holds at runtime.
+| Risk | Likelihood | Impact |
+|---|---|---|
+| `--resume <id>` (space) doesn't attach session ID (F-2) | Medium | High — resume runs may open interactive session picker |
+| `copilot models` never added; docs mislead users (F-1) | High | Low — only affects user confusion, not runtime |
+| JSONL session-ID field name in actual API doesn't match any of the 7 candidates | Low | High — every run starts a new session, no resume |
+| Copilot JSONL schema changes in a future version | Low | Medium — parser falls back to raw text; task still completes |
