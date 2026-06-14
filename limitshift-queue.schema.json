@@ -61,7 +61,7 @@
               { "type": "string" },
               { "type": "array", "items": { "type": "string" }, "minItems": 1 }
             ],
-            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: opus, sonnet, haiku, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash; agy (Antigravity CLI) / copilot (GitHub Copilot CLI): run 'agy models' or 'copilot models' to list what your account can use — passed through as '--model'. Copilot also supports session naming/resume, JSONL output, and reasoning-effort flags. Local Ollama models (e.g. qwen3.5:9b, nemotron-3-nano:4b) are also accepted; pair them with extraArgs [\"--oss\", \"--local-provider\", \"ollama\"] to run locally. A local claude task requires a model (it is passed to 'ollama launch --model')."
+            "description": "Model name(s) passed through to the CLI. A single string, OR an array of strings in preference order (Task 6): when a run hits a usage limit the runner switches to the next model immediately, and only falls back to waiting for a reset once every listed model is limit-exhausted. Examples — claude: opus, sonnet, haiku, claude-opus-4-8, claude-sonnet-4-6, claude-haiku-4-5; codex: gpt-5.5, gpt-5.4, gpt-5.4-mini, gpt-5.3-codex-spark; gemini: gemini-3.1-pro-preview, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.1-flash-lite, gemini-2.5-pro, gemini-2.5-flash; agy (Antigravity CLI): run 'agy models' to list what your account can use — passed through as '--model'; copilot (GitHub Copilot CLI): pass a supported model name through as '--model' if you know it, because the CLI does not currently expose a scriptable model-list command. Copilot also supports session naming/resume, JSONL output, and reasoning-effort flags. Local Ollama models (e.g. qwen3.5:9b, nemotron-3-nano:4b) are also accepted; pair them with extraArgs [\"--oss\", \"--local-provider\", \"ollama\"] to run locally. A local claude task requires a model (it is passed to 'ollama launch --model')."
           },
           "effort": {
             "enum": [null, "minimal", "low", "medium", "high", "xhigh", "max"],
@@ -118,7 +118,7 @@
               "properties": {
                 "effort": {
                   "enum": [null, "low", "medium", "high", "xhigh", "max"],
-                  "description": "GitHub Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI along with --model, --name / --resume, -p, --output-format=json, --stream=off, and --no-ask-user."
+                  "description": "GitHub Copilot CLI --effort / --reasoning-effort accepts low, medium, high, xhigh, max. The runner passes this through to the CLI along with --model, --name / --resume=<session-id>, -p, --output-format=json, --stream=off, and --no-ask-user."
                 }
               }
             }

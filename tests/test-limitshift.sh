@@ -55,6 +55,21 @@ reset_fixture_state() {
   rm -rf "$CONFIGS"/.limitshift-*
 }
 
+source_runner_functions() {
+  local root="$1"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+  cat > "$queue_path" <<EOF
+{
+  "tasks": [
+    { "name": "load funcs", "cli": "claude", "projectPath": "$project_dir", "prompt": "p" }
+  ]
+}
+EOF
+  LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" --queue "$queue_path"
+}
+
 run_dry_run_state_test() {
   local desc="dry run prints commands without persisting done markers"
   reset_fixture_state
@@ -802,8 +817,7 @@ EOF
      printf '%s' "$resume_prompt" | grep -q 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.' &&
      printf '%s' "$resume_prompt" | grep -q '/goal ship it' &&
      printf '%s' "$resume_prompt" | grep -q 'do the simple task' &&
-     ! printf '%s' "$resume_prompt" | grep -q 'IMPORTANT AUTOMATION INSTRUCTIONS' &&
-     ! printf '%s' "$resume_prompt" | grep -q 'TASK_COMPLETE'; then
+     ! printf '%s' "$resume_prompt" | grep -q 'IMPORTANT AUTOMATION INSTRUCTIONS'; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
@@ -1607,6 +1621,7 @@ while [ \$# -gt 0 ]; do
   case "\$1" in
     --name) sid="\$2"; mode="new"; shift 2 ;;
     --resume) sid="\$2"; mode="resume"; shift 2 ;;
+    --resume=*) sid="\${1#--resume=}"; mode="resume"; shift ;;
     -p) prompt="\$2"; shift 2 ;;
     *) shift ;;
   esac
@@ -1679,6 +1694,64 @@ EOF
   else
     fail "$desc" "exit=$exit_code
 $out"
+  fi
+}
+
+run_copilot_resume_test() {
+  local desc="copilot usage-limit resume reuses extracted interactionId via --resume"
+  local root="$TMP_ROOT/copilot-resume"; local bin_dir="$root/bin"; local project_dir="$root/project"
+  local queue_path="$root/queue.json"; local log_file="$root/copilot.log"; local counter_file="$root/count"
+  mkdir -p "$bin_dir" "$project_dir"
+  cat > "$bin_dir/copilot" <<EOF
+#!/usr/bin/env bash
+set -u
+prompt=""; sid=""; mode="new"
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --name) sid="\$2"; mode="new"; shift 2 ;;
+    --resume) sid="\$2"; mode="resume"; shift 2 ;;
+    --resume=*) sid="\${1#--resume=}"; mode="resume"; shift ;;
+    -p) prompt="\$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+sin=\$(cat)
+{
+  printf 'RUN mode=%s sid=%s stdin_len=%s\n' "\$mode" "\$sid" "\${#sin}"
+  printf 'PROMPT1=%s\n' "\$(printf '%s' "\$prompt" | head -1)"
+} >> "$log_file"
+n=0
+if [ -f "$counter_file" ]; then n=\$(cat "$counter_file"); fi
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter_file"
+if [ "\$n" = "1" ]; then
+  printf '{"type":"error","message":"Usage limit reached.","interactionId":"cp-resume"}\n'
+  exit 1
+fi
+printf '{"type":"assistant.message","content":"resumed ok [[TASK_COMPLETE]]","interactionId":"cp-resume"}\n'
+exit 0
+EOF
+  chmod +x "$bin_dir/copilot"
+  cat > "$queue_path" <<EOF
+{ "settings": { "stopOnError": true, "maxRunsPerTask": 3, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [ { "name": "copilot resume", "cli": "copilot", "projectPath": "$project_dir", "prompt": "do it", "extraArgs": ["--allow-all"] } ] }
+EOF
+  local out exit_code first_call second_call
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1); exit_code=$?
+  first_call="$(sed -n '1p' "$log_file" 2>/dev/null)"
+  second_call="$(sed -n '3p' "$log_file" 2>/dev/null)"
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'paused by a usage limit on copilot' &&
+     printf '%s' "$out" | grep -q 'Task 1 completed' &&
+     printf '%s' "$first_call" | grep -q 'RUN mode=new sid=' &&
+     printf '%s' "$second_call" | grep -q 'RUN mode=resume sid=cp-resume stdin_len=0'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- console ---
+$out
+--- copilot.log ---
+$(cat "$log_file" 2>/dev/null)"
   fi
 }
 
@@ -1981,8 +2054,9 @@ $out"
 
 run_levenshtein_test() {
   local desc="levenshtein distance helper returns correct distances"
-  local func; func=$(sed -n '/^_levenshtein()/,/^}/p' "$SCRIPT")
-  eval "$func"
+  local root="$TMP_ROOT/levenshtein"
+  mkdir -p "$root"
+  source_runner_functions "$root"
 
   local ok=1
   [ "$(_levenshtein "gpt-5" "gpt-5")" = "0" ]   || { echo "same string should be 0"; ok=0; }
@@ -2010,13 +2084,7 @@ exit 1
 EOF
   chmod +x "$bin_dir/agy"
 
-  eval "$(sed -n '/^_levenshtein()/,/^}/p' "$SCRIPT")"
-  eval "$(sed -n '/^suggest_model_corrections()/,/^}/p' "$SCRIPT")"
-  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
-  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
-  local disc_func; disc_func=$(sed -n '/^discover_cli_models()/,/^}/p' "$SCRIPT")
-  if [ -z "$disc_func" ]; then fail "$desc" "discover_cli_models not found in script"; return; fi
-  eval "$disc_func"
+  source_runner_functions "$root"
 
   local caps; caps=$(PATH="$bin_dir:$PATH" discover_cli_models "agy")
   local supports; supports=$(printf '%s' "$caps" | jq -r '.supportsModelDiscovery')
@@ -2035,8 +2103,7 @@ run_capability_cache_test() {
   local caps_dir="$root/caps"
   mkdir -p "$caps_dir"
 
-  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
-  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
+  source_runner_functions "$root"
 
   local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
   local caps_json; caps_json=$(jq -n --arg ts "$ts" \
@@ -2059,8 +2126,7 @@ run_capability_cache_stale_test() {
   local caps_dir="$root/caps"
   mkdir -p "$caps_dir"
 
-  eval "$(sed -n '/^load_capability_cache()/,/^}/p' "$SCRIPT")"
-  eval "$(sed -n '/^save_capability_cache()/,/^}/p' "$SCRIPT")"
+  source_runner_functions "$root"
 
   local ts; ts=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
   local caps_json; caps_json=$(jq -n --arg ts "$ts" \
@@ -2586,6 +2652,7 @@ run_agy_limit_keyword_not_misread_test
 run_agy_transcript_capture_test
 run_copilot_prompt_as_arg_test
 run_copilot_limit_detection_test
+run_copilot_resume_test
 run_unknown_cli_rejected_test
 run_queue_path_filename_resolves_from_script_dir_test
 run_queue_path_absolute_test

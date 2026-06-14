@@ -695,14 +695,14 @@ Describe 'limitshift.ps1' {
             ($args -join ' ') | Should -Be '--name sid-123 --output-format=json --stream=off --no-ask-user -p do it --model m --effort high --verbose'
         }
 
-        It 'builds a copilot resume command with session id as --resume' {
+        It 'builds a copilot resume command with session id attached to --resume=' {
             $task = [pscustomobject]@{
                 Name = 't'; Cli = 'copilot'; ProjectPath = 'C:\proj'
                 Model = $null; Effort = $null; Prompt = 'p'; ExtraArgs = @()
             }
 
             $args = Get-CliArguments -Task $task -Mode Resume -SessionId 'sid-123' -Prompt 'continue'
-            ($args -join ' ') | Should -Be '--resume sid-123 --output-format=json --stream=off --no-ask-user -p continue'
+            ($args -join ' ') | Should -Be '--resume=sid-123 --output-format=json --stream=off --no-ask-user -p continue'
         }
     }
 
@@ -1426,6 +1426,71 @@ exit 0
                 $log = Get-Content -LiteralPath $logFile -Raw
                 $log | Should -Match 'p=say hi'
                 $log | Should -Match 'sin_len=0'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'copilot resumes after a usage limit using the extracted interactionId' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $logFile = Join-Path $root 'copilot-resume.log'
+            $counterFile = Join-Path $root 'counter.txt'
+            $copilotPath = Join-Path $binPath 'copilot.ps1'
+            @"
+`$stdinText = [Console]::In.ReadToEnd()
+`$logFile = '$($logFile -replace '\\','\\')'
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$mode = 'new'
+`$sid = ''
+`$p = ''
+for (`$i = 0; `$i -lt `$args.Count; `$i++) {
+    if (`$args[`$i] -eq '--name') { `$sid = `$args[`$i + 1]; `$mode = 'new' }
+    if (`$args[`$i] -eq '--resume') { `$sid = `$args[`$i + 1]; `$mode = 'resume' }
+    if (`$args[`$i] -like '--resume=*') { `$sid = `$args[`$i].Substring(9); `$mode = 'resume' }
+    if (`$args[`$i] -eq '-p') { `$p = `$args[`$i + 1] }
+}
+[System.IO.File]::AppendAllText(`$logFile, "RUN mode=`$mode sid=`$sid stdin_len=`$(`$stdinText.Length)`nPROMPT1=`$((`$p -split ""`r?`n"")[0])`n")
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"type":"error","message":"Usage limit reached.","interactionId":"cp-resume"}'
+    exit 1
+}
+Write-Output '{"type":"assistant.message","content":"resumed ok [[TASK_COMPLETE]]","interactionId":"cp-resume"}'
+exit 0
+"@ | Set-Content -LiteralPath $copilotPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{
+                    stopOnError        = $true
+                    maxRunsPerTask     = 3
+                    maxRetriesOnError  = 0
+                    limitWaitMinutes   = 1
+                    resetBufferMinutes = 0
+                }
+                tasks = @(
+                    @{ name = 'cp-resume'; cli = 'copilot'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--allow-all') }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'paused by a usage limit on copilot'
+                $run.Output | Should -Match 'Task 1 completed'
+
+                $log = Get-Content -LiteralPath $logFile -Raw
+                $log | Should -Match 'RUN mode=new sid='
+                $log | Should -Match 'RUN mode=resume sid=cp-resume stdin_len=0'
             }
             finally { $env:PATH = $oldPath }
         }

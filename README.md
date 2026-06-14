@@ -327,7 +327,7 @@ Model aliases passed through to each CLI:
 - **codex:** `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`.
 - **gemini:** `gemini-3.*` (e.g. `gemini-3.1-pro-preview`, `gemini-3-flash-preview`), `gemini-2.5-*`.
 - **agy:** run `agy models` to see what your account can use (e.g. `gemini-3.1-pro`, `gemini-3.5-flash`, `claude-sonnet`, `gpt-oss-120b`). agy has no headless output mode (it draws its reply on screen), so LimitShift reads agy's answer back from its own local conversation history; and it resumes only its most recent conversation, so keep agy work to one linear chain of tasks — LimitShift handles the rest. Just have agy installed and signed in.
-- **copilot:** install the GitHub CLI extension (`gh extension install github/gh-copilot`), run `copilot login`, then `copilot models` to list what your account can use. LimitShift passes `model` through as `--model`, `effort` through as `--effort`, uses `--name` on the first run and `--resume` on resumed runs, sends the prompt via `-p`, forces `--output-format=json --stream=off --no-ask-user`, and parses the returned JSONL stream for assistant text, session ids, and usage-limit signals.
+- **copilot:** install the GitHub CLI extension (`gh extension install github/gh-copilot`) and run `copilot login`. The Copilot CLI does not currently expose a scriptable model-list command, so choose a supported model from GitHub Copilot settings or docs, then pass it through as `model` / `--model`. LimitShift passes `effort` through as `--effort`, uses `--name` on the first run and `--resume=<session-id>` on resumed runs, sends the prompt via `-p`, forces `--output-format=json --stream=off --no-ask-user`, and parses the returned JSONL stream for assistant text, session ids, and usage-limit signals.
 
 **Effort** (`tasks[].effort`): claude `low`/`medium`/`high`/`xhigh`/`max`; codex `minimal`/`low`/`medium`/`high`/`xhigh`; copilot `low`/`medium`/`high`/`xhigh`/`max`. Gemini, Antigravity (`agy`), and Claude Haiku have no effort flag — leave it `null`.
 
@@ -344,8 +344,8 @@ LimitShift validates model names at runtime against each CLI's own model list du
 | `INFO:` | model name could not be verified (CLI has no model-list command) |
 
 **Discovery support:**
-- `agy` and `copilot`: parse `agy models` / `copilot models`
-- `claude`, `codex`, `gemini`: no scriptable model list — prints INFO, never fails
+- `agy`: parses `agy models`
+- `claude`, `codex`, `gemini`, `copilot`: no scriptable model list — prints INFO, never fails
 
 **Settings** (inside `"settings": {}`):
 

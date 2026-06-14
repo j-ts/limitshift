@@ -13,6 +13,7 @@ DRY_RUN=0
 SHOW_RAW=0
 REFRESH_CAPABILITIES=0
 PROBE_MODELS=0
+LIMITSHIFT_SOURCE_ONLY="${LIMITSHIFT_SOURCE_ONLY:-0}"
 MODEL_VALIDATION="strictWhenDiscoverable"
 CAPABILITY_CACHE_HOURS=24
 
@@ -446,30 +447,9 @@ discover_cli_models() {
       fi
       ;;
     copilot)
-      if command -v copilot >/dev/null 2>&1; then
-        local out ec=0
-        out=$(copilot models 2>&1) || ec=$?
-        if [ "$ec" -eq 0 ] && [ -n "$out" ]; then
-          local parsed
-          parsed=$(printf '%s' "$out" | \
-            jq -r '.[].id // .[].name // .[]' 2>/dev/null | \
-            grep -v '^$' | jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
-          if [ -z "$parsed" ] || [ "$parsed" = "[]" ]; then
-            parsed=$(printf '%s' "$out" | grep -v '^$' | \
-              jq -R '.' | jq -s '.' 2>/dev/null) || parsed=""
-          fi
-          local cnt; cnt=$(printf '%s' "$parsed" | jq 'length' 2>/dev/null) || cnt=0
-          if [ "${cnt:-0}" -gt 0 ]; then
-            models_json="$parsed"; supports=true; source="copilot models"
-          else
-            error_msg="copilot models: could not parse model list from output"
-          fi
-        else
-          error_msg="copilot models: exited $ec"
-        fi
-      else
-        error_msg="copilot not on PATH"
-      fi
+      # GitHub Copilot CLI currently has no scriptable model-list subcommand. Keep discovery off and
+      # treat it like claude/codex/gemini for validation purposes.
+      error_msg="copilot does not expose a scriptable model list"
       ;;
     claude|codex|gemini)
       error_msg="$cli does not expose a scriptable model list"
@@ -1240,7 +1220,7 @@ build_cli_args() {
     gemini)
       # gemini never carries effort here: read_queue_config rejects gemini+effort at validation (Task 6b).
       if [ "$mode" = "Resume" ] && [ -n "$session_id" ]; then
-        CLI_ARGS+=("--resume" "$session_id")
+        CLI_ARGS+=("--resume=$session_id")
       fi
       CLI_ARGS+=("--output-format" "json")
       if [ -n "$model" ]; then
@@ -1698,6 +1678,10 @@ add_runs_csv_row() {
 }
 
 # MAIN EXECUTION
+if [ "$LIMITSHIFT_SOURCE_ONLY" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 read_queue_config
 
 if [ "$VALIDATE_ONLY" -eq 1 ]; then

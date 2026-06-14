@@ -1208,7 +1208,7 @@ function Get-CliArguments {
             # GitHub Copilot CLI: prompt via -p, JSONL output. New runs use --name; resumes use --resume.
             $cliArgs = @()
             if ($Mode -eq 'New')    { $cliArgs += @('--name', $SessionId) }
-            if ($Mode -eq 'Resume') { $cliArgs += @('--resume', $SessionId) }
+            if ($Mode -eq 'Resume') { $cliArgs += "--resume=$SessionId" }
             $cliArgs += @('--output-format=json', '--stream=off', '--no-ask-user')
             $cliArgs += @('-p', $Prompt)
             if ($model)       { $cliArgs += @('--model', $model) }
@@ -1666,7 +1666,7 @@ function Get-AvailableModels {
         Error                  = ''
     }
     switch ($Cli) {
-        { $_ -in @('agy', 'copilot') } {
+        'agy' {
             $listCmd = $_
             if (Get-Command $listCmd -ErrorAction SilentlyContinue) {
                 try {
@@ -1696,6 +1696,11 @@ function Get-AvailableModels {
                 catch { $result.Error = "$listCmd models threw: $_" }
             }
             else { $result.Error = "$listCmd not on PATH" }
+        }
+        'copilot' {
+            # GitHub Copilot CLI currently has no scriptable model-list subcommand. Leave discovery off
+            # and validate user-supplied model names only opportunistically if the CLI adds one later.
+            $result.Error = 'copilot does not expose a scriptable model list'
         }
         default { $result.Error = "$Cli does not expose a scriptable model list" }
     }

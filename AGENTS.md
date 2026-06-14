@@ -82,10 +82,10 @@ Useful optional fields:
   and no isolated sessions, so keep agy work to a single linear chain of tasks; completion-marker
   checking (`completionCheck: true`) still works because the runner recovers agy's reply from its
   conversation transcript.
-- GitHub Copilot CLI (`copilot`): run `copilot models` to see what your account can use; pass the
-  chosen name as `model`. Effort: `low`, `medium`, `high`, `xhigh`, `max`. Copilot delivers prompts
-  via `-p`, uses `--name` / `--resume` for session identity, returns structured JSONL, and supports
-  `--output-format=json`, `--stream=off`, `--no-ask-user`, `--allow-tool`, `--deny-tool`, and
+- GitHub Copilot CLI (`copilot`): choose a supported model from GitHub Copilot settings or docs and pass the
+  chosen name as `model` (`copilot` does not currently expose a scriptable model-list command). Effort: `low`, `medium`, `high`, `xhigh`, `max`. Copilot delivers prompts
+  via `-p`, uses `--name` / `--resume=<session-id>` for session identity, returns structured JSONL, and supports
+  `--output-format json`, `--stream off`, `--no-ask-user`, `--allow-tool`, `--deny-tool`, and
   `--allow-all` / `--yolo`-style permission bypass where appropriate.
 
 ## Permission Flags
