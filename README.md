@@ -302,19 +302,15 @@ Each queue file gets its own isolated state folder. The recommended workflow for
 
 ---
 
-## Roadmap
-
-Ideas, planned features, and work in progress.
-
-- [ ] **CLI rotation on usage limits** — when you hit a limit on one CLI (e.g. `claude`), automatically switch to another (e.g. `codex`) for the same task, similar to how [model rotation](#model-rotation) works within a single CLI but across different tools.
-
----
-
 # Reference
 
 > **Tested with:** Claude Code **2.1.170** · Codex CLI **0.136.0** · Gemini CLI **0.46.0** · Antigravity `agy` **1.0.8**. These are the builds LimitShift has been verified against; other recent versions should work too.
 
 Configuration, models, permissions, run options, state, and troubleshooting → **[REFERENCE.md](REFERENCE.md)**.
+
+## Roadmap
+
+- [ ] **CLI rotation on usage limits.** When you hit a limit on one CLI (e.g. `claude`), automatically switch to another (e.g. `codex`) for the same task. Like [model rotation](#model-rotation), but across different tools.
 
 ## Glossary
 
