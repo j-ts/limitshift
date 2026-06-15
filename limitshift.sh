@@ -66,7 +66,7 @@ UI_RED=$'\033[31m'
 UI_YELLOW=$'\033[33m'
 UI_BLUE=$'\033[34m'
 UI_DIM=$'\033[90m'
-UI_WHITE=$'\033[97m'
+UI_WHITE=$'\033[1m'
 UI_RESET=$'\033[0m'
 
 GLYPH_STAR='✦'    # four-pointed star, accent
