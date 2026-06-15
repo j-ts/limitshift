@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] - 2026-06-15
 
 ### Added
 - **Multi-CLI queue runner** for five coding-agent CLIs — Claude Code (`claude`), Codex (`codex`), Gemini CLI (`gemini`), Antigravity (`agy`), and GitHub Copilot CLI (`copilot`) — driven from one JSON queue. PowerShell (`limitshift.ps1`, Win PS 5.1+) and Bash (`limitshift.sh`, macOS/Linux, bash 3.2) with identical flags and behavior.
