@@ -273,6 +273,8 @@ Because LimitShift is just a terminal command, you can chain it with anything yo
 
 ### Run multiple queues in parallel
 
+> ⚠️ Each queue runs its own CLI process. Even API-backed agents need RAM, and local Ollama models need significantly more. Only run as many parallel queues as your machine can handle.
+
 Each queue file gets its own isolated state folder. The recommended workflow for multiple projects is **one queue JSON per project, one terminal per queue**:
 
 ```powershell
