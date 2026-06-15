@@ -19,7 +19,7 @@
 
 ## What is LimitShift?
 
-LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, Antigravity (`agy`), or GitHub Copilot (`copilot`)** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
+LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, Antigravity, or GitHub Copilot** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
 You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** That's the whole idea behind the name: your usage limit stops being a wall you hit and start over from, and becomes a pause the queue slides across. Start a long list and let it work unattended — how far it gets depends on your quota and on how many prompts and how large the tasks are.
 
