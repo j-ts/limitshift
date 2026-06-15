@@ -1116,15 +1116,62 @@ EOF
   marker=$(cat "$new_state_dir/marker.txt" 2>/dev/null)
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Migrated state folder .ai-runner-queue -> limitshift-queue' &&
-     [ -d "$new_state_dir" ] &&
-     [ ! -d "$legacy_state_dir" ] &&
-     [ "$marker" = "preserve me 123" ]; then
+      printf '%s' "$out" | grep -q 'Migrated state folder .ai-runner-queue -> limitshift-queue' &&
+      [ -d "$new_state_dir" ] &&
+      [ ! -d "$legacy_state_dir" ] &&
+      [ "$marker" = "preserve me 123" ]; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code marker=[$marker]
 $out"
   fi
+}
+
+run_handoff_note_test() {
+  local desc="CLI rotation — handoff note prepended correctly"
+  local root="$TMP_ROOT/handoff"
+  mkdir -p "$root/project"
+  local queue_path="$root/queue.json"
+  cat > "$queue_path" <<EOF
+{ "tasks": [ { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "do the thing" } ] }
+EOF
+
+  # Source functions
+  # shellcheck disable=SC1090
+  LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" --queue "$queue_path"
+  
+  local p
+  
+  # Completion-check mode
+  p=$(build_prompt_with_handoff 0 "true")
+  local expected_cc="A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both \`git status\` (for new/untracked files) and \`git diff\` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work. End your final response with \`[[TASK_COMPLETE]]\` when the task is fully done, or \`[[TASK_BLOCKED]] <reason>\` if it genuinely cannot be completed."
+  
+  if [[ "$p" != "$expected_cc"* ]]; then
+     fail "$desc (CC mode)" "Prompt does not start with expected note.
+Got: $p"
+     return 1
+  fi
+  
+  if [[ "$p" != *"do the thing"* ]]; then
+     fail "$desc (CC mode)" "Prompt missing original prompt text."
+     return 1
+  fi
+
+  # Simple mode
+  p=$(build_prompt_with_handoff 0 "false")
+  local expected_simple="A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both \`git status\` (for new/untracked files) and \`git diff\` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
+  
+  if [[ "$p" != "$expected_simple"* ]]; then
+     fail "$desc (Simple mode)" "Prompt does not start with expected note."
+     return 1
+  fi
+
+  if [[ "$p" == *"[[TASK_COMPLETE]]"* ]]; then
+     fail "$desc (Simple mode)" "Marker instruction leaked into simple mode prompt."
+     return 1
+  fi
+
+  pass "$desc"
 }
 
 run_legacy_queue_fallback_test() {
@@ -2916,6 +2963,7 @@ run_probe_models_optin_test
 run_fingerprint_fallback_test
 run_fingerprint_backcompat_test
 run_fingerprint_normalized_model_test
+run_handoff_note_test
 run_git_requirement_test
 
 echo

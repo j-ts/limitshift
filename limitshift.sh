@@ -24,6 +24,7 @@ CAPABILITY_CACHE_HOURS=24
 
 TASK_COMPLETE_MARKER="[[TASK_COMPLETE]]"
 TASK_BLOCKED_MARKER="[[TASK_BLOCKED]]"
+HANDOFF_NOTE_BASE="A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both \`git status\` (for new/untracked files) and \`git diff\` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
 
 usage() {
   echo "Usage: $0 [options]"
@@ -1836,6 +1837,39 @@ get_marker_status() {
       M_STATUS="None"; M_REASON=""
       ;;
   esac
+}
+
+get_completion_marker_instructions() {
+  printf '\n\nIMPORTANT AUTOMATION INSTRUCTIONS:\n1. When and only when this task is fully complete, end your final response with %s as (or at the end of) the very last line:\n%s\n2. If and only if you cannot complete this task, end your final response with this as (or at the end of) the very last line instead, plus a one-line reason:\n%s <one-line reason>' "$TASK_COMPLETE_MARKER" "$TASK_COMPLETE_MARKER" "$TASK_BLOCKED_MARKER"
+}
+
+get_task_prompt_with_completion_marker() {
+  local idx="$1"
+  local cc_override="${2:-}"
+  local prompt; prompt=$(task_field "$idx" "prompt")
+  local completion_check
+  if [ -n "$cc_override" ]; then
+    completion_check="$cc_override"
+  else
+    completion_check=$(task_completion_check "$idx")
+  fi
+
+  if [ "$completion_check" = "true" ]; then
+    printf '%s%s\n' "$prompt" "$(get_completion_marker_instructions)"
+  else
+    printf '%s' "$prompt"
+  fi
+}
+
+build_prompt_with_handoff() {
+  local idx="$1"
+  local completion_check="$2"
+  local note="$HANDOFF_NOTE_BASE"
+  if [ "$completion_check" = "true" ]; then
+    note="$note End your final response with \`$TASK_COMPLETE_MARKER\` when the task is fully done, or \`$TASK_BLOCKED_MARKER <reason>\` if it genuinely cannot be completed."
+  fi
+  local base; base=$(get_task_prompt_with_completion_marker "$idx" "$completion_check")
+  printf '%s\n\n%s' "$note" "$base"
 }
 
 invoke_cli_task_run() {
