@@ -382,6 +382,31 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'CLI rotation (fallbacks) — handoff note' {
+        It 'prepends the exact handoff note in completion-check mode' {
+            $task = [pscustomobject]@{ Name='t'; Cli='codex'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='do the thing'; ExtraArgs=@(); CompletionCheck=$true }
+            $p = Get-TaskPromptWithHandoff -Task $task
+            
+            # Exact wording from spec §6.1
+            $expectedNote = "A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both ``git status`` (for new/untracked files) and ``git diff`` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work. End your final response with ``[[TASK_COMPLETE]]`` when the task is fully done, or ``[[TASK_BLOCKED]] <reason>`` if it genuinely cannot be completed."
+            
+            $p.StartsWith($expectedNote) | Should -Be $true
+            $p | Should -Match "do the thing"
+            # It should also contain the existing big marker block because of Get-TaskPromptWithCompletionMarker
+            $p | Should -Match "IMPORTANT AUTOMATION INSTRUCTIONS"
+        }
+        It 'omits the marker sentence in simple mode but keeps the git instruction' {
+            $task = [pscustomobject]@{ Name='t'; Cli='codex'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='do the thing'; ExtraArgs=@(); CompletionCheck=$false }
+            $p = Get-TaskPromptWithHandoff -Task $task
+
+            $expectedNote = "A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both ``git status`` (for new/untracked files) and ``git diff`` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
+            
+            $p.StartsWith($expectedNote) | Should -Be $true
+            $p | Should -Match "do the thing"
+            $p | Should -Not -Match "\[\[TASK_COMPLETE\]\]"
+        }
+    }
+
     Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
         It 'appends the marker block when completionCheck is true' {
             $task = [pscustomobject]@{

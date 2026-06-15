@@ -1422,6 +1422,20 @@ function Wait-UntilClaudeUsageReady {
     }
 }
 
+$script:HandoffNoteBase = "A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both ``git status`` (for new/untracked files) and ``git diff`` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
+
+function Get-TaskPromptWithHandoff {
+    param($Task)
+
+    $note = $script:HandoffNoteBase
+    if ($Task.CompletionCheck) {
+        $note += " End your final response with ``$TaskCompleteMarker`` when the task is fully done, or ``$TaskBlockedMarker <reason>`` if it genuinely cannot be completed."
+    }
+
+    $base = Get-TaskPromptWithCompletionMarker -Task $Task
+    return $note + "`n`n" + $base
+}
+
 function Get-CompletionMarkerInstructions {
     return @"
 IMPORTANT AUTOMATION INSTRUCTIONS:
