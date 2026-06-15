@@ -1077,6 +1077,20 @@ function Get-TaskFingerprint {
         $extraJoined
     ) -join $us
 
+    # Phase 3: include fallbacks in the task fingerprint (Task 3.1).
+    # Skip runner 0 (it is already represented by the existing fields above).
+    # Append the segment ONLY when there is at least one fallback runner.
+    $runnersProp = $Task.PSObject.Properties['Runners']
+    if ($null -ne $runnersProp -and @($runnersProp.Value).Count -gt 1) {
+        $fbParts = foreach ($r in @($runnersProp.Value)[1..(@($runnersProp.Value).Count - 1)]) {
+            $rModels = if ($r.PSObject.Properties['Models'] -and $r.Models) { (@($r.Models) -join ' ') } else { '' }
+            $rEffort = if ($null -ne $r.Effort) { [string]$r.Effort } else { '' }
+            $rExtra  = if ($r.PSObject.Properties['ExtraArgs'] -and $r.ExtraArgs) { (@($r.ExtraArgs) -join ' ') } else { '' }
+            ($r.Cli, $rModels, $rEffort, $rExtra) -join ([char]0x1F)
+        }
+        $canonical = $canonical + ([char]0x1E) + ($fbParts -join ([char]0x1E))
+    }
+
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($canonical)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
