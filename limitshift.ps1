@@ -2353,6 +2353,29 @@ function Get-RunnerResetTime {
     return (Get-Date).AddMinutes($LimitWaitMinutes)
 }
 
+function Select-NextRunner {
+    param([object[]]$States, [int]$StartIndex, [datetime]$Now)
+    $count = $States.Count
+    for ($k = 0; $k -lt $count; $k++) {
+        $i = ($StartIndex + $k) % $count
+        $s = $States[$i]
+        if ($s.SetAside) { continue }
+        if ($null -ne $s.LimitedUntil -and $s.LimitedUntil -gt $Now) { continue }
+        return @{ Action = 'Run'; Index = $i }
+    }
+    # Nothing runnable: consider live (not set aside) runners with a reset within 24h.
+    $waitable = @()
+    for ($i = 0; $i -lt $count; $i++) {
+        $s = $States[$i]
+        if (-not $s.SetAside -and $null -ne $s.LimitedUntil -and ($s.LimitedUntil - $Now).TotalHours -le 24) {
+            $waitable += @{ Index = $i; At = $s.LimitedUntil }
+        }
+    }
+    if ($waitable.Count -eq 0) { return @{ Action = 'Fail' } }
+    $soonest = $waitable | Sort-Object { $_.At } | Select-Object -First 1
+    return @{ Action = 'Wait'; Index = $soonest.Index; WaitUntil = $soonest.At }
+}
+
 function Wait-ForLimitReset {
     param($Task, $Result, $Settings)
 

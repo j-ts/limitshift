@@ -431,6 +431,40 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'CLI rotation (fallbacks) — runner selection' {
+        # Each runner state: @{ SetAside=$bool; LimitedUntil=[datetime] or $null }
+        It 'picks the first runner that is not set aside and not still-limited, scanning from the current index' {
+            $states = @(
+                @{ SetAside=$true;  LimitedUntil=$null },
+                @{ SetAside=$false; LimitedUntil=(Get-Date).AddHours(1) },
+                @{ SetAside=$false; LimitedUntil=$null }
+            )
+            $r = Select-NextRunner -States $states -StartIndex 0 -Now (Get-Date)
+            $r.Action | Should -Be 'Run'
+            $r.Index  | Should -Be 2
+        }
+        It 'returns Wait with the soonest within-24h reset when nothing is runnable' {
+            $now = Get-Date
+            $states = @(
+                @{ SetAside=$false; LimitedUntil=$now.AddHours(3) },
+                @{ SetAside=$false; LimitedUntil=$now.AddHours(1) }
+            )
+            $r = Select-NextRunner -States $states -StartIndex 0 -Now $now
+            $r.Action | Should -Be 'Wait'
+            $r.Index  | Should -Be 1
+            ($r.WaitUntil - $now).TotalMinutes | Should -BeGreaterThan 55
+        }
+        It 'returns Fail when every live runner resets more than 24h out' {
+            $now = Get-Date
+            $states = @( @{ SetAside=$false; LimitedUntil=$now.AddHours(48) } )
+            (Select-NextRunner -States $states -StartIndex 0 -Now $now).Action | Should -Be 'Fail'
+        }
+        It 'returns Fail when every runner is set aside' {
+            $states = @( @{ SetAside=$true; LimitedUntil=$null }, @{ SetAside=$true; LimitedUntil=$null } )
+            (Select-NextRunner -States $states -StartIndex 0 -Now (Get-Date)).Action | Should -Be 'Fail'
+        }
+    }
+
     Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
         It 'appends the marker block when completionCheck is true' {
             $task = [pscustomobject]@{
