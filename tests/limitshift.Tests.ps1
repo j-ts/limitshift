@@ -557,6 +557,31 @@ Describe 'limitshift.ps1' {
             $b = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='X'; ExtraArgs=@('--a','--b') }
             (Get-TaskFingerprint -Task $a) | Should -Not -Be (Get-TaskFingerprint -Task $b)
         }
+
+        It 'fingerprint is unchanged when there are no fallbacks (back-compat)' {
+            # A task object WITHOUT a Runners/Fallbacks contribution must hash exactly as before.
+            $task = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort='high'; Prompt='do it'; ExtraArgs=@('--x') }
+            $withEmpty = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort='high'; Prompt='do it'; ExtraArgs=@('--x'); Runners=@(); Fallbacks=@() }
+            (Get-TaskFingerprint -Task $task) | Should -Be (Get-TaskFingerprint -Task $withEmpty)
+        }
+
+        It 'fingerprint changes when a fallback is added' {
+            $base = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@() }
+            $withFb = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@();
+                Runners=@(
+                    [pscustomobject]@{ Cli='claude'; Models=@('m'); Effort=$null; ExtraArgs=@() },
+                    [pscustomobject]@{ Cli='codex'; Models=@('gpt-5.5'); Effort=$null; ExtraArgs=@() }
+                ) }
+            (Get-TaskFingerprint -Task $base) | Should -Not -Be (Get-TaskFingerprint -Task $withFb)
+        }
+
+        It 'fingerprint is identical for string vs 1-element-array fallback model' {
+            $a = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@();
+                Runners=@([pscustomobject]@{ Cli='claude'; Models=@('m'); Effort=$null; ExtraArgs=@() }, [pscustomobject]@{ Cli='codex'; Models=@('g'); Effort=$null; ExtraArgs=@() }) }
+            $b = [pscustomobject]@{ Name='a'; Cli='claude'; ProjectPath='C:\p'; Model='m'; Models=@('m'); Effort=$null; Prompt='X'; ExtraArgs=@();
+                Runners=@([pscustomobject]@{ Cli='claude'; Models=@('m'); Effort=$null; ExtraArgs=@() }, [pscustomobject]@{ Cli='codex'; Models=@('g'); Effort=$null; ExtraArgs=@() }) }
+            (Get-TaskFingerprint -Task $a) | Should -Be (Get-TaskFingerprint -Task $b)
+        }
     }
 
     Context 'CSV escaping (Task 4 runs.csv)' {
@@ -1293,6 +1318,93 @@ Ripgrep is not available. Falling back to GrepTool.
             $result.ExitCode | Should -Be 0
             $result.OutputText | Should -Match 'OK'
             $Error[0].Exception.Message | Should -Not -Match 'LiteralPath'
+        }
+    }
+
+    Context 'Get-ResetTimeFromErrorText (usage-limit reset parsing, v1.0.1)' {
+        # Regression for the v1.0.0 operator-precedence bug: the -replace inside ParseExact() bound
+        # its comma as a method-arg separator, so every "try again at <time>" silently failed to
+        # parse and the runner fell back to the configured wait. These lock in correct parsing and
+        # the new date-aware behavior.
+
+        It 'parses a bare clock time ("try again at 7:21 PM") — the exact codex bug case' {
+            $msg = "You've hit your usage limit. Upgrade to Pro or try again at 7:21 PM."
+            $reset = Get-ResetTimeFromErrorText -ErrorText $msg
+            $reset | Should -Not -BeNullOrEmpty
+            $reset.Hour | Should -Be 19
+            $reset.Minute | Should -Be 21
+        }
+
+        It 'parses it through the real codex output parser end-to-end' {
+            $out = '{"type":"error","message":"You''ve hit your usage limit. Upgrade to Pro or try again at 7:21 PM."}'
+            $result = ConvertFrom-CliOutput -Cli codex -OutputText $out -ExitCode 1 -StdOut ''
+            $result.IsLimit | Should -Be $true
+            $reset = Get-ResetTimeFromErrorText -ErrorText $result.ErrorText
+            $reset.Hour | Should -Be 19
+            $reset.Minute | Should -Be 21
+        }
+
+        It 'parses "resets at" and "available again at" phrasings' {
+            (Get-ResetTimeFromErrorText -ErrorText 'resets at 7:21 PM').Hour | Should -Be 19
+            (Get-ResetTimeFromErrorText -ErrorText 'available again at 7:21 PM').Hour | Should -Be 19
+        }
+
+        It 'parses a 24-hour clock and an hour-only am/pm clock' {
+            (Get-ResetTimeFromErrorText -ErrorText 'try again at 19:21').Hour | Should -Be 19
+            $h = Get-ResetTimeFromErrorText -ErrorText 'try again at 7pm'
+            $h.Hour | Should -Be 19
+            $h.Minute | Should -Be 0
+        }
+
+        It 'rolls a bare clock that is already past to tomorrow' {
+            $past = (Get-Date).AddHours(-2)
+            $clock = $past.ToString('h:mm tt')
+            $reset = Get-ResetTimeFromErrorText -ErrorText "try again at $clock"
+            $reset | Should -BeGreaterThan (Get-Date)
+            $reset.Date | Should -Be (Get-Date).Date.AddDays(1)
+        }
+
+        It 'keeps a bare clock that is still in the future on today' {
+            $future = (Get-Date).AddHours(2)
+            $clock = $future.ToString('h:mm tt')
+            $reset = Get-ResetTimeFromErrorText -ErrorText "try again at $clock"
+            $reset.Date | Should -Be (Get-Date).Date
+        }
+
+        It 'parses a textual date with a clock ("Jun 16, 7:21 PM" / "June 16 7:21 PM")' {
+            foreach ($msg in @('try again at Jun 16, 7:21 PM', 'resets at June 16 7:21 PM')) {
+                $reset = Get-ResetTimeFromErrorText -ErrorText $msg
+                $reset | Should -Not -BeNullOrEmpty
+                $reset.Month | Should -Be 6
+                $reset.Day | Should -Be 16
+                $reset.Hour | Should -Be 19
+            }
+        }
+
+        It 'parses an ISO date with a space or T separator' {
+            foreach ($msg in @('try again at 2099-01-02 08:30', 'try again at 2099-01-02T08:30')) {
+                $reset = Get-ResetTimeFromErrorText -ErrorText $msg
+                $reset.Year | Should -Be 2099
+                $reset.Month | Should -Be 1
+                $reset.Day | Should -Be 2
+                $reset.Hour | Should -Be 8
+                $reset.Minute | Should -Be 30
+            }
+        }
+
+        It 'still parses relative "try again in", "reset after", and retryDelay forms' {
+            $now = Get-Date
+            $inText = Get-ResetTimeFromErrorText -ErrorText 'try again in 1 hour 5 minutes'
+            [int][Math]::Round(($inText - $now).TotalMinutes) | Should -BeIn @(64, 65, 66)
+            $after = Get-ResetTimeFromErrorText -ErrorText 'reset after 2m'
+            [int][Math]::Round(($after - $now).TotalMinutes) | Should -BeIn @(1, 2)
+            $delay = Get-ResetTimeFromErrorText -ErrorText '"retryDelay": "45s"'
+            [int][Math]::Round(($delay - $now).TotalSeconds) | Should -BeIn @(44, 45, 46)
+        }
+
+        It 'returns $null when no reset time is present' {
+            Get-ResetTimeFromErrorText -ErrorText 'some unrelated error with no time' | Should -BeNullOrEmpty
+            Get-ResetTimeFromErrorText -ErrorText '' | Should -BeNullOrEmpty
         }
     }
 
