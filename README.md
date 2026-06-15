@@ -1,12 +1,13 @@
 <h1 align="center">LimitShift</h1>
 
 <p align="center">
-  <strong>Give your AI coding CLI a to-do list and walk away — when you hit your usage limit, LimitShift waits for the reset and picks up exactly where it left off.</strong>
+  <strong>Give your AI coding CLI a to-do list and walk away. Hit your usage limit? Not a problem — LimitShift waits for the reset and picks up exactly where it left off.</strong>
 </p>
 
 <p align="center">
   <a href="#what-is-limitshift">What is it</a> ·
   <a href="#why-limitshift">Why</a> ·
+  <a href="#who-is-limitshift-for">Who it's for</a> ·
   <a href="#key-features">Features</a> ·
   <a href="#get-started">Get started</a> ·
   <a href="#write-your-to-do-list">Write your list</a> ·
@@ -20,7 +21,7 @@
 
 LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, Antigravity (`agy`), or GitHub Copilot (`copilot`)** through a list of tasks, one at a time. It drives the *command-line* version of those tools — if you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
-You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** Start a big list before bed and wake up to the work done (or as far as it got).
+You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit — it **sleeps until your quota resets, then continues the same conversation.** That's the whole idea behind the name: your usage limit stops being a wall you hit and start over from, and becomes a pause the queue slides across. Start a long list and let it work unattended — how far it gets depends on your quota and on how many prompts and how large the tasks are.
 
 You don't need to be a programmer. You do need to open a terminal once or twice — every step is spelled out.
 
@@ -30,25 +31,37 @@ You don't need to be a programmer. You do need to open a terminal once or twice 
 
 ## Why LimitShift?
 
-|  | Using the app or CLI directly | **LimitShift** |
-| --- | --- | --- |
-| You hit a usage limit mid-task | You stop and lose your place | **Waits for the reset, then resumes the same conversation** |
-| A long list of changes | Babysit each one by hand | **Queue them once and walk away** |
-| More than one AI tool | Switch tools manually | **Mix `claude`, `codex`, `gemini`, `agy`, `copilot` in one queue** |
-| Overnight / unattended runs | Not really possible | **Start before bed, done by morning** |
-| Running a local model | Look up the flags every time | **Built-in [Ollama](#run-with-local-models-through-ollama) support** |
+Each of these is a spot where the normal workflow breaks down — and what LimitShift does instead.
+
+- **You hit a usage limit mid-task.** Normally you stop and lose your pace. LimitShift waits for the reset and resumes the *same* conversation, so the AI keeps its memory of what it was doing.
+- **You have a long list of changes.** Your options are to babysit each one by hand, or queue them — but a plain queue stops the moment you hit the limit. LimitShift queues them *and* keeps going across the reset.
+- **You use more than one AI tool.** Switching by hand means opening loads of windows at once and remembering which one is on which task. LimitShift runs `claude`, `codex`, `gemini`, `agy`, and `copilot` from one list, one task at a time.
+- **You want overnight or unattended runs.** Queue the tasks and walk away. Just know they only run while you have quota — once the limit is reached, the queue pauses until it resets, so how far it gets by morning depends on how many prompts and how large the tasks are.
+- **Want to try a local model?** You could already run `claude` or `codex` interactively against [Ollama](#run-with-local-models-through-ollama) — LimitShift adds the part you couldn't do before: queue those local tasks and let them run unattended.
+
+---
+
+## Who is LimitShift for?
+
+Anyone who uses an AI coding app or agent CLI — Claude Code, Codex, Gemini, Antigravity, or GitHub Copilot — and hits usage limits. Instead of stopping and starting over, LimitShift waits for the reset and picks up where you left off.
+
+- **Multi-tool users** who run more than one CLI and want one queue instead of juggling windows.
+- **Anyone who wants unattended runs** — queue your tasks and walk away, whether overnight or while you work on something else.
+- **Ollama users** who want to queue local-model tasks through `claude` or `codex` and let them run hands-free.
+- **Non-programmers welcome** — if you can open a terminal and paste a command, every step is spelled out.
 
 ---
 
 ## Key Features
 
+- **Extremely light, nothing to install** — LimitShift itself is a single script you run in place: no package to install, no dependencies of its own (just the AI CLIs you already use, plus `jq` on Mac/Linux).
 - **Usage-limit aware** — detects the cap, works out when it resets, waits, and resumes the *same* session so the AI keeps its memory.
 - **Five CLIs, one queue** — `claude`, `codex`, `gemini`, Antigravity (`agy`), and `copilot`, mixable task by task.
+- **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
+- **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
 - **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
 - **[Completion checking](#completion-checking)** — keeps nudging a task across several rounds until the AI signals it's genuinely done.
 - **[Local models via Ollama](#run-with-local-models-through-ollama)** — run `claude` or `codex` against a model on your own machine.
-- **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
-- **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
 
 ---
 
@@ -72,9 +85,10 @@ No command-line experience needed — this uses buttons, links, and copy-paste.
    | [Claude](https://www.npmjs.com/package/@anthropic-ai/claude-code) | `npm install -g @anthropic-ai/claude-code` |
    | [Codex](https://www.npmjs.com/package/@openai/codex) | `npm install -g @openai/codex` |
    | [Gemini](https://www.npmjs.com/package/@google/gemini-cli) | `npm install -g @google/gemini-cli` |
-   | [Copilot](https://github.com/features/copilot#cli) | [Install GitHub Copilot CLI](https://github.com/github/gh-copilot) and run `copilot login` |
+   | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | `npm install -g @github/copilot` |
+   | [Antigravity (`agy`)](https://antigravity.google) | No npm: **Win** `irm https://antigravity.google/cli/install.ps1 &#124; iex` · **Mac/Linux** `curl -fsSL https://antigravity.google/cli/install.sh &#124; bash` |
 
-   **[Antigravity (`agy`)](https://antigravity.google)** — Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise) — installs **without Node**: on **Windows** run `irm https://antigravity.google/cli/install.ps1 | iex`, on **Mac/Linux** run `curl -fsSL https://antigravity.google/cli/install.sh | bash`.
+   Antigravity is Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise).
 4. **Get LimitShift's files without Git** using the free [GitHub Desktop](https://desktop.github.com) app: **File → Clone repository → URL**, paste `https://github.com/j-ts/limitshift`, and clone it somewhere you'll remember. (Or click the green **Code → Download ZIP** on the project page and unzip it.)
 5. **Open that folder in a terminal:** in File Explorer (Windows), right-click inside the folder → **"Open in Terminal"**. On Mac, type `cd ` in Terminal then drag the folder onto the window.
 6. **Unblock the script (one time):**
@@ -92,8 +106,8 @@ cd limitshift
 
 # install whichever CLIs you use:
 npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
-# GitHub Copilot CLI (requires GitHub CLI 'gh' to be installed first):
-gh extension install github/gh-copilot && copilot login
+# GitHub Copilot CLI (https://github.com/github/copilot-cli):
+npm install -g @github/copilot
 
 # Antigravity (agy) — Google's Gemini CLI successor — installs separately (no npm):
 #   Windows:   irm https://antigravity.google/cli/install.ps1 | iex
@@ -217,9 +231,9 @@ With `completionCheck: false` ("simple mode"), the prompt runs once and the task
 
 ### Run with local models through Ollama
 
-***Supported by `claude` and `codex` only*** (Gemini and Antigravity have no local-model path).
+***Supported by `claude` and `codex` only*** — Gemini and Antigravity have no local-model path.
 
-Run a task on a local [Ollama](https://ollama.com) model — handy when you've hit a usage limit, want to work offline, or want to keep a task on your own machine. Set `model` to the Ollama model name and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. Install Ollama and pull a model first (e.g. `ollama pull qwen3.5:9b`).
+Running a task against a local [Ollama](https://ollama.com) model is handy when you've hit a usage limit, want to work offline, or want to keep a task on your own machine. Install Ollama and pull a model first (e.g. `ollama pull qwen3.5:9b`), set `model` to that model's name, and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. Local runs skip the cloud usage check. The same config shape works for both CLIs:
 
 ```json
 {
@@ -236,7 +250,12 @@ Run a task on a local [Ollama](https://ollama.com) model — handy when you've h
 }
 ```
 
-Codex talks to Ollama natively; Claude has no Ollama flag, so LimitShift runs it via `ollama launch claude --model <model> --yes -- <claude args>` — so `model` is **required** for a local claude task and `ollama` must be on PATH. Local runs skip the cloud usage check. To edit files, still add a permission flag, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]`.
+The two CLIs reach Ollama by different routes, and LimitShift handles the difference for you:
+
+- **Codex** talks to Ollama natively — the same `codex` you already run. The flags pass straight through, and you don't strictly need to set `model` (Codex falls back to its own default), though naming it is clearer.
+- **Claude** is different: the regular Claude *app* can't talk to Ollama — only the CLI can, and only through Ollama's own launcher. So LimitShift runs Claude via `ollama launch claude --model <model> --yes -- <claude args>`. You still write the same `["--oss", "--local-provider", "ollama"]` (LimitShift uses it as the signal to take the local route, then drops the flags Claude doesn't understand), but here `model` is **required** and `ollama` must be on your PATH next to `claude`.
+
+To edit files, the local-provider flags aren't enough — they only pick the model. Add the matching [permission flag](#permissions) too, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]` for Claude or `["--oss", "--local-provider", "ollama", "--sandbox", "workspace-write"]` for Codex.
 
 ### Model rotation
 
@@ -280,12 +299,6 @@ Each queue file gets its own isolated state folder. The recommended workflow for
 **Concurrency lock:** if you accidentally start the same queue twice, the second run detects the lock file left by the first and exits immediately with an error naming the queue and the running PID. Once the first run finishes (or is killed), the lock is released and you can start again. To force-unlock a stale lock after an unexpected crash, delete `.limitshift-<queue-name>/limitshift.lock`.
 
 **Mixed-project queues:** you can still put tasks for multiple projects inside one queue using per-task `projectPath` values — this remains fully supported. Separate queue files are recommended when you want parallel execution or clearer state separation.
-
----
-
-## About the name
-
-The name *is* the idea. Your usage limit normally stops being a speed bump and becomes a wall — you hit it mid-task and start over later. LimitShift **shifts** the work across that wall instead: it parks the queue the moment you run out of quota and slides it forward the instant the limit resets. You set the tasks once; the limit turns into a pause, not a full stop. ⏳
 
 ---
 
@@ -398,7 +411,7 @@ Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `
 
 | Message | Fix |
 | --- | --- |
-| `Config file is not valid JSON` | Check for trailing/missing commas or bad escaping (use forward slashes in paths) |
+| `Config file is not valid JSON` | Check for trailing/missing commas or bad escaping (use forward slashes in paths). If you edited it by hand, paste it into a validator like [classic.online-json.com/json-validator](https://classic.online-json.com/json-validator) to pinpoint the error |
 | `Task N is missing required JSON property` | Add the missing `name`, `cli`, `projectPath`, or `prompt` |
 | `Allowed values: claude, codex, gemini, agy, copilot` | Fix the `cli` value |
 | `Project path does not exist` | Fix the path or create the folder |
