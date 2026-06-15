@@ -249,16 +249,15 @@ Running a task against a local [Ollama](https://ollama.com) model is handy when 
 }
 ```
 
-The two CLIs reach Ollama by different routes, and LimitShift handles the difference for you:
+**Codex** talks to Ollama natively. **Claude** requires Ollama's launcher, so LimitShift runs it via `ollama launch claude`. For Claude, `model` is **required** and `ollama` must be on your PATH. You write the same `extraArgs` for both; LimitShift handles the routing.
 
-- **Codex** talks to Ollama natively, the same `codex` you already run. The flags pass straight through, and you don't strictly need to set `model` (Codex falls back to its own default), though naming it is clearer.
-- **Claude** is different: the regular Claude *app* can't talk to Ollama. Only the CLI can, and only through Ollama's own launcher. So LimitShift runs Claude via `ollama launch claude --model <model> --yes -- <claude args>`. You still write the same `["--oss", "--local-provider", "ollama"]` (LimitShift uses it as the signal to take the local route, then drops the flags Claude doesn't understand), but here `model` is **required** and `ollama` must be on your PATH next to `claude`.
-
-To edit files, the local-provider flags aren't enough; they only pick the model. Add the matching [permission flag](REFERENCE.md#permissions) too, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]` for Claude or `["--oss", "--local-provider", "ollama", "--sandbox", "workspace-write"]` for Codex.
+To edit files, add a [permission flag](REFERENCE.md#permissions) alongside the Ollama flags, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]` for Claude or `["--oss", "--local-provider", "ollama", "--sandbox", "workspace-write"]` for Codex.
 
 ### Model rotation
 
-Set `model` to an **array** of names in preference order (most useful for Gemini, e.g. `["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]`). On a usage limit, LimitShift switches to the next model and retries immediately in the same conversation, no waiting. Only once every listed model is capped does it fall back to waiting for a reset, then restarts from the first model. The current position is remembered per task.
+Set `model` to an **array** of names in preference order (e.g. `["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"]`). On a usage limit, LimitShift switches to the next model and retries immediately in the same conversation, no waiting. Only once every listed model is capped does it fall back to waiting for a reset, then restarts from the first model. The current position is remembered per task.
+
+Model rotation is not limited by CLI tool, but in practice it is most useful on Gemini and Antigravity because they have separate usage limits for different model tiers.
 
 ### Turn off your PC when it finishes
 
