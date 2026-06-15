@@ -2674,6 +2674,50 @@ check "fallbacks: valid queue validates"           0 "Config OK"             -- 
 check "fallbacks: bad cli rejected"                2 "Task 1.*fallback.*claude, codex, gemini, agy, copilot" -- bash "$SCRIPT" --queue "$CONFIGS/broken-fallback-bad-cli.json" --validate-only
 check "fallbacks: bad effort rejected"             2 "Task 1.*fallback.*gemini has no effort flag" -- bash "$SCRIPT" --queue "$CONFIGS/broken-fallback-bad-effort.json" --validate-only
 
+run_git_requirement_test() {
+  local desc="CLI rotation (fallbacks) — git requirement"
+  local root="$TMP_ROOT/git-req"
+  local project_dir="$root/project"
+  local queue_no_git="$root/queue-no-git.json"
+  local queue_with_git="$root/queue-with-git.json"
+
+  mkdir -p "$project_dir"
+
+  # 1. Rejects non-git
+  cat > "$queue_no_git" <<EOF
+{
+  "tasks": [
+    { "name": "t", "cli": "claude", "projectPath": "$project_dir", "prompt": "p",
+      "fallbacks": [ { "cli": "codex", "model": "gpt-5.5" } ] }
+  ]
+}
+EOF
+  check "$desc: rejects non-git" 2 "Task 1.*fallbacks.*not a git repository" -- bash "$SCRIPT" --queue "$queue_no_git" --validate-only
+
+  # 2. Accepts git init
+  git -C "$project_dir" init -q
+  cat > "$queue_with_git" <<EOF
+{
+  "tasks": [
+    { "name": "t", "cli": "claude", "projectPath": "$project_dir", "prompt": "p",
+      "fallbacks": [ { "cli": "codex", "model": "gpt-5.5" } ] }
+  ]
+}
+EOF
+  check "$desc: accepts git repo" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_with_git" --validate-only
+
+  # 3. No-fallbacks unaffected
+  local queue_no_fb="$root/queue-no-fb.json"
+  local no_git_project="$root/no-git-project"
+  mkdir -p "$no_git_project"
+  cat > "$queue_no_fb" <<EOF
+{
+  "tasks": [ { "name": "t", "cli": "claude", "projectPath": "$no_git_project", "prompt": "p" } ]
+}
+EOF
+  check "$desc: no-fallbacks unaffected" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_no_fb" --validate-only
+}
+
 run_dry_run_state_test
 run_codex_limit_resume_test
 run_duplicate_name_test
@@ -2872,6 +2916,7 @@ run_probe_models_optin_test
 run_fingerprint_fallback_test
 run_fingerprint_backcompat_test
 run_fingerprint_normalized_model_test
+run_git_requirement_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

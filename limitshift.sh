@@ -101,6 +101,16 @@ ui_color() {
   fi
 }
 
+is_git_repo() {
+  local p="$1"
+  git -C "$p" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+has_commits() {
+  local p="$1"
+  git -C "$p" rev-parse HEAD >/dev/null 2>&1
+}
+
 # Soft section marker (replaces the heavy ==== ... ==== banner).
 write_step() {
   printf '\n'
@@ -772,6 +782,19 @@ read_queue_config() {
     if [ ! -d "$path" ]; then
       echo "Project path does not exist for task $n: $path" >&2
       exit 2
+    fi
+
+    # Task 4.2: Require a git working tree for tasks with fallbacks.
+    local r_count; r_count=$(get_task_runner_count "$i")
+    if [ "$r_count" -gt 1 ]; then
+      if ! is_git_repo "$path"; then
+        echo "Task $n (\"$(task_field "$i" "name")\") has fallbacks, which requires the projectPath to be a git repository. The provided projectPath is not a git repository: $path" >&2
+        exit 2
+      fi
+      if ! has_commits "$path"; then
+        ui_color "$UI_YELLOW" "[$GLYPH_STAR] Task $n WARNING: projectPath $path is a git repository but has no commits. Fingerprinting and handoff (git diff) will be less precise. Guidance: commit a baseline before starting rotation work."
+        echo
+      fi
     fi
 
     # Task 2.2: Validate all runners (task + fallbacks)
