@@ -17,6 +17,8 @@ REFRESH_CAPABILITIES=0
 PROBE_MODELS=0
 DEMO=0
 LIMITSHIFT_SOURCE_ONLY="${LIMITSHIFT_SOURCE_ONLY:-0}"
+# Snapshot TTY status before any pipe (e.g. tee) replaces fd 1 with a pipe.
+_STDOUT_IS_TTY=0; if [ -t 1 ]; then _STDOUT_IS_TTY=1; fi
 MODEL_VALIDATION="strictWhenDiscoverable"
 CAPABILITY_CACHE_HOURS=24
 
@@ -85,8 +87,9 @@ UI_TASK_START_EPOCH=0
 UI_SPINNER_PID=""
 
 # stdout TTY test, used by every helper that might animate or colorize.
+# Uses the snapshot taken at startup so the tee pipe doesn't suppress colors.
 ui_animatable() {
-  if [ -t 1 ]; then return 0; else return 1; fi
+  [ "$_STDOUT_IS_TTY" = "1" ]
 }
 
 # ui_color FG TEXT — colored text on a TTY, plain text otherwise.
