@@ -1,6 +1,10 @@
 <h1 align="center">LimitShift</h1>
 
 <p align="center">
+  <strong>English</strong> · <a href="README.uk.md">Українська</a>
+</p>
+
+<p align="center">
   <strong>Give your agentic CLI a to-do list and walk away. Different CLIs, one queue, quota aware.</strong>
 </p>
 

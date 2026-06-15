@@ -1,6 +1,10 @@
 <h1 align="center">LimitShift</h1>
 
 <p align="center">
+  <a href="README.md">English</a> · <strong>Українська</strong>
+</p>
+
+<p align="center">
   <strong>Дайте своєму агентному CLI список завдань і йдіть у своїх справах. Різні CLI, одна черга, з урахуванням лімітів.</strong>
 </p>
 
