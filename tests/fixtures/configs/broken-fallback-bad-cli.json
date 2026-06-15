@@ -1,0 +1,6 @@
+{
+  "tasks": [
+    { "name": "t", "cli": "claude", "projectPath": ".", "prompt": "p",
+      "fallbacks": [ { "cli": "not-a-cli" } ] }
+  ]
+}

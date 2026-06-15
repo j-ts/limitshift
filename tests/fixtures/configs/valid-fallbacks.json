@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "name": "rotate-task",
+      "cli": "claude",
+      "model": ["opus", "sonnet"],
+      "projectPath": ".",
+      "prompt": "do it",
+      "extraArgs": ["--permission-mode", "acceptEdits"],
+      "fallbacks": [
+        { "cli": "codex", "model": "gpt-5.5", "extraArgs": ["--sandbox", "workspace-write"] },
+        { "cli": "gemini", "model": ["gemini-3-flash-preview", "gemini-2.5-pro"], "extraArgs": ["--approval-mode", "auto_edit"] }
+      ]
+    }
+  ]
+}
