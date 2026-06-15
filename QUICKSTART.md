@@ -47,11 +47,11 @@ Keep the machine awake for long runs. On macOS, for example: `caffeinate -i ./li
 
 ## State & re-running
 
-All of LimitShift's memory lives in one folder, `limitshift-limitshift-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `limitshift-log.txt`, and a `_README.txt` describing it all.
+All of LimitShift's memory lives in one folder, `limitshift-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `limitshift-log.txt`, and a `_README.txt` describing it all.
 
 - Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` **auto-invalidates** its done marker, so that task re-runs with a fresh session next time.
 - To re-run one finished task, delete its `status/task-NN.done` file.
-- To start over completely, delete the whole `limitshift-limitshift-queue/` folder.
+- To start over completely, delete the whole `limitshift-queue/` folder.
 - The entire state folder is **safe to delete at any time** — it is rebuilt on the next run.
 
 ## Running multiple queues in parallel

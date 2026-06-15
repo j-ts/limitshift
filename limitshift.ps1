@@ -52,9 +52,15 @@ if (-not $LoadFunctionsOnly) {
     $QueueRootPath = Split-Path -Parent $QueuePath
     $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
     $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
-    # State folder is limitshift-<name> (visible, no dot prefix). Legacy dot-prefixed folders
-    # (.limitshift-<name> and the older .ai-runner-<name>) are migrated automatically on startup.
-    $RunnerStatePath = Join-Path $QueueRootPath "limitshift-$RunnerName"
+    # Strip the "limitshift-" prefix to avoid stutter (limitshift-limitshift-queue -> limitshift-queue).
+    $StateName = $RunnerName
+    if ($StateName -like 'limitshift-*') {
+        $StateName = $StateName.Substring('limitshift-'.Length)
+    }
+    # State folder is limitshift-<name> (visible, no dot prefix). Legacy folders are migrated on startup.
+    $RunnerStatePath = Join-Path $QueueRootPath "limitshift-$StateName"
+    # Pre-dedup stuttered name (limitshift-limitshift-<name>) for migration.
+    $StutteredStatePath = if ($StateName -ne $RunnerName) { Join-Path $QueueRootPath "limitshift-$RunnerName" } else { $null }
     $LegacyDotStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
     $LegacyRunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
     $SessionStatePath = Join-Path $RunnerStatePath "sessions"
@@ -608,7 +614,7 @@ function Invoke-UiDemo {
     # so the demo summary takes the "all completion-check, all succeeded" variant. Log path here
     # is illustrative only - nothing is written.
     Write-UiSummary -TaskCount $count -DoneCount $count -SkippedCount 0 -FailedCount 0 -AllCompletionCheck $true `
-        -LogPath '.\limitshift-limitshift-queue\limitshift-log.txt' -StatePath '.\limitshift-limitshift-queue'
+        -LogPath '.\limitshift-queue\limitshift-log.txt' -StatePath '.\limitshift-queue'
 }
 
 function New-DirectoryIfMissing {
@@ -620,16 +626,19 @@ function New-DirectoryIfMissing {
 }
 
 function Initialize-RunnerState {
-    # Migrate legacy dot-prefixed state folders to the current visible name.
-    # .ai-runner-<name> -> .limitshift-<name> -> limitshift-<name> (current)
+    # Migrate legacy state folders to the current name.
     if (-not (Test-Path -LiteralPath $RunnerStatePath)) {
-        if (Test-Path -LiteralPath $LegacyDotStatePath) {
+        if ($null -ne $StutteredStatePath -and (Test-Path -LiteralPath $StutteredStatePath)) {
+            Move-Item -LiteralPath $StutteredStatePath -Destination $RunnerStatePath
+            Write-Host "Migrated state folder limitshift-$RunnerName -> limitshift-$StateName"
+        }
+        elseif (Test-Path -LiteralPath $LegacyDotStatePath) {
             Move-Item -LiteralPath $LegacyDotStatePath -Destination $RunnerStatePath
-            Write-Host "Migrated state folder .limitshift-$RunnerName -> limitshift-$RunnerName"
+            Write-Host "Migrated state folder .limitshift-$RunnerName -> limitshift-$StateName"
         }
         elseif (Test-Path -LiteralPath $LegacyRunnerStatePath) {
             Move-Item -LiteralPath $LegacyRunnerStatePath -Destination $RunnerStatePath
-            Write-Host "Migrated state folder .ai-runner-$RunnerName -> limitshift-$RunnerName"
+            Write-Host "Migrated state folder .ai-runner-$RunnerName -> limitshift-$StateName"
         }
     }
 

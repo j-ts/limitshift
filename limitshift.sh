@@ -617,7 +617,7 @@ ui_demo() {
     k=$((k + 1))
   done
 
-  ui_summary "$count" "$count" 0 0 1 './limitshift-limitshift-queue/limitshift-log.txt' './limitshift-limitshift-queue' 0
+  ui_summary "$count" "$count" 0 0 1 './limitshift-queue/limitshift-log.txt' './limitshift-queue' 0
 }
 
 # --- Functional core (parity with limitshift.sh) -----------------------------
@@ -1763,14 +1763,14 @@ invoke_cli_task_run() {
     # Dry-run prints the assembled command at column 0 so it's greppable - the whole point of
     # dry-run is "show me what would run". Format matches the pre-preview-UI style intentionally.
     local cmd_display
-    cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
+    cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | tr '\n' ' ')
     printf 'Command: %s %s\n' "$CLI_EXE" "${cmd_display% }"
     R_OK=1; R_IS_LIMIT=0; R_TEXT="[dry-run]"; R_SESSION_ID=""; R_ERROR_TEXT=""
     return
   fi
   if [ "$SHOW_RAW" -eq 1 ]; then
     local cmd_display
-    cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | sed ':a;N;$!ba;s/\n/\\n/g')
+    cmd_display=$(printf '%s ' "${CLI_ARGS[@]}" | tr -d '\r' | tr '\n' ' ')
     ui_color "$UI_DIM" "  $GLYPH_DOT command: $CLI_EXE ${cmd_display% }"
     printf '\n'
   fi
@@ -1829,14 +1829,17 @@ invoke_cli_task_run() {
 }
 
 initialize_runner_state() {
-  # Migrate legacy dot-prefixed state folders to the current visible name.
+  # Migrate legacy state folders to the current name.
   if [ ! -d "$RUNNER_STATE_PATH" ]; then
-    if [ -d "$LEGACY_DOT_STATE_PATH" ]; then
+    if [ "$STUTTERED_STATE_PATH" != "$RUNNER_STATE_PATH" ] && [ -d "$STUTTERED_STATE_PATH" ]; then
+      mv "$STUTTERED_STATE_PATH" "$RUNNER_STATE_PATH"
+      echo "Migrated state folder limitshift-$RUNNER_NAME -> limitshift-$STATE_NAME"
+    elif [ -d "$LEGACY_DOT_STATE_PATH" ]; then
       mv "$LEGACY_DOT_STATE_PATH" "$RUNNER_STATE_PATH"
-      echo "Migrated state folder .limitshift-$RUNNER_NAME -> limitshift-$RUNNER_NAME"
+      echo "Migrated state folder .limitshift-$RUNNER_NAME -> limitshift-$STATE_NAME"
     elif [ -d "$LEGACY_RUNNER_STATE_PATH" ]; then
       mv "$LEGACY_RUNNER_STATE_PATH" "$RUNNER_STATE_PATH"
-      echo "Migrated state folder .ai-runner-$RUNNER_NAME -> limitshift-$RUNNER_NAME"
+      echo "Migrated state folder .ai-runner-$RUNNER_NAME -> limitshift-$STATE_NAME"
     fi
   fi
   mkdir -p "$RUNNER_STATE_PATH"
@@ -1935,7 +1938,11 @@ QUEUE_DIR="$(cd "$(dirname "$QUEUE_PATH")" && pwd)"
 QUEUE_FILE_NAME="$(basename "$QUEUE_PATH")"
 QUEUE_PATH="$QUEUE_DIR/$QUEUE_FILE_NAME"
 RUNNER_NAME="${QUEUE_FILE_NAME%.*}"
-RUNNER_STATE_PATH="$QUEUE_DIR/limitshift-$RUNNER_NAME"
+# Strip "limitshift-" prefix to avoid stutter (limitshift-limitshift-queue -> limitshift-queue).
+STATE_NAME="$RUNNER_NAME"
+case "$STATE_NAME" in limitshift-*) STATE_NAME="${STATE_NAME#limitshift-}" ;; esac
+RUNNER_STATE_PATH="$QUEUE_DIR/limitshift-$STATE_NAME"
+STUTTERED_STATE_PATH="$QUEUE_DIR/limitshift-$RUNNER_NAME"
 LEGACY_DOT_STATE_PATH="$QUEUE_DIR/.limitshift-$RUNNER_NAME"
 LEGACY_RUNNER_STATE_PATH="$QUEUE_DIR/.ai-runner-$RUNNER_NAME"
 SESSION_STATE_PATH="$RUNNER_STATE_PATH/sessions"

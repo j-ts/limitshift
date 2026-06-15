@@ -99,7 +99,7 @@ More autonomy means more risk — run only against Git-backed folders.
 
 ## Where LimitShift saves state
 
-Everything lives in `limitshift-<queue-name>/` next to your queue (for the default file, `limitshift-limitshift-queue/`): session ids (to resume the same conversation), `outputs/` (raw output per run), `status/` (`.done` / `.failed` markers), `runs.csv`, and a log.
+Everything lives in `limitshift-<queue-name>/` next to your queue (for the default file, `limitshift-queue/`): session ids (to resume the same conversation), `outputs/` (raw output per run), `status/` (`.done` / `.failed` markers), `runs.csv`, and a log.
 
 Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` auto-invalidates its `.done` marker and re-runs it with a fresh session; untouched tasks stay skipped. Delete a single `status/task-NN.done` to re-run one task, or delete the whole folder to start over — it's rebuilt on the next run.
 
