@@ -78,6 +78,46 @@
               { "type": "array", "items": { "type": "string" } }
             ],
             "description": "Extra CLI flags (array form is safest). Permission flags go here (claude --permission-mode acceptEdits, codex --sandbox workspace-write, gemini --approval-mode auto_edit, agy --dangerously-skip-permissions, copilot recommended edit mode: --allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*) --deny-tool=shell(git push) --no-ask-user; full automation: --allow-all --no-ask-user). To run a local Ollama model, include --oss --local-provider ollama: codex passes these through natively, while claude is rewritten as 'ollama launch claude --model <model> --yes -- <claude args>'. (agy/copilot have no Ollama path.)"
+          },
+          "fallbacks": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Backup runners tried in order when the primary runner hits a usage limit or fails persistently (CLI rotation). Each entry is a self-contained tool config. Requires projectPath to be a git working tree.",
+            "items": {
+              "type": "object",
+              "required": ["cli"],
+              "additionalProperties": false,
+              "properties": {
+                "cli": { "enum": ["claude", "codex", "gemini", "agy", "copilot"] },
+                "model": {
+                  "oneOf": [
+                    { "type": "string" },
+                    { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                  ]
+                },
+                "effort": { "enum": [null, "minimal", "low", "medium", "high", "xhigh", "max"] },
+                "extraArgs": {
+                  "oneOf": [
+                    { "type": "string" },
+                    { "type": "array", "items": { "type": "string" } }
+                  ]
+                }
+              },
+              "allOf": [
+                { "if": { "properties": { "cli": { "const": "gemini" } }, "required": ["cli"] },
+                  "then": { "properties": { "effort": { "enum": [null] } } } },
+                { "if": { "properties": { "cli": { "const": "agy" } }, "required": ["cli"] },
+                  "then": { "properties": { "effort": { "enum": [null] } } } },
+                { "if": { "properties": { "cli": { "const": "copilot" } }, "required": ["cli"] },
+                  "then": { "properties": { "effort": { "enum": [null, "low", "medium", "high", "xhigh", "max"] } } } },
+                { "if": { "properties": { "cli": { "const": "claude" } }, "required": ["cli"] },
+                  "then": { "properties": { "effort": { "enum": [null, "low", "medium", "high", "xhigh", "max"] } } } },
+                { "if": { "properties": { "cli": { "const": "claude" }, "model": { "pattern": "(?i)haiku" } }, "required": ["cli", "model"] },
+                  "then": { "properties": { "effort": { "enum": [null] } } } },
+                { "if": { "properties": { "cli": { "const": "codex" } }, "required": ["cli"] },
+                  "then": { "properties": { "effort": { "enum": [null, "minimal", "low", "medium", "high", "xhigh"] } } } }
+              ]
+            }
           }
         },
         "allOf": [
