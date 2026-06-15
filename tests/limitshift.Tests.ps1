@@ -407,6 +407,30 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'CLI rotation (fallbacks) — reset time' {
+        It 'parses a reset time from a non-claude limit error' {
+            $r = Get-RunnerResetTime -Cli 'gemini' -ErrorText 'Quota exceeded. Try again in 2h 0m.' -LimitWaitMinutes 30
+            ($r - (Get-Date)).TotalMinutes | Should -BeGreaterThan 100
+        }
+        It 'falls back to limitWaitMinutes when no reset is parseable' {
+            $r = Get-RunnerResetTime -Cli 'codex' -ErrorText 'rate limit, no time here' -LimitWaitMinutes 30
+            ($r - (Get-Date)).TotalMinutes | Should -BeGreaterThan 25
+            ($r - (Get-Date)).TotalMinutes | Should -BeLessThan 35
+        }
+        It 'uses SessionReset for Claude when present' {
+            $now = Get-Date
+            $usage = @{ SessionReset = $now.AddMinutes(45) }
+            $r = Get-RunnerResetTime -Cli 'claude' -ErrorText 'rate limit' -LimitWaitMinutes 30 -ClaudeUsage $usage
+            $r | Should -Be $usage.SessionReset
+        }
+        It 'uses WeekReset for Claude when present' {
+            $now = Get-Date
+            $usage = @{ WeekReset = $now.AddDays(1) }
+            $r = Get-RunnerResetTime -Cli 'claude' -ErrorText 'rate limit' -LimitWaitMinutes 30 -ClaudeUsage $usage
+            $r | Should -Be $usage.WeekReset
+        }
+    }
+
     Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
         It 'appends the marker block when completionCheck is true' {
             $task = [pscustomobject]@{

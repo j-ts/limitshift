@@ -1174,6 +1174,53 @@ Got: $p"
   pass "$desc"
 }
 
+run_reset_time_test() {
+  local desc="CLI rotation — reset time capture"
+  local root="$TMP_ROOT/reset-time"
+  mkdir -p "$root/project"
+  local queue_path="$root/queue.json"
+  echo '{ "tasks": [ { "name": "t", "cli": "claude", "projectPath": ".", "prompt": "p" } ] }' > "$queue_path"
+  
+  # Source functions
+  # shellcheck disable=SC1090
+  LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" --queue "$queue_path"
+
+  local r now
+  now=$(date +%s)
+
+  # Non-claude: parse from error
+  r=$(get_runner_reset_epoch "gemini" "Quota exceeded. Try again in 2h 0m." 30 "")
+  if (( r < now + 7000 )); then
+    fail "$desc (non-claude parsed)" "Expected reset > 2h from now, got $r (now=$now)"
+    return 1
+  fi
+
+  # Non-claude: fallback to limitWaitMinutes
+  r=$(get_runner_reset_epoch "codex" "rate limit, no time here" 30 "")
+  if (( r < now + 1700 || r > now + 1900 )); then
+    fail "$desc (non-claude fallback)" "Expected reset ~30m (1800s) from now, got $r (now=$now)"
+    return 1
+  fi
+
+  # Claude: from usage (SessionReset)
+  local usage_session="SessionReset:$((now + 2700))|WeekReset:"
+  r=$(get_runner_reset_epoch "claude" "limit" 30 "$usage_session")
+  if [[ "$r" != "$((now + 2700))" ]]; then
+    fail "$desc (claude session)" "Expected $((now + 2700)), got $r"
+    return 1
+  fi
+
+  # Claude: from usage (WeekReset)
+  local usage_week="SessionReset:|WeekReset:$((now + 86400))"
+  r=$(get_runner_reset_epoch "claude" "limit" 30 "$usage_week")
+  if [[ "$r" != "$((now + 86400))" ]]; then
+    fail "$desc (claude week)" "Expected $((now + 86400)), got $r"
+    return 1
+  fi
+
+  pass "$desc"
+}
+
 run_legacy_queue_fallback_test() {
   local desc="legacy ai-run-queue.json is used (with a warning) when no new-name queue and no --queue"
   local root="$TMP_ROOT/legacy-queue-fallback"
@@ -2964,6 +3011,7 @@ run_fingerprint_fallback_test
 run_fingerprint_backcompat_test
 run_fingerprint_normalized_model_test
 run_handoff_note_test
+run_reset_time_test
 run_git_requirement_test
 
 echo

@@ -2341,6 +2341,18 @@ function Get-ResetTimeFromErrorText {
     return $null
 }
 
+function Get-RunnerResetTime {
+    param([string]$Cli, [string]$ErrorText, [int]$LimitWaitMinutes, $ClaudeUsage)
+
+    if ($Cli -eq 'claude' -and $null -ne $ClaudeUsage) {
+        if ($ClaudeUsage['WeekReset'])    { return $ClaudeUsage['WeekReset'] }
+        if ($ClaudeUsage['SessionReset']) { return $ClaudeUsage['SessionReset'] }
+    }
+    $parsed = Get-ResetTimeFromErrorText -ErrorText $ErrorText
+    if ($null -ne $parsed) { return $parsed }
+    return (Get-Date).AddMinutes($LimitWaitMinutes)
+}
+
 function Wait-ForLimitReset {
     param($Task, $Result, $Settings)
 

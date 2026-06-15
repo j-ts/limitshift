@@ -1376,6 +1376,23 @@ parse_reset_from_error() {
   R_RESET=""
 }
 
+get_runner_reset_epoch() {
+  local cli="$1" error_text="$2" wait_mins="$3" claude_usage="$4"
+  if [ "$cli" = "claude" ] && [ -n "$claude_usage" ]; then
+    local wr
+    wr=$(printf '%s' "$claude_usage" | grep -o 'WeekReset:[^|]*' | cut -d: -f2)
+    if [ -n "$wr" ]; then printf '%s\n' "$wr"; return; fi
+    local sr
+    sr=$(printf '%s' "$claude_usage" | grep -o 'SessionReset:[^|]*' | cut -d: -f2)
+    if [ -n "$sr" ]; then printf '%s\n' "$sr"; return; fi
+  fi
+  parse_reset_from_error "$error_text"
+  if [ -n "$R_RESET" ]; then printf '%s\n' "$R_RESET"; return; fi
+  local now
+  now=$(date +%s)
+  printf '%s\n' "$((now + wait_mins * 60))"
+}
+
 wait_for_limit_reset() {
   local cli="$1" error_text="$2" settings_wait="$3"
   if [ "$cli" = "claude" ]; then
