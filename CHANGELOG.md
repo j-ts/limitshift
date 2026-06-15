@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-15
+
+### Fixed
+- **Usage-limit reset times are now honored instead of being silently dropped (`limitshift.ps1`).** `Get-ResetTimeFromErrorText` always failed to parse the `try again at <time>` form: the `-replace` written inside the `[datetime]::ParseExact(...)` call had its comma bound as a method-argument separator, producing a four-argument `ParseExact` with no matching overload. The exception was swallowed by an empty `catch`, so a precise reset time (e.g. codex's `try again at 7:21 PM`) was discarded and the runner always fell back to the configured `limitWaitMinutes` wait — surfacing as `no reset time in the error · waiting the configured 30 min` even when the error clearly stated the time.
+
+### Added
+- **Date-aware reset parsing (`limitshift.ps1`).** Reset extraction now accepts an optional date in front of the clock, so `try again at Jun 16, 7:21 PM`, `resets at June 16 7:21 PM`, `2026-06-16 19:21`, and `2026-06-16T19:21` all parse, in addition to bare clocks (`7:21 PM`, `19:21`, `7pm`). Parsing uses `TryParseExact` (no exceptions in the loop) plus a loose `TryParse` fallback; bare clocks already past roll to tomorrow, and dated times without a year that are already past roll to next year.
+- **Regression tests** for `Get-ResetTimeFromErrorText` covering the original codex bug case (direct and end-to-end), the new date+time formats, clock roll-forward, the relative `try again in` / `reset after` / `retryDelay` branches, and the no-match case.
+
 ## [1.0.0] - 2026-06-15
 
 ### Added
