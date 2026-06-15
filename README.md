@@ -6,6 +6,7 @@
 
 <p align="center">
   <a href="#what-is-limitshift">What is it</a> ·
+  <a href="#supported-tools">Supported tools</a> ·
   <a href="#why-limitshift">Why</a> ·
   <a href="#who-is-limitshift-for">Who it's for</a> ·
   <a href="#key-features">Features</a> ·
@@ -19,13 +20,27 @@
 
 ## What is LimitShift?
 
-LimitShift is a tiny terminal app that runs **Codex, Claude, Gemini, Antigravity, or GitHub Copilot** through a list of tasks, one at a time. It drives the *command-line* version of those tools. If you've only ever used the app, you install the matching CLI once and sign in with the same account.
+LimitShift is a tiny terminal app that runs [five agentic CLIs](#supported-tools) through a list of tasks, one at a time. It drives the *command-line* version of those tools. If you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
 You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit. It **sleeps until your quota resets, then continues the same conversation.** That's the whole idea behind the name: your usage limit stops being a wall you hit and start over from, and becomes a pause the queue slides across. Start a long list and let it work unattended. How far it gets depends on your quota, how many prompts, and how large the tasks are.
 
 You don't need to be a programmer. You do need to open a terminal once or twice. Every step is spelled out.
 
 > ⚠️ **Treat first runs as rough drafts.** The result depends on the model, your wording, and the project. Only point LimitShift at a folder backed up with **Git**, so you can review and undo anything you don't like.
+
+---
+
+## Supported tools
+
+| CLI | Install | Tested with |
+| --- | --- | --- |
+| [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) (`claude`) | `npm install -g @anthropic-ai/claude-code` | 2.1.170 |
+| [Codex CLI](https://www.npmjs.com/package/@openai/codex) (`codex`) | `npm install -g @openai/codex` | 0.136.0 |
+| [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) (`gemini`) | `npm install -g @google/gemini-cli` | 0.46.0 |
+| [Antigravity](https://antigravity.google) (`agy`) | **Win** `irm https://antigravity.google/cli/install.ps1 \| iex` · **Mac/Linux** `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | 1.0.8 |
+| [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) | `npm install -g @github/copilot` | 1.0.62 |
+
+These are the builds LimitShift has been verified against; other recent versions should work too. Antigravity is Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise).
 
 ---
 
@@ -66,7 +81,7 @@ Anyone who uses an AI coding app or agent CLI with a subscription or tier (Claud
 
 ## Get started
 
-You need a **Windows, Mac, or Linux** computer, at least one AI CLI (`claude`, `codex`, `gemini`, `agy`, or `copilot`), and a project folder tracked by **Git**. Pick the path that sounds like you:
+You need a **Windows, Mac, or Linux** computer, at least one [supported CLI](#supported-tools), and a project folder tracked by **Git**. Pick the path that sounds like you:
 
 ### 🐣 New to the terminal
 
@@ -77,17 +92,7 @@ No command-line experience needed. This uses buttons, links, and copy-paste.
    - **Mac:** `Cmd+Space` → type **Terminal** → Enter.
    - **Linux:** open your **Terminal** app.
 2. **Install Node.js** (the "LTS" version) from [nodejs.org](https://nodejs.org). This gives you `npm`, used to install most of the AI tools.
-3. **Install your AI tool.** Paste the line for the one you use:
-
-   | Tool | Paste this |
-   | --- | --- |
-   | [Claude](https://www.npmjs.com/package/@anthropic-ai/claude-code) | `npm install -g @anthropic-ai/claude-code` |
-   | [Codex](https://www.npmjs.com/package/@openai/codex) | `npm install -g @openai/codex` |
-   | [Gemini](https://www.npmjs.com/package/@google/gemini-cli) | `npm install -g @google/gemini-cli` |
-   | [GitHub Copilot CLI](https://github.com/github/copilot-cli) | `npm install -g @github/copilot` |
-   | [Antigravity (`agy`)](https://antigravity.google) | No npm: **Win** `irm https://antigravity.google/cli/install.ps1 &#124; iex` · **Mac/Linux** `curl -fsSL https://antigravity.google/cli/install.sh &#124; bash` |
-
-   Antigravity is Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise).
+3. **Install your AI tool.** Pick one from the [supported tools](#supported-tools) table and paste its install command.
 4. **Get LimitShift's files without Git** using the free [GitHub Desktop](https://desktop.github.com) app: **File → Clone repository → URL**, paste `https://github.com/j-ts/limitshift`, and clone it somewhere you'll remember. (Or click the green **Code → Download ZIP** on the project page and unzip it.)
 5. **Open that folder in a terminal:** in File Explorer (Windows), right-click inside the folder → **"Open in Terminal"**. On Mac, type `cd ` in Terminal then drag the folder onto the window.
 6. **Unblock the script (one time):**
@@ -303,8 +308,6 @@ Each queue file gets its own isolated state folder. The recommended workflow for
 ---
 
 # Reference
-
-> **Tested with:** Claude Code **2.1.170** · Codex CLI **0.136.0** · Gemini CLI **0.46.0** · Antigravity `agy` **1.0.8**. These are the builds LimitShift has been verified against; other recent versions should work too.
 
 Configuration, models, permissions, run options, state, and troubleshooting → **[REFERENCE.md](REFERENCE.md)**.
 
