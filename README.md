@@ -232,7 +232,7 @@ With `completionCheck: false` ("simple mode"), the prompt runs once and the task
 
 ***Supported by `claude` and `codex` only.*** Gemini and Antigravity have no local-model path.
 
-Running a task against a local [Ollama](https://ollama.com) model is handy when you've hit a usage limit, want to work offline, or want to keep a task on your own machine. Install Ollama and pull a model first (e.g. `ollama pull qwen3.5:9b`), set `model` to that model's name, and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. Local runs skip the cloud usage check. The same config shape works for both CLIs:
+Handy when you've hit a usage limit, want to work offline, or want to keep a task on your own machine. Install [Ollama](https://docs.ollama.com/quickstart) and pull a model first (e.g. `ollama pull qwen3.5:9b`), set `model` to that model's name, and add `["--oss", "--local-provider", "ollama"]` to `extraArgs`. The same config works for both CLIs:
 
 ```json
 {
@@ -249,9 +249,9 @@ Running a task against a local [Ollama](https://ollama.com) model is handy when 
 }
 ```
 
-**Codex** talks to Ollama natively. **Claude** requires Ollama's launcher, so LimitShift runs it via `ollama launch claude`. For Claude, `model` is **required** and `ollama` must be on your PATH. You write the same `extraArgs` for both; LimitShift handles the routing.
+`model` is **required** and `ollama` must be on your PATH. Codex talks to Ollama natively; for Claude, LimitShift routes through `ollama launch claude` automatically.
 
-To edit files, add a [permission flag](REFERENCE.md#permissions) alongside the Ollama flags, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]` for Claude or `["--oss", "--local-provider", "ollama", "--sandbox", "workspace-write"]` for Codex.
+To edit files, add a [permission flag](REFERENCE.md#permissions) alongside the Ollama flags, e.g. `["--oss", "--local-provider", "ollama", "--permission-mode", "acceptEdits"]` for Claude.
 
 ### Model rotation
 
