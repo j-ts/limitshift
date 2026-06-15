@@ -352,6 +352,36 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'CLI rotation (fallbacks) — git requirement' {
+        It 'rejects a fallbacks task whose projectPath is not a git repo' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p';
+                    fallbacks=@(@{ cli='codex'; model='gpt-5.5' }) })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*Task 1*fallbacks*not a git repository*'
+        }
+
+        It 'accepts a fallbacks task whose projectPath is a git repo' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            git -C $projectPath init -q
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p';
+                    fallbacks=@(@{ cli='codex'; model='gpt-5.5' }) })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Not -Throw
+        }
+
+        It 'does not require git for a task without fallbacks' {
+            # valid-minimal has no fallbacks and a non-git projectPath; must still load.
+            { Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json') } | Should -Not -Throw
+        }
+    }
+
     Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
         It 'appends the marker block when completionCheck is true' {
             $task = [pscustomobject]@{

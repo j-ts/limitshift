@@ -731,6 +731,19 @@ function Test-IsOllamaTask {
     return (Test-ExtraArgsRequestOllama -ExtraArgs $Task.ExtraArgs)
 }
 
+function Test-IsGitRepo {
+    param([string]$Path)
+    # Using Start-Process to avoid triggering $ErrorActionPreference = 'Stop' from git's stderr/exit code.
+    $p = Start-Process -FilePath git -ArgumentList "-C `"$Path`" rev-parse --is-inside-work-tree" -NoNewWindow -Wait -PassThru -RedirectStandardOutput ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())) -RedirectStandardError ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()))
+    return $p.ExitCode -eq 0
+}
+
+function Test-HasCommits {
+    param([string]$Path)
+    $p = Start-Process -FilePath git -ArgumentList "-C `"$Path`" rev-parse HEAD" -NoNewWindow -Wait -PassThru -RedirectStandardOutput ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())) -RedirectStandardError ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()))
+    return $p.ExitCode -eq 0
+}
+
 function Remove-OllamaControlArgs {
     param([string[]]$ExtraArgs)
     if ($null -eq $ExtraArgs) { return @() }
@@ -948,6 +961,16 @@ function Read-QueueConfig {
             $rawFallbacks = @($fallbackNode.Value)
             for ($k = 0; $k -lt $rawFallbacks.Count; $k++) {
                 $runners += Parse-Runner -Node $rawFallbacks[$k] -TaskNumber $n -Label "fallback $($k+1)"
+            }
+        }
+
+        # Task 4.1: Require a git working tree for tasks with fallbacks.
+        if ($runners.Count -gt 1) {
+            if (-not (Test-IsGitRepo -Path $projectPath)) {
+                throw "Task $n (`"$($t.name)`") has fallbacks, which requires the projectPath to be a git repository. The provided projectPath is not a git repository: $projectPath"
+            }
+            if (-not (Test-HasCommits -Path $projectPath)) {
+                Write-Host "[$GlyphStar] Task $n WARNING: projectPath $projectPath is a git repository but has no commits. Fingerprinting and handoff (git diff) will be less precise. Guidance: commit a baseline before starting rotation work." -ForegroundColor Yellow
             }
         }
 
