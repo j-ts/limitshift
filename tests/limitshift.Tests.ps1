@@ -1412,18 +1412,29 @@ Ripgrep is not available. Falling back to GrepTool.
         }
 
         It 'rolls a bare clock that is already past to tomorrow' {
+            # A clock 2h in the past has its next occurrence ~22h out (the parser advances a
+            # bare clock that has already passed today to the next day). Asserting the
+            # hours-away band rather than an explicit date keeps this stable near midnight.
             $past = (Get-Date).AddHours(-2)
             $clock = $past.ToString('h:mm tt')
             $reset = Get-ResetTimeFromErrorText -ErrorText "try again at $clock"
             $reset | Should -BeGreaterThan (Get-Date)
-            $reset.Date | Should -Be (Get-Date).Date.AddDays(1)
+            $reset.ToString('h:mm tt') | Should -Be $clock
+            ($reset - (Get-Date)).TotalHours | Should -BeGreaterThan 21
+            ($reset - (Get-Date)).TotalHours | Should -BeLessThan 23
         }
 
         It 'keeps a bare clock that is still in the future on today' {
+            # A clock 2h ahead is kept as today's occurrence (~2h out), not rolled forward.
+            # The hours-away band is time-of-day independent (an explicit "today" date check
+            # is not, since now+2h can cross midnight).
             $future = (Get-Date).AddHours(2)
             $clock = $future.ToString('h:mm tt')
             $reset = Get-ResetTimeFromErrorText -ErrorText "try again at $clock"
-            $reset.Date | Should -Be (Get-Date).Date
+            $reset | Should -BeGreaterThan (Get-Date)
+            $reset.ToString('h:mm tt') | Should -Be $clock
+            ($reset - (Get-Date)).TotalHours | Should -BeGreaterThan 1
+            ($reset - (Get-Date)).TotalHours | Should -BeLessThan 3
         }
 
         It 'parses a textual date with a clock ("Jun 16, 7:21 PM" / "June 16 7:21 PM")' {
