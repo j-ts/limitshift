@@ -705,7 +705,7 @@ function Add-RunsCsvRow {
     [System.IO.File]::AppendAllText($RunsCsvPath, $row + [Environment]::NewLine, $utf8NoBom)
 }
 
-$AllowedClis = @('claude', 'codex', 'gemini', 'agy', 'copilot')
+$script:AllowedClis = @('claude', 'codex', 'gemini', 'agy', 'copilot')
 
 # Local-model (Ollama) support. A task targets a local Ollama model when its extraArgs carry the
 # provider marker (`--oss` / `--local-provider ollama`) — the same flags codex understands natively.
@@ -790,21 +790,144 @@ function Read-QueueConfig {
     $rawTasks = @($tasksNode.Value)
     if ($rawTasks.Count -eq 0) { throw "Config file contains no tasks: $Path" }
 
+    function Parse-Runner {
+        param($Node, $TaskNumber, $Label)
+
+        $displayLabel = if ($Label -eq 'task') { "" } else { " ($Label)" }
+
+        $cliProp = $Node.PSObject.Properties['cli']
+        if ($null -eq $cliProp -or [string]::IsNullOrWhiteSpace([string]$cliProp.Value)) {
+            throw "Task $TaskNumber$displayLabel is missing required JSON property: cli"
+        }
+        $cli = ([string]$cliProp.Value).ToLower()
+        if ($script:AllowedClis -notcontains $cli) {
+            throw "Task $TaskNumber$displayLabel has unknown cli `"$($cliProp.Value)`". Allowed values: $($script:AllowedClis -join ', ')"
+        }
+
+        $extraArgs = [string[]]@()
+        $extraNode = $Node.PSObject.Properties['extraArgs']
+        if ($null -ne $extraNode -and $null -ne $extraNode.Value) {
+            if ($extraNode.Value -is [string]) {
+                $extraArgs = [string[]]@($extraNode.Value -split '\s+' | Where-Object { $_ })
+            }
+            elseif ($extraNode.Value -is [System.Array]) {
+                $extraArgs = [string[]]@($extraNode.Value | ForEach-Object { [string]$_ })
+            }
+            else {
+                throw "Task $TaskNumber$displayLabel extraArgs must be a string or an array of strings."
+            }
+        }
+
+        # Task 6: model may be a single string OR an ordered array of strings (preference order).
+        $models = [string[]]@()
+        $modelNode = $Node.PSObject.Properties['model']
+        if ($null -ne $modelNode -and $null -ne $modelNode.Value) {
+            $modelValue = $modelNode.Value
+            if ($modelValue -is [string]) {
+                $models = [string[]]@($modelValue)
+            }
+            elseif ($modelValue -is [System.Array]) {
+                if (@($modelValue).Count -eq 0) {
+                    throw "Task $TaskNumber$displayLabel model array must not be empty. Use a single string, or list one or more model names in preference order."
+                }
+                foreach ($element in $modelValue) {
+                    if ($null -eq $element -or -not ($element -is [string])) {
+                        throw "Task $TaskNumber$displayLabel model array must contain only strings (got a non-string element)."
+                    }
+                }
+                $models = [string[]]@($modelValue | ForEach-Object { [string]$_ })
+            }
+            else {
+                throw "Task $TaskNumber$displayLabel model must be a string or an array of strings."
+            }
+        }
+        $model = if ($models.Count -gt 0) { $models[0] } else { $null }
+
+        # Local Ollama mode (claude): the model is selected by `ollama launch --model`, so it is
+        # required. (codex reaches Ollama natively and needs no model-for-launcher.)
+        if ($cli -eq 'claude' -and (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs) -and $models.Count -eq 0) {
+            throw "Task $TaskNumber$($displayLabel): a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set `"model`" to your Ollama model, e.g. `"qwen3.5:9b`"."
+        }
+
+        # Claude headless (-p) doesn't expand dotted aliases the way the TUI does, so a queue model
+        # like "claude-opus-4.6" reaches the API verbatim and 404s mid-run. Reject the dot form at
+        # validation. Ollama-launched claude tasks pass the model to `ollama launch --model`, where
+        # dots are normal (e.g. "qwen3.5:9b"), so skip them.
+        if ($cli -eq 'claude' -and -not (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs)) {
+            foreach ($m in $models) {
+                if ($m -like '*.*') {
+                    throw "Task $TaskNumber$($displayLabel): claude model `"$m`" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. `"claude-opus-4-6`") or an alias (`"opus`", `"sonnet`", `"haiku`")."
+                }
+            }
+        }
+
+        # Effort normalization: treat absent, JSON null, and "" all as "no effort" (null).
+        $effort = $null
+        if ($Node.PSObject.Properties['effort'] -and $null -ne $Node.effort) {
+            $effortText = ([string]$Node.effort).Trim()
+            if ($effortText.Length -gt 0) { $effort = $effortText }
+        }
+
+        # Task 6b: enforce the SAME per-CLI effort rules the schema declares (editor-only), so a
+        # misconfigured queue fails at validation (exit 2) instead of mid-run.
+        if ($null -ne $effort) {
+            switch ($cli) {
+                'gemini' {
+                    throw "Task $TaskNumber$($displayLabel): gemini has no effort flag; set `"effort`": null (use thinkingLevel/thinkingBudget via gemini settings instead)."
+                }
+                'agy' {
+                    throw "Task $TaskNumber$($displayLabel): agy (Antigravity CLI) has no --effort flag; set `"effort`": null."
+                }
+                'claude' {
+                    $claudeEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+                    if ($effort -eq 'ultracode') {
+                        throw "Task $TaskNumber$($displayLabel): 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max."
+                    }
+                    if ($claudeEfforts -notcontains $effort) {
+                        throw "Task $TaskNumber$($displayLabel): claude effort must be one of low, medium, high, xhigh, max (or null)."
+                    }
+                    # Haiku 4.5 supports no effort. Model may be a list (Task 6): reject if ANY matches haiku.
+                    $haikuMatch = @($models | Where-Object { $_ -match '(?i)haiku' }).Count -gt 0
+                    if ($haikuMatch) {
+                        throw "Task $TaskNumber$($displayLabel): claude model haiku does not support effort; set `"effort`": null."
+                    }
+                }
+                'codex' {
+                    $codexEfforts = @('minimal', 'low', 'medium', 'high', 'xhigh')
+                    if ($codexEfforts -notcontains $effort) {
+                        throw "Task $TaskNumber$($displayLabel): codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only."
+                    }
+                }
+                'copilot' {
+                    $copilotEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+                    if ($copilotEfforts -notcontains $effort) {
+                        throw "Task $TaskNumber$($displayLabel): copilot effort must be one of low, medium, high, xhigh, max (or null)."
+                    }
+                }
+            }
+        }
+
+        return [pscustomobject]@{
+            Cli       = $cli
+            Model     = $model
+            Models    = $models
+            Effort    = $effort
+            ExtraArgs = $extraArgs
+        }
+    }
+
     $tasks = @()
     for ($i = 0; $i -lt $rawTasks.Count; $i++) {
         $t = $rawTasks[$i]
         $n = $i + 1
 
-        foreach ($required in @('name', 'cli', 'projectPath', 'prompt')) {
+        # Base fields required for every task. cli/model/effort/extraArgs are parsed into
+        # the first runner by Parse-Runner.
+        foreach ($required in @('name', 'projectPath', 'prompt')) {
             $p = $t.PSObject.Properties[$required]
             if ($null -eq $p -or [string]::IsNullOrWhiteSpace([string]$p.Value)) {
                 throw "Task $n is missing required JSON property: $required"
             }
-        }
-
-        $cli = ([string]$t.cli).ToLower()
-        if ($AllowedClis -notcontains $cli) {
-            throw "Task $n has unknown cli `"$($t.cli)`". Allowed values: $($AllowedClis -join ', ')"
         }
 
         $projectPath = $t.projectPath
@@ -816,109 +939,15 @@ function Read-QueueConfig {
             throw "Project path does not exist for task $n (`"$($t.name)`"): $projectPath"
         }
 
-        $extraArgs = [string[]]@()
-        $extraNode = $t.PSObject.Properties['extraArgs']
-        if ($null -ne $extraNode -and $null -ne $extraNode.Value) {
-            if ($extraNode.Value -is [string]) {
-                $extraArgs = [string[]]@($extraNode.Value -split '\s+' | Where-Object { $_ })
-            }
-            elseif ($extraNode.Value -is [System.Array]) {
-                $extraArgs = [string[]]@($extraNode.Value | ForEach-Object { [string]$_ })
-            }
-            else {
-                throw "Task $n extraArgs must be a string or an array of strings."
-            }
-        }
+        # Parse the flat task fields as Runner 0.
+        $runners = @(Parse-Runner -Node $t -TaskNumber $n -Label 'task')
 
-        # Task 6: model may be a single string OR an ordered array of strings (preference order).
-        # Parse it into an ordered list (Models). A single string becomes a 1-element list; Model
-        # scalar stays = the first element for back-compat (fingerprint, .Model readers).
-        $models = [string[]]@()
-        $modelNode = $t.PSObject.Properties['model']
-        if ($null -ne $modelNode -and $null -ne $modelNode.Value) {
-            $modelValue = $modelNode.Value
-            if ($modelValue -is [string]) {
-                $models = [string[]]@($modelValue)
-            }
-            elseif ($modelValue -is [System.Array]) {
-                if (@($modelValue).Count -eq 0) {
-                    throw "Task $n model array must not be empty. Use a single string, or list one or more model names in preference order."
-                }
-                foreach ($element in $modelValue) {
-                    if ($null -eq $element -or -not ($element -is [string])) {
-                        throw "Task $n model array must contain only strings (got a non-string element)."
-                    }
-                }
-                $models = [string[]]@($modelValue | ForEach-Object { [string]$_ })
-            }
-            else {
-                throw "Task $n model must be a string or an array of strings."
-            }
-        }
-        $model = if ($models.Count -gt 0) { $models[0] } else { $null }
-
-        # Local Ollama mode (claude): the model is selected by `ollama launch --model`, so it is
-        # required. (codex reaches Ollama natively and needs no model-for-launcher.)
-        if ($cli -eq 'claude' -and (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs) -and $models.Count -eq 0) {
-            throw "Task ${n}: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set `"model`" to your Ollama model, e.g. `"qwen3.5:9b`"."
-        }
-
-        # Claude headless (-p) doesn't expand dotted aliases the way the TUI does, so a queue model
-        # like "claude-opus-4.6" reaches the API verbatim and 404s mid-run. Reject the dot form at
-        # validation. Ollama-launched claude tasks pass the model to `ollama launch --model`, where
-        # dots are normal (e.g. "qwen3.5:9b"), so skip them.
-        if ($cli -eq 'claude' -and -not (Test-ExtraArgsRequestOllama -ExtraArgs $extraArgs)) {
-            foreach ($m in $models) {
-                if ($m -like '*.*') {
-                    throw "Task ${n}: claude model `"$m`" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. `"claude-opus-4-6`") or an alias (`"opus`", `"sonnet`", `"haiku`")."
-                }
-            }
-        }
-
-        # Effort normalization: treat absent, JSON null, and "" all as "no effort" (null).
-        $effort = $null
-        if ($t.PSObject.Properties['effort'] -and $null -ne $t.effort) {
-            $effortText = ([string]$t.effort).Trim()
-            if ($effortText.Length -gt 0) { $effort = $effortText }
-        }
-
-        # Task 6b: enforce the SAME per-CLI effort rules the schema declares (editor-only), so a
-        # misconfigured queue fails at validation (exit 2) instead of mid-run. Runs AFTER the
-        # required-field checks above so a missing cli is reported first.
-        if ($null -ne $effort) {
-            switch ($cli) {
-                'gemini' {
-                    throw "Task ${n}: gemini has no effort flag; set `"effort`": null (use thinkingLevel/thinkingBudget via gemini settings instead)."
-                }
-                'agy' {
-                    throw "Task ${n}: agy (Antigravity CLI) has no --effort flag; set `"effort`": null."
-                }
-                'claude' {
-                    $claudeEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
-                    if ($effort -eq 'ultracode') {
-                        throw "Task ${n}: 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max."
-                    }
-                    if ($claudeEfforts -notcontains $effort) {
-                        throw "Task ${n}: claude effort must be one of low, medium, high, xhigh, max (or null)."
-                    }
-                    # Haiku 4.5 supports no effort. Model may be a list (Task 6): reject if ANY matches haiku.
-                    $haikuMatch = @($models | Where-Object { $_ -match '(?i)haiku' }).Count -gt 0
-                    if ($haikuMatch) {
-                        throw "Task ${n}: claude model haiku does not support effort; set `"effort`": null."
-                    }
-                }
-                'codex' {
-                    $codexEfforts = @('minimal', 'low', 'medium', 'high', 'xhigh')
-                    if ($codexEfforts -notcontains $effort) {
-                        throw "Task ${n}: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only."
-                    }
-                }
-                'copilot' {
-                    $copilotEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
-                    if ($copilotEfforts -notcontains $effort) {
-                        throw "Task ${n}: copilot effort must be one of low, medium, high, xhigh, max (or null)."
-                    }
-                }
+        # Parse the fallbacks list (Task 2.1).
+        $fallbackNode = $t.PSObject.Properties['fallbacks']
+        if ($null -ne $fallbackNode -and $null -ne $fallbackNode.Value) {
+            $rawFallbacks = @($fallbackNode.Value)
+            for ($k = 0; $k -lt $rawFallbacks.Count; $k++) {
+                $runners += Parse-Runner -Node $rawFallbacks[$k] -TaskNumber $n -Label "fallback $($k+1)"
             }
         }
 
@@ -929,15 +958,18 @@ function Read-QueueConfig {
             $completionCheck = [bool]$completionCheckNode.Value
         }
 
+        # The task object keeps the runner 0 fields at the top level for back-compat (Mode,
+        # Effort, etc used by fingerprinting and the UI) and carries the full runner list.
         $tasks += [pscustomobject]@{
             Name            = [string]$t.name
-            Cli             = $cli
+            Cli             = $runners[0].Cli
             ProjectPath     = $projectPath
-            Model           = $model
-            Models          = $models
-            Effort          = $effort
+            Model           = $runners[0].Model
+            Models          = $runners[0].Models
+            Effort          = $runners[0].Effort
             Prompt          = [string]$t.prompt
-            ExtraArgs       = $extraArgs
+            ExtraArgs       = $runners[0].ExtraArgs
+            Runners         = $runners
             CompletionCheck = $completionCheck
         }
     }
@@ -950,9 +982,13 @@ function Test-CliBinariesAvailable {
 
     $needed = @()
     foreach ($t in $Tasks) {
-        $needed += $t.Cli
-        # A claude task targeting a local Ollama model is launched via `ollama`, so it must be present too.
-        if (Test-IsOllamaTask -Task $t) { $needed += 'ollama' }
+        foreach ($r in $t.Runners) {
+            $needed += $r.Cli
+            # A claude task targeting a local Ollama model is launched via `ollama`, so it must be present too.
+            if ($r.Cli -eq 'claude' -and (Test-ExtraArgsRequestOllama -ExtraArgs $r.ExtraArgs)) {
+                $needed += 'ollama'
+            }
+        }
     }
 
     $missing = @()

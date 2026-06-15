@@ -313,6 +313,45 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'CLI rotation (fallbacks) — parsing' {
+        It 'parses fallbacks into a Runners list with runner 0 = flat task' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-fallbacks.json')
+            @($cfg.Tasks[0].Runners) | Should -HaveCount 3
+            $cfg.Tasks[0].Runners[0].Cli | Should -Be 'claude'
+            @($cfg.Tasks[0].Runners[0].Models) | Should -Be @('opus','sonnet')
+            $cfg.Tasks[0].Runners[1].Cli | Should -Be 'codex'
+            @($cfg.Tasks[0].Runners[1].Models) | Should -Be @('gpt-5.5')
+            @($cfg.Tasks[0].Runners[2].Models) | Should -Be @('gemini-3-flash-preview','gemini-2.5-pro')
+        }
+
+        It 'gives a no-fallbacks task a single-runner Runners list' {
+            $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')
+            @($cfg.Tasks[0].Runners) | Should -HaveCount 1
+            $cfg.Tasks[0].Runners[0].Cli | Should -Be 'claude'
+        }
+
+        It 'rejects a fallback with an unknown cli, naming the task and fallback' {
+            { Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'broken-fallback-bad-cli.json') } |
+                Should -Throw '*Task 1*fallback*claude, codex, gemini, agy, copilot*'
+        }
+
+        It 'rejects a fallback effort that is invalid for that fallback cli (gemini)' {
+            { Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'broken-fallback-bad-effort.json') } |
+                Should -Throw '*Task 1*fallback*gemini has no effort flag*'
+        }
+
+        It 'rejects a local-Ollama claude fallback that has no model' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p';
+                    fallbacks = @(@{ cli='claude'; extraArgs=@('--oss','--local-provider','ollama') }) })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*fallback*local Ollama claude*needs a model*'
+        }
+    }
+
     Context 'Get-TaskPromptWithCompletionMarker / Get-ResumePrompt completionCheck bypass' {
         It 'appends the marker block when completionCheck is true' {
             $task = [pscustomobject]@{
