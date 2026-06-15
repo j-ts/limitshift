@@ -627,32 +627,75 @@ task_field() {
   jq -r ".tasks[$idx].$field // empty" "$QUEUE_PATH" | tr -d '\r'
 }
 
-get_task_extra_args() {
+get_task_runner_count() {
   local idx="$1"
-  jq -r ".tasks[$idx].extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
+  jq -r ".tasks[$idx].fallbacks | if type==\"array\" then length + 1 else 1 end" "$QUEUE_PATH" | tr -d '\r'
+}
+
+get_runner_field() {
+  local task_idx="$1" runner_idx="$2" field="$3"
+  if [ "$runner_idx" -eq 0 ]; then
+    task_field "$task_idx" "$field"
+  else
+    local f_idx=$((runner_idx - 1))
+    jq -r ".tasks[$task_idx].fallbacks[$f_idx].$field // empty" "$QUEUE_PATH" | tr -d '\r'
+  fi
+}
+
+get_task_extra_args() {
+  get_runner_extra_args "$1" 0
+}
+
+get_runner_extra_args() {
+  local task_idx="$1" runner_idx="$2"
+  local node_path
+  if [ "$runner_idx" -eq 0 ]; then
+    node_path=".tasks[$task_idx]"
+  else
+    node_path=".tasks[$task_idx].fallbacks[$((runner_idx-1))]"
+  fi
+  jq -r "$node_path.extraArgs | if type==\"array\" then .[] elif type==\"string\" then splits(\"\\\\s+\") else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
 is_ollama_task() {
-  local idx="$1" cli arg lower
-  cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
+  is_ollama_runner "$1" 0
+}
+
+is_ollama_runner() {
+  local task_idx="$1" runner_idx="$2" cli arg lower
+  cli=$(get_runner_field "$task_idx" "$runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
   if [ "$cli" != "claude" ]; then return 1; fi
   while IFS= read -r arg; do
     lower=$(printf '%s' "$arg" | tr '[:upper:]' '[:lower:]')
     if [ "$lower" = "ollama" ] || [ "$lower" = "--oss" ]; then return 0; fi
-  done < <(get_task_extra_args "$idx")
+  done < <(get_runner_extra_args "$task_idx" "$runner_idx")
   return 1
 }
 
 get_task_models() {
-  local idx="$1"
-  jq -r ".tasks[$idx].model | if type==\"array\" then .[] elif type==\"string\" then . else empty end" "$QUEUE_PATH" | tr -d '\r'
+  get_runner_models "$1" 0
+}
+
+get_runner_models() {
+  local task_idx="$1" runner_idx="$2"
+  local node_path
+  if [ "$runner_idx" -eq 0 ]; then
+    node_path=".tasks[$task_idx]"
+  else
+    node_path=".tasks[$task_idx].fallbacks[$((runner_idx-1))]"
+  fi
+  jq -r "$node_path.model | if type==\"array\" then .[] elif type==\"string\" then . else empty end" "$QUEUE_PATH" | tr -d '\r'
 }
 
 get_task_models_joined() {
-  local idx="$1" joined="" first=1 m
+  get_runner_models_joined "$1" 0
+}
+
+get_runner_models_joined() {
+  local task_idx="$1" runner_idx="$2" joined="" first=1 m
   while IFS= read -r m; do
     if [ "$first" -eq 1 ]; then joined="$m"; first=0; else joined="$joined $m"; fi
-  done < <(get_task_models "$idx")
+  done < <(get_runner_models "$task_idx" "$runner_idx")
   printf '%s' "$joined"
 }
 
@@ -718,119 +761,144 @@ read_queue_config() {
   local i=0 n cli path
   while [ "$i" -lt "$TASK_COUNT" ]; do
     n=$((i + 1))
-    for field in name cli projectPath prompt; do
+    for field in name projectPath prompt; do
       if [ "$(task_field "$i" "$field")" = "" ]; then
         echo "Task $n is missing required JSON property: $field" >&2
         exit 2
       fi
     done
-    cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
-    case "$cli" in
-      claude|codex|gemini|agy|copilot) ;;
-      *) echo "Task $n has unknown cli \"$cli\". Allowed values: claude, codex, gemini, agy, copilot" >&2; exit 2 ;;
-    esac
     path=$(task_field "$i" "projectPath")
     path="${path//\\//}"
     if [ ! -d "$path" ]; then
       echo "Project path does not exist for task $n: $path" >&2
       exit 2
     fi
-    local model_type model_bad
-    model_type=$(jq -r ".tasks[$i].model | type" "$QUEUE_PATH" | tr -d '\r')
-    if [ "$model_type" = "array" ]; then
-      if [ "$(jq -r ".tasks[$i].model | length" "$QUEUE_PATH" | tr -d '\r')" = "0" ]; then
-        echo "Task $n model array must not be empty. Use a single string, or list one or more model names in preference order." >&2
-        exit 2
-      fi
-      model_bad=$(jq -r ".tasks[$i].model | map(select(type != \"string\")) | length" "$QUEUE_PATH" | tr -d '\r')
-      if [ "$model_bad" != "0" ]; then
-        echo "Task $n model array must contain only strings (got a non-string element)." >&2
-        exit 2
-      fi
-    fi
 
-    if [ "$cli" = "claude" ] && is_ollama_task "$i"; then
-      if [ -z "$(get_task_models "$i" | sed -n '1p')" ]; then
-        echo "Task $n: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set \"model\" to your Ollama model, e.g. \"qwen3.5:9b\"." >&2
+    # Task 2.2: Validate all runners (task + fallbacks)
+    local r_count; r_count=$(get_task_runner_count "$i")
+    local r=0
+    while [ "$r" -lt "$r_count" ]; do
+      local label=""
+      local node_path=".tasks[$i]"
+      if [ "$r" -gt 0 ]; then
+        label=" (fallback $r)"
+        node_path=".tasks[$i].fallbacks[$((r-1))]"
+      fi
+
+      cli=$(get_runner_field "$i" "$r" "cli" | tr '[:upper:]' '[:lower:]')
+      if [ -z "$cli" ]; then
+        echo "Task $n$label is missing required JSON property: cli" >&2
         exit 2
       fi
-    fi
+      case "$cli" in
+        claude|codex|gemini|agy|copilot) ;;
+        *) echo "Task $n$label has unknown cli \"$cli\". Allowed values: claude, codex, gemini, agy, copilot" >&2; exit 2 ;;
+      esac
 
-    # Claude headless (-p) doesn't expand dotted aliases the way the TUI does, so a queue model
-    # like "claude-opus-4.6" reaches the API verbatim and 404s mid-run. Reject the dot form at
-    # validation. Ollama-launched claude tasks pass the model to `ollama launch --model`, where
-    # dots are normal (e.g. "qwen3.5:9b"), so skip them.
-    if [ "$cli" = "claude" ] && ! is_ollama_task "$i"; then
-      while IFS= read -r m; do
-        case "$m" in
-          *.*)
-            echo "Task $n: claude model \"$m\" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. \"claude-opus-4-6\") or an alias (\"opus\", \"sonnet\", \"haiku\")." >&2
+      local model_type model_bad
+      model_type=$(jq -r "$node_path.model | type" "$QUEUE_PATH" | tr -d '\r')
+      if [ "$model_type" = "array" ]; then
+        if [ "$(jq -r "$node_path.model | length" "$QUEUE_PATH" | tr -d '\r')" = "0" ]; then
+          echo "Task $n$label model array must not be empty. Use a single string, or list one or more model names in preference order." >&2
+          exit 2
+        fi
+        model_bad=$(jq -r "$node_path.model | map(select(type != \"string\")) | length" "$QUEUE_PATH" | tr -d '\r')
+        if [ "$model_bad" != "0" ]; then
+          echo "Task $n$label model array must contain only strings (got a non-string element)." >&2
+          exit 2
+        fi
+      fi
+
+      if [ "$cli" = "claude" ] && is_ollama_runner "$i" "$r"; then
+        if [ -z "$(get_runner_models "$i" "$r" | sed -n '1p')" ]; then
+          echo "Task $n$label: a local Ollama claude task needs a model (it is passed to 'ollama launch --model'). Set \"model\" to your Ollama model, e.g. \"qwen3.5:9b\"." >&2
+          exit 2
+        fi
+      fi
+
+      if [ "$cli" = "claude" ] && ! is_ollama_runner "$i" "$r"; then
+        while IFS= read -r m; do
+          case "$m" in
+            *.*)
+              echo "Task $n$label: claude model \"$m\" contains a dot. Claude headless mode (-p) does not expand the dotted form; use the hyphenated id (e.g. \"claude-opus-4-6\") or an alias (\"opus\", \"sonnet\", \"haiku\")." >&2
+              exit 2
+              ;;
+          esac
+        done < <(get_runner_models "$i" "$r")
+      fi
+
+      local effort
+      effort=$(get_runner_field "$i" "$r" "effort")
+      if [ -n "$effort" ]; then
+        case "$cli" in
+          gemini)
+            echo "Task $n$label: gemini has no effort flag; set \"effort\": null (use thinkingLevel/thinkingBudget via gemini settings instead)." >&2
             exit 2
             ;;
+          agy)
+            echo "Task $n$label: agy (Antigravity CLI) has no --effort flag; set \"effort\": null." >&2
+            exit 2
+            ;;
+          claude)
+            if [ "$effort" = "ultracode" ]; then
+              echo "Task $n$label: 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max." >&2
+              exit 2
+            fi
+            case "$effort" in
+              low|medium|high|xhigh|max) ;;
+              *) echo "Task $n$label: claude effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
+            esac
+            local haiku_match
+            haiku_match=$(get_runner_models "$i" "$r" | grep -ic 'haiku')
+            if [ "$haiku_match" -gt 0 ]; then
+              echo "Task $n$label: claude model haiku does not support effort; set \"effort\": null." >&2
+              exit 2
+            fi
+            ;;
+          codex)
+            case "$effort" in
+              minimal|low|medium|high|xhigh) ;;
+              *) echo "Task $n$label: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only." >&2; exit 2 ;;
+            esac
+            ;;
+          copilot)
+            case "$effort" in
+              low|medium|high|xhigh|max) ;;
+              *) echo "Task $n$label: copilot effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
+            esac
+            ;;
         esac
-      done < <(get_task_models "$i")
-    fi
-
-    local effort
-    effort=$(task_field "$i" "effort")
-    if [ -n "$effort" ]; then
-      case "$cli" in
-        gemini)
-          echo "Task $n: gemini has no effort flag; set \"effort\": null (use thinkingLevel/thinkingBudget via gemini settings instead)." >&2
-          exit 2
-          ;;
-        agy)
-          echo "Task $n: agy (Antigravity CLI) has no --effort flag; set \"effort\": null." >&2
-          exit 2
-          ;;
-        claude)
-          if [ "$effort" = "ultracode" ]; then
-            echo "Task $n: 'ultracode' is only available from the interactive /effort menu, not the --effort flag. Use low|medium|high|xhigh|max." >&2
-            exit 2
-          fi
-          case "$effort" in
-            low|medium|high|xhigh|max) ;;
-            *) echo "Task $n: claude effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
-          esac
-          local haiku_match
-          haiku_match=$(get_task_models "$i" | grep -ic 'haiku')
-          if [ "$haiku_match" -gt 0 ]; then
-            echo "Task $n: claude model haiku does not support effort; set \"effort\": null." >&2
-            exit 2
-          fi
-          ;;
-        codex)
-          case "$effort" in
-            minimal|low|medium|high|xhigh) ;;
-            *) echo "Task $n: codex effort must be one of minimal, low, medium, high, xhigh (or null). 'none' is plan-mode only." >&2; exit 2 ;;
-          esac
-          ;;
-        copilot)
-          case "$effort" in
-            low|medium|high|xhigh|max) ;;
-            *) echo "Task $n: copilot effort must be one of low, medium, high, xhigh, max (or null)." >&2; exit 2 ;;
-          esac
-          ;;
-      esac
-    fi
+      fi
+      r=$((r + 1))
+    done
     i=$((i + 1))
   done
 }
 
 check_cli_binaries() {
-  local cli unique_clis missing_clis=() i needs_ollama=0 tcli
-  unique_clis=$(jq -r '.tasks[].cli' "$QUEUE_PATH" | tr '[:upper:]' '[:lower:]' | tr -d '\r' | sort -u)
+  local cli r r_count i tcli missing_clis=() needs_ollama=0
+  local -a unique_clis_arr=()
+
+  i=0
+  while [ "$i" -lt "$TASK_COUNT" ]; do
+    r_count=$(get_task_runner_count "$i")
+    r=0
+    while [ "$r" -lt "$r_count" ]; do
+      tcli=$(get_runner_field "$i" "$r" "cli" | tr '[:upper:]' '[:lower:]')
+      unique_clis_arr+=("$tcli")
+      if [ "$tcli" = "claude" ] && is_ollama_runner "$i" "$r"; then needs_ollama=1; fi
+      r=$((r + 1))
+    done
+    i=$((i + 1))
+  done
+
+  local unique_clis
+  unique_clis=$(printf '%s\n' "${unique_clis_arr[@]}" | sort -u)
+
   for cli in $unique_clis; do
     if ! command -v "$cli" >/dev/null 2>&1; then
       missing_clis+=("$cli")
     fi
-  done
-
-  i=0
-  while [ "$i" -lt "$TASK_COUNT" ]; do
-    tcli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
-    if [ "$tcli" = "claude" ] && is_ollama_task "$i"; then needs_ollama=1; fi
-    i=$((i + 1))
   done
   if [ "$needs_ollama" -eq 1 ] && ! command -v ollama >/dev/null 2>&1; then
     missing_clis+=("ollama")

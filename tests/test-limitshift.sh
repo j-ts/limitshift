@@ -2668,6 +2668,12 @@ check "missing field rejected naming the field"  2 "Task 1.*prompt"        -- ba
 check "missing project path rejected"            2 "does not exist"        -- bash "$SCRIPT" --queue "$CONFIGS/broken-missing-path.json" --validate-only
 check "missing queue file gives copy hint"       2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue "$HERE/nope.json" --validate-only
 check "--queue-path: missing file gives copy hint" 2 "limitshift-queue.example.json" -- bash "$SCRIPT" --queue-path "$HERE/nope.json" --validate-only
+
+# Task 2.2: CLI rotation (fallbacks) — parsing
+check "fallbacks: valid queue validates"           0 "Config OK"             -- bash "$SCRIPT" --queue "$CONFIGS/valid-fallbacks.json" --validate-only
+check "fallbacks: bad cli rejected"                2 "Task 1.*fallback.*claude, codex, gemini, agy, copilot" -- bash "$SCRIPT" --queue "$CONFIGS/broken-fallback-bad-cli.json" --validate-only
+check "fallbacks: bad effort rejected"             2 "Task 1.*fallback.*gemini has no effort flag" -- bash "$SCRIPT" --queue "$CONFIGS/broken-fallback-bad-effort.json" --validate-only
+
 run_dry_run_state_test
 run_codex_limit_resume_test
 run_duplicate_name_test
