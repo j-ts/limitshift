@@ -1219,9 +1219,60 @@ run_reset_time_test() {
   fi
 
   pass "$desc"
-}
+  }
 
-run_legacy_queue_fallback_test() {
+  run_runner_selection_test() {
+  local desc="CLI rotation â€” runner selection rule"
+  local root="$TMP_ROOT/runner-selection"
+  mkdir -p "$root/project"
+  local queue_path="$root/queue.json"
+  echo '{ "tasks": [ { "name": "t", "cli": "claude", "projectPath": ".", "prompt": "p" } ] }' > "$queue_path"
+  LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" --queue "$queue_path"
+
+  # select_next_runner <startIndex> <nowEpoch> <statesJson>
+  # Returns "Action Index WaitUntil"
+
+  # 1. Picks first runnable (not set aside, not limited), scanning from startIndex
+  local states='[{"setAside":true,"limitedUntil":null},{"setAside":false,"limitedUntil":1000},{"setAside":false,"limitedUntil":null}]'
+  local r
+  r=$(select_next_runner 0 500 "$states")
+  if [ "$r" = "Run 2 " ]; then
+    pass "$desc (picks first runnable)"
+  else
+    fail "$desc (picks first runnable)" "Got '$r', wanted 'Run 2 '"
+  fi
+
+  # 2. Returns Wait with soonest within-24h reset when nothing is runnable
+  # now=500. runner0 resets at 800 (in 300s), runner1 at 600 (in 100s).
+  states='[{"setAside":false,"limitedUntil":800},{"setAside":false,"limitedUntil":600}]'
+  r=$(select_next_runner 0 500 "$states")
+  if [ "$r" = "Wait 1 600" ]; then
+    pass "$desc (returns wait for soonest)"
+  else
+    fail "$desc (returns wait for soonest)" "Got '$r', wanted 'Wait 1 600'"
+  fi
+
+  # 3. Returns Fail when every live runner resets > 24h out
+  # now=500. runner0 resets at 500 + 86401 = 86901.
+  states='[{"setAside":false,"limitedUntil":86901}]'
+  r=$(select_next_runner 0 500 "$states")
+  if [ "$r" = "Fail  " ]; then
+    pass "$desc (fails when resets > 24h)"
+  else
+    fail "$desc (fails when resets > 24h)" "Got '$r', wanted 'Fail  '"
+  fi
+
+  # 4. Returns Fail when all are set aside
+  states='[{"setAside":true,"limitedUntil":null},{"setAside":true,"limitedUntil":null}]'
+  r=$(select_next_runner 0 500 "$states")
+  if [ "$r" = "Fail  " ]; then
+    pass "$desc (fails when all set aside)"
+  else
+    fail "$desc (fails when all set aside)" "Got '$r', wanted 'Fail  '"
+  fi
+  }
+
+  run_legacy_queue_fallback_test() {
   local desc="legacy ai-run-queue.json is used (with a warning) when no new-name queue and no --queue"
   local root="$TMP_ROOT/legacy-queue-fallback"
   local bin_dir="$root/bin"
@@ -3012,6 +3063,7 @@ run_fingerprint_backcompat_test
 run_fingerprint_normalized_model_test
 run_handoff_note_test
 run_reset_time_test
+run_runner_selection_test
 run_git_requirement_test
 
 echo

@@ -1393,6 +1393,27 @@ get_runner_reset_epoch() {
   printf '%s\n' "$((now + wait_mins * 60))"
 }
 
+select_next_runner() {
+  local start_index="$1" now_epoch="$2" states_json="$3"
+  printf '%s' "$states_json" | jq -r --argjson start "$start_index" --argjson now "$now_epoch" '
+    def select_run:
+      . as $states | length as $count |
+      range($count) | ($start + .) % $count as $i |
+      $states[$i] | select(.setAside == false and (.limitedUntil == null or .limitedUntil <= $now)) |
+      "Run \($i) ";
+
+    def select_wait:
+      to_entries | map(select(.value.setAside == false and .value.limitedUntil != null and (.value.limitedUntil - $now <= 86400))) |
+      if length > 0 then
+        sort_by(.value.limitedUntil)[0] | "Wait \(.key) \(.value.limitedUntil)"
+      else
+        "Fail  "
+      end;
+
+    (first(select_run) // select_wait)
+  '
+}
+
 wait_for_limit_reset() {
   local cli="$1" error_text="$2" settings_wait="$3"
   if [ "$cli" = "claude" ]; then
