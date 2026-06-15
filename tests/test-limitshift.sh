@@ -2748,7 +2748,130 @@ run_model_validation_warn_test
 run_model_validation_off_test
 run_model_validation_undiscoverable_test
 run_refresh_capabilities_test
+run_fingerprint_fallback_test() {
+  local desc="fingerprint includes fallbacks but stays back-compat for no-fallbacks"
+  local root="$TMP_ROOT/fingerprint-fb"
+  local project_dir="$root/project"
+  local queue_no_fb="$root/queue-no-fb.json"
+  local queue_with_fb="$root/queue-with-fb.json"
+
+  mkdir -p "$project_dir"
+
+  # Task 1: No fallbacks
+  cat > "$queue_no_fb" <<EOF
+{
+  "tasks": [ { "name": "test", "cli": "claude", "projectPath": "$project_dir", "prompt": "X" } ]
+}
+EOF
+
+  # Task 2: With fallbacks (Task 2.1)
+  cat > "$queue_with_fb" <<EOF
+{
+  "tasks": [
+    {
+      "name": "test",
+      "cli": "claude",
+      "projectPath": "$project_dir",
+      "prompt": "X",
+      "fallbacks": [
+        { "cli": "codex", "model": "gpt-4", "effort": "high" }
+      ]
+    }
+  ]
+}
+EOF
+
+  local fp_no_fb fp_with_fb
+  fp_no_fb=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_no_fb" && get_task_fingerprint 0)
+  fp_with_fb=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_with_fb" && get_task_fingerprint 0)
+
+  if [ "$fp_no_fb" != "$fp_with_fb" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "Fingerprints are identical even though fallbacks differ.
+no-fb:   $fp_no_fb
+with-fb: $fp_with_fb"
+  fi
+}
+
+run_fingerprint_backcompat_test() {
+  local desc="fingerprint is unchanged when fallbacks are missing or empty (back-compat)"
+  local root="$TMP_ROOT/fingerprint-compat"
+  local project_dir="$root/project"
+  local queue_no_fb="$root/queue-no-fb.json"
+  local queue_empty_fb="$root/queue-empty-fb.json"
+
+  mkdir -p "$project_dir"
+
+  cat > "$queue_no_fb" <<EOF
+{
+  "tasks": [ { "name": "test", "cli": "claude", "projectPath": "$project_dir", "prompt": "X" } ]
+}
+EOF
+
+  cat > "$queue_empty_fb" <<EOF
+{
+  "tasks": [ { "name": "test", "cli": "claude", "projectPath": "$project_dir", "prompt": "X", "fallbacks": [] } ]
+}
+EOF
+
+  local fp_no_fb fp_empty_fb
+  fp_no_fb=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_no_fb" && get_task_fingerprint 0)
+  fp_empty_fb=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_empty_fb" && get_task_fingerprint 0)
+
+  if [ "$fp_no_fb" = "$fp_empty_fb" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "Fingerprint changed for empty fallbacks (breaks back-compat).
+no-fb:    $fp_no_fb
+empty-fb: $fp_empty_fb"
+  fi
+}
+
+run_fingerprint_normalized_model_test() {
+  local desc="fingerprint is identical for string vs 1-element-array fallback model"
+  local root="$TMP_ROOT/fingerprint-norm"
+  local project_dir="$root/project"
+  local queue_string="$root/queue-string.json"
+  local queue_array="$root/queue-array.json"
+
+  mkdir -p "$project_dir"
+
+  cat > "$queue_string" <<EOF
+{
+  "tasks": [
+    { "name": "test", "cli": "claude", "projectPath": "$project_dir", "prompt": "X",
+      "fallbacks": [ { "cli": "codex", "model": "gpt-4" } ] }
+  ]
+}
+EOF
+
+  cat > "$queue_array" <<EOF
+{
+  "tasks": [
+    { "name": "test", "cli": "claude", "projectPath": "$project_dir", "prompt": "X",
+      "fallbacks": [ { "cli": "codex", "model": ["gpt-4"] } ] }
+  ]
+}
+EOF
+
+  local fp_string fp_array
+  fp_string=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_string" && get_task_fingerprint 0)
+  fp_array=$(LIMITSHIFT_SOURCE_ONLY=1 source "$SCRIPT" >/dev/null && export QUEUE_PATH="$queue_array" && get_task_fingerprint 0)
+
+  if [ "$fp_string" = "$fp_array" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "Fingerprint differs for string vs array model.
+string: $fp_string
+array:  $fp_array"
+  fi
+}
+
 run_probe_models_optin_test
+run_fingerprint_fallback_test
+run_fingerprint_backcompat_test
+run_fingerprint_normalized_model_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

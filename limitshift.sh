@@ -1397,7 +1397,7 @@ sha256_hex() {
 
 get_task_fingerprint() {
   local idx="$1"
-  local name cli project_path model effort prompt extra_joined us first arg
+  local name cli project_path model effort prompt extra_joined us first arg canonical
   name=$(task_field "$idx" "name")
   cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
   project_path=$(task_field "$idx" "projectPath")
@@ -1411,9 +1411,38 @@ get_task_fingerprint() {
     fi
   done < <(get_task_extra_args "$idx")
   us=$(printf '\037')
-  printf '%s%s%s%s%s%s%s%s%s%s%s%s%s' \
-    "$name" "$us" "$cli" "$us" "$project_path" "$us" "$model" "$us" "$effort" "$us" "$prompt" "$us" "$extra_joined" \
-    | sha256_hex
+  canonical=$(printf '%s%s%s%s%s%s%s%s%s%s%s%s%s' \
+    "$name" "$us" "$cli" "$us" "$project_path" "$us" "$model" "$us" "$effort" "$us" "$prompt" "$us" "$extra_joined")
+
+  # Phase 3: include fallbacks in the task fingerprint (Task 3.2).
+  local r_count; r_count=$(get_task_runner_count "$idx")
+  if [ "$r_count" -gt 1 ]; then
+    local rs; rs=$(printf '\036')
+    local fb_canonical=""
+    local r=1
+    while [ "$r" -lt "$r_count" ]; do
+      local f_cli f_models f_effort f_extra
+      f_cli=$(get_runner_field "$idx" "$r" "cli" | tr '[:upper:]' '[:lower:]')
+      f_models=$(get_runner_models_joined "$idx" "$r")
+      f_effort=$(get_runner_field "$idx" "$r" "effort")
+      f_extra=""; local f_first=1
+      while IFS= read -r arg; do
+        if [ "$f_first" -eq 1 ]; then f_extra="$arg"; f_first=0
+        else f_extra="$f_extra $arg"
+        fi
+      done < <(get_runner_extra_args "$idx" "$r")
+      
+      local fb_part
+      fb_part=$(printf '%s%s%s%s%s%s%s' "$f_cli" "$us" "$f_models" "$us" "$f_effort" "$us" "$f_extra")
+      if [ -z "$fb_canonical" ]; then fb_canonical="$fb_part"
+      else fb_canonical="$fb_canonical$rs$fb_part"
+      fi
+      r=$((r + 1))
+    done
+    canonical="$canonical$rs$fb_canonical"
+  fi
+
+  printf '%s' "$canonical" | sha256_hex
 }
 
 csv_field() {
