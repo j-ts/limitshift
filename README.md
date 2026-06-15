@@ -1,7 +1,7 @@
 <h1 align="center">LimitShift</h1>
 
 <p align="center">
-  <strong>Give your agentic CLI a to-do list and walk away. Different CLIs, one queue, usage-limit aware.</strong>
+  <strong>Give your agentic CLI a to-do list and walk away. Different CLIs, one queue, quota aware.</strong>
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@ You don't need to be a programmer. You do need to open a terminal once or twice.
 | [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) (`claude`) | `npm install -g @anthropic-ai/claude-code` | 2.1.170 |
 | [Codex CLI](https://www.npmjs.com/package/@openai/codex) (`codex`) | `npm install -g @openai/codex` | 0.136.0 |
 | [Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) (`gemini`) | `npm install -g @google/gemini-cli` | 0.46.0 |
-| [Antigravity](https://antigravity.google) (`agy`) | **Win** `irm https://antigravity.google/cli/install.ps1 \| iex` · **Mac/Linux** `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | 1.0.8 |
+| [Antigravity](https://antigravity.google) (`agy`) | **Win** `irm https://antigravity.google/cli/install.ps1 \| iex`<br>**Mac/Linux** `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | 1.0.8 |
 | [GitHub Copilot CLI](https://github.com/github/copilot-cli) (`copilot`) | `npm install -g @github/copilot` | 1.0.62 |
 
 These are the builds LimitShift has been verified against; other recent versions should work too. Antigravity is Google's replacement for Gemini CLI on personal Google AI Pro/Ultra accounts (Gemini CLI stays for enterprise).
@@ -70,7 +70,7 @@ Anyone who uses an AI coding app or agent CLI with a subscription or tier (Claud
 
 - **Extremely light, nothing to install** — LimitShift itself is a single script you run in place: no package to install, no dependencies of its own (just the AI CLIs you already use, plus `jq` on Mac/Linux).
 - **Usage-limit aware** — detects the cap, works out when it resets, waits, and resumes the *same* session so the AI keeps its memory.
-- **Five CLIs, one queue** — `claude`, `codex`, `gemini`, Antigravity (`agy`), and `copilot`, mixable task by task.
+- **Mix and match CLIs** — `claude`, `codex`, `gemini`, Antigravity (`agy`), and `copilot` in one queue, mixable task by task.
 - **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
 - **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
 - **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
