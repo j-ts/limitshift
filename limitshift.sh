@@ -349,7 +349,9 @@ ui_summary() {
     ui_color "$UI_DIM" " $GLYPH_DASH all ${task_count} queued task${plural} ${was} already done in a previous run."
     printf '\n'
     if [ -n "$state_path" ]; then
-      ui_color "$UI_DIM" "    To re-run, delete the state folder: ${state_path}"
+      ui_color "$UI_DIM" "    To redo one task, delete its marker in ${state_path}/status/"
+      printf '\n'
+      ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
     return
@@ -372,7 +374,9 @@ ui_summary() {
     ui_color "$UI_DIM" "    See a detailed transcript in ${log_path}"
     printf '\n'
     if [ "$skipped_count" -gt 0 ] && [ -n "$state_path" ]; then
-      ui_color "$UI_DIM" "    To redo skipped tasks, delete the state folder: ${state_path}"
+      ui_color "$UI_DIM" "    To redo one task, delete its marker in ${state_path}/status/"
+      printf '\n'
+      ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
     return
@@ -395,7 +399,9 @@ ui_summary() {
     ui_color "$UI_DIM" "    log saved to ${log_path}"
     printf '\n'
     if [ -n "$state_path" ]; then
-      ui_color "$UI_DIM" "    To redo skipped tasks, delete the state folder: ${state_path}"
+      ui_color "$UI_DIM" "    To redo one task, delete its marker in ${state_path}/status/"
+      printf '\n'
+      ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
     return
@@ -608,7 +614,7 @@ ui_demo() {
     k=$((k + 1))
   done
 
-  ui_summary "$count" "$count" 0 0 1 './.limitshift-limitshift-queue/limitshift-log.txt' './.limitshift-limitshift-queue' 0
+  ui_summary "$count" "$count" 0 0 1 './limitshift-limitshift-queue/limitshift-log.txt' './limitshift-limitshift-queue' 0
 }
 
 # --- Functional core (parity with limitshift.sh) -----------------------------
@@ -1820,9 +1826,15 @@ invoke_cli_task_run() {
 }
 
 initialize_runner_state() {
-  if [ -d "$LEGACY_RUNNER_STATE_PATH" ] && [ ! -d "$RUNNER_STATE_PATH" ]; then
-    mv "$LEGACY_RUNNER_STATE_PATH" "$RUNNER_STATE_PATH"
-    echo "Migrated state folder .ai-runner-$RUNNER_NAME -> .limitshift-$RUNNER_NAME"
+  # Migrate legacy dot-prefixed state folders to the current visible name.
+  if [ ! -d "$RUNNER_STATE_PATH" ]; then
+    if [ -d "$LEGACY_DOT_STATE_PATH" ]; then
+      mv "$LEGACY_DOT_STATE_PATH" "$RUNNER_STATE_PATH"
+      echo "Migrated state folder .limitshift-$RUNNER_NAME -> limitshift-$RUNNER_NAME"
+    elif [ -d "$LEGACY_RUNNER_STATE_PATH" ]; then
+      mv "$LEGACY_RUNNER_STATE_PATH" "$RUNNER_STATE_PATH"
+      echo "Migrated state folder .ai-runner-$RUNNER_NAME -> limitshift-$RUNNER_NAME"
+    fi
   fi
   mkdir -p "$RUNNER_STATE_PATH"
   mkdir -p "$SESSION_STATE_PATH"
@@ -1920,7 +1932,8 @@ QUEUE_DIR="$(cd "$(dirname "$QUEUE_PATH")" && pwd)"
 QUEUE_FILE_NAME="$(basename "$QUEUE_PATH")"
 QUEUE_PATH="$QUEUE_DIR/$QUEUE_FILE_NAME"
 RUNNER_NAME="${QUEUE_FILE_NAME%.*}"
-RUNNER_STATE_PATH="$QUEUE_DIR/.limitshift-$RUNNER_NAME"
+RUNNER_STATE_PATH="$QUEUE_DIR/limitshift-$RUNNER_NAME"
+LEGACY_DOT_STATE_PATH="$QUEUE_DIR/.limitshift-$RUNNER_NAME"
 LEGACY_RUNNER_STATE_PATH="$QUEUE_DIR/.ai-runner-$RUNNER_NAME"
 SESSION_STATE_PATH="$RUNNER_STATE_PATH/sessions"
 OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"

@@ -42,7 +42,7 @@ if (-not $LoadFunctionsOnly) {
     }
 
     # A bare filename (no directory separator) resolves from the script's directory so that
-    # `-QueuePath surgemesh-queue.json` is equivalent to placing the file next to the script.
+    # `-QueuePath project-a-queue.json` is equivalent to placing the file next to the script.
     # A relative path WITH separators resolves from the current working directory.
     if ($QueuePath -notmatch '[/\\]') {
         $QueuePath = Join-Path $PSScriptRoot $QueuePath
@@ -52,9 +52,10 @@ if (-not $LoadFunctionsOnly) {
     $QueueRootPath = Split-Path -Parent $QueuePath
     $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
     $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
-    # Task 5.3: state folder is now .limitshift-<name>; the old .ai-runner-<name> folder is migrated
-    # (renamed) automatically on startup when it exists and the new one does not.
-    $RunnerStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
+    # State folder is limitshift-<name> (visible, no dot prefix). Legacy dot-prefixed folders
+    # (.limitshift-<name> and the older .ai-runner-<name>) are migrated automatically on startup.
+    $RunnerStatePath = Join-Path $QueueRootPath "limitshift-$RunnerName"
+    $LegacyDotStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
     $LegacyRunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
     $SessionStatePath = Join-Path $RunnerStatePath "sessions"
     $OutputStatePath = Join-Path $RunnerStatePath "outputs"
@@ -269,7 +270,8 @@ function Write-UiSummary {
         Write-Host ("  " + $script:GlyphDiamond + " Nothing to do") -ForegroundColor $script:UiAccentColor -NoNewline
         Write-Host (" " + $script:GlyphDash + " all " + $TaskCount + " queued task" + $plural + " " + $was + " already done in a previous run.") -ForegroundColor Gray
         if (-not [string]::IsNullOrWhiteSpace($StatePath)) {
-            Write-Host ("    To re-run, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+            Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
+            Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
         return
     }
@@ -286,7 +288,8 @@ function Write-UiSummary {
         Write-Host ""
         Write-Host ("    See a detailed transcript in " + $LogPath) -ForegroundColor DarkGray
         if ($SkippedCount -gt 0 -and -not [string]::IsNullOrWhiteSpace($StatePath)) {
-            Write-Host ("    To redo skipped tasks, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+            Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
+            Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
         return
     }
@@ -303,7 +306,8 @@ function Write-UiSummary {
         }
         Write-Host ("    log saved to " + $LogPath) -ForegroundColor DarkGray
         if (-not [string]::IsNullOrWhiteSpace($StatePath)) {
-            Write-Host ("    To redo skipped tasks, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
+            Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
+            Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
         return
     }
@@ -604,7 +608,7 @@ function Invoke-UiDemo {
     # so the demo summary takes the "all completion-check, all succeeded" variant. Log path here
     # is illustrative only - nothing is written.
     Write-UiSummary -TaskCount $count -DoneCount $count -SkippedCount 0 -FailedCount 0 -AllCompletionCheck $true `
-        -LogPath '.\.limitshift-limitshift-queue\limitshift-log.txt' -StatePath '.\.limitshift-limitshift-queue'
+        -LogPath '.\limitshift-limitshift-queue\limitshift-log.txt' -StatePath '.\limitshift-limitshift-queue'
 }
 
 function New-DirectoryIfMissing {
@@ -616,11 +620,17 @@ function New-DirectoryIfMissing {
 }
 
 function Initialize-RunnerState {
-    # Task 5.3: migrate an old-named state folder (.ai-runner-<name>) to the new name
-    # (.limitshift-<name>) automatically when the old one exists and the new one does not.
-    if ((Test-Path -LiteralPath $LegacyRunnerStatePath) -and -not (Test-Path -LiteralPath $RunnerStatePath)) {
-        Move-Item -LiteralPath $LegacyRunnerStatePath -Destination $RunnerStatePath
-        Write-Host "Migrated state folder .ai-runner-$RunnerName -> .limitshift-$RunnerName"
+    # Migrate legacy dot-prefixed state folders to the current visible name.
+    # .ai-runner-<name> -> .limitshift-<name> -> limitshift-<name> (current)
+    if (-not (Test-Path -LiteralPath $RunnerStatePath)) {
+        if (Test-Path -LiteralPath $LegacyDotStatePath) {
+            Move-Item -LiteralPath $LegacyDotStatePath -Destination $RunnerStatePath
+            Write-Host "Migrated state folder .limitshift-$RunnerName -> limitshift-$RunnerName"
+        }
+        elseif (Test-Path -LiteralPath $LegacyRunnerStatePath) {
+            Move-Item -LiteralPath $LegacyRunnerStatePath -Destination $RunnerStatePath
+            Write-Host "Migrated state folder .ai-runner-$RunnerName -> limitshift-$RunnerName"
+        }
     }
 
     New-DirectoryIfMissing -Path $RunnerStatePath

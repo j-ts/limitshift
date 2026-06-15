@@ -886,7 +886,7 @@ exit 0
                 $models[0] | Should -Be 'm-first'
                 $models[1] | Should -Be 'm-second'
 
-                $idxPath = Join-Path $root '.limitshift-queue\sessions\task-01-model-index.txt'
+                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-model-index.txt'
                 Test-Path -LiteralPath $idxPath | Should -BeTrue
                 (Get-Content -LiteralPath $idxPath -Raw).Trim() | Should -Be '1'
             }
@@ -1305,7 +1305,7 @@ Ripgrep is not available. Falling back to GrepTool.
             $run.ExitCode | Should -Be 0
             $run.Output | Should -Match 'Command: claude'
 
-            $statusPath = Join-Path $root '.limitshift-queue\status'
+            $statusPath = Join-Path $root 'limitshift-queue\status'
             $doneFiles = Get-ChildItem -LiteralPath $statusPath -Filter '*.done' -ErrorAction SilentlyContinue
             $doneFiles | Should -BeNullOrEmpty
         }
@@ -1402,10 +1402,10 @@ exit 0
                 $run.Output | Should -Match 'Task 1 done'
                 $run.Output | Should -Match 'full prompt saved to the output file'
 
-                $statusPath = Join-Path $root '.limitshift-queue\status\task-01.done'
+                $statusPath = Join-Path $root 'limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
 
-                $outputFilePath = Join-Path $root '.limitshift-queue\outputs\task-01-gemini-warning-output.txt'
+                $outputFilePath = Join-Path $root 'limitshift-queue\outputs\task-01-gemini-warning-output.txt'
                 Test-Path -LiteralPath $outputFilePath | Should -BeTrue
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match 'say hi'
@@ -1575,7 +1575,7 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Task 1 done'
 
-                $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $root 'limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
 
                 $received = [System.IO.File]::ReadAllText($receivedFile)
@@ -1645,7 +1645,7 @@ exit 0
                 $run.Output | Should -Match 'Hit a usage limit'
                 $run.Output | Should -Match 'Task 1 done'
 
-                $donePath = Join-Path $root '.limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $root 'limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
             }
             finally {
@@ -1704,7 +1704,7 @@ exit 0
                 $run.ExitCode | Should -Be 1
                 $run.Output | Should -Match 'no progress'
 
-                $failedPath = Join-Path $root '.limitshift-queue\status\task-01.failed'
+                $failedPath = Join-Path $root 'limitshift-queue\status\task-01.failed'
                 Test-Path -LiteralPath $failedPath | Should -BeTrue
                 $failedText = [System.IO.File]::ReadAllText($failedPath)
                 $failedText | Should -Match 'no progress: agent repeated the same response without a completion marker'
@@ -1768,7 +1768,7 @@ exit 0
                 $run.Output | Should -Not -Match '"result"'
 
                 # The raw JSON still lands in the per-task output file.
-                $outputFilePath = Join-Path $root '.limitshift-queue\outputs\task-01-clean-output-task-output.txt'
+                $outputFilePath = Join-Path $root 'limitshift-queue\outputs\task-01-clean-output-task-output.txt'
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match '"session_id"'
             }
@@ -1885,18 +1885,18 @@ exit 0
                 )
                 $run.ExitCode | Should -Be 0
 
-                $donePath = Join-Path $fx.Root '.limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root 'limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
                 $doneLines = @(Get-Content -LiteralPath $donePath)
                 # Two lines: timestamp then a 64-hex fingerprint.
                 $doneLines.Count | Should -Be 2
                 $doneLines[1] | Should -Match '^[0-9a-f]{64}$'
 
-                $readmePath = Join-Path $fx.Root '.limitshift-queue\_README.txt'
+                $readmePath = Join-Path $fx.Root 'limitshift-queue\_README.txt'
                 Test-Path -LiteralPath $readmePath | Should -BeTrue
                 (Get-Content -LiteralPath $readmePath -Raw) | Should -Match 'delete this whole folder'
 
-                $csvPath = Join-Path $fx.Root '.limitshift-queue\runs.csv'
+                $csvPath = Join-Path $fx.Root 'limitshift-queue\runs.csv'
                 Test-Path -LiteralPath $csvPath | Should -BeTrue
                 $csvLines = @(Get-Content -LiteralPath $csvPath)
                 $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status'
@@ -1916,9 +1916,9 @@ exit 0
                     '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
                 )
                 $first.ExitCode | Should -Be 0
-                $donePath = Join-Path $fx.Root '.limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root 'limitshift-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
-                $sessionPath = Join-Path $fx.Root '.limitshift-queue\sessions\task-01-session-id.txt'
+                $sessionPath = Join-Path $fx.Root 'limitshift-queue\sessions\task-01-session-id.txt'
                 Test-Path -LiteralPath $sessionPath | Should -BeTrue
 
                 # Change the prompt in the queue, then re-run.
@@ -1948,7 +1948,7 @@ exit 0
                 $env:PATH = "$($fx.BinPath);$oldPath"
 
                 # Seed a legacy single-line .done marker for an otherwise-unchanged queue task.
-                $statusPath = Join-Path $fx.Root '.limitshift-queue\status'
+                $statusPath = Join-Path $fx.Root 'limitshift-queue\status'
                 New-Item -ItemType Directory -Path $statusPath -Force | Out-Null
                 $donePath = Join-Path $statusPath 'task-01.done'
                 (Get-Date).ToString("s") | Set-Content -LiteralPath $donePath -Encoding UTF8
@@ -2078,9 +2078,9 @@ exit 0
                     '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath
                 )
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'Migrated state folder \.ai-runner-queue -> \.limitshift-queue'
+                $run.Output | Should -Match 'Migrated state folder \.ai-runner-queue -> limitshift-queue'
 
-                $newStatePath = Join-Path $root '.limitshift-queue'
+                $newStatePath = Join-Path $root 'limitshift-queue'
                 Test-Path -LiteralPath $newStatePath | Should -BeTrue
                 Test-Path -LiteralPath $legacyStatePath | Should -BeFalse
 
@@ -2146,7 +2146,7 @@ exit 0
                 $run.Output | Should -Match 'Task 1 done'
 
                 # The legacy queue was actually used: its state folder (.ai-run-queue) was created.
-                $donePath = Join-Path $root '.limitshift-ai-run-queue\status\task-01.done'
+                $donePath = Join-Path $root 'limitshift-ai-run-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
             }
             finally {
@@ -2304,7 +2304,7 @@ exit 0
             New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
             $binDir = New-AgyStub -Root $root -Models @('fresh-model')
             $qPath = Join-Path $root 'q.json'
-            $capsDir = Join-Path $root '.limitshift-q\capabilities'
+            $capsDir = Join-Path $root 'limitshift-q\capabilities'
             New-Item -ItemType Directory -Path $capsDir -Force | Out-Null
             $stale = '{"Cli":"agy","SupportsModelDiscovery":true,"Models":["stale-model"],"Source":"agy models","DiscoveredAt":"2000-01-01T00:00:00Z","Error":""}'
             Set-Content (Join-Path $capsDir 'agy.json') $stale -Encoding UTF8
@@ -2424,7 +2424,7 @@ exit 0
             } finally {
                 $env:PATH = $oldPath
             }
-            $stateDir = Join-Path $root '.limitshift-myproject-queue'
+            $stateDir = Join-Path $root 'limitshift-myproject-queue'
 
             $run.ExitCode | Should -Be 0
             $run.Output   | Should -Match 'Task 1 done'
@@ -2472,8 +2472,8 @@ exit 0
             Invoke-RunQueue -QueuePath (Join-Path $root 'alpha-queue.json') -ExtraPath $binDir | Out-Null
             Invoke-RunQueue -QueuePath (Join-Path $root 'beta-queue.json')  -ExtraPath $binDir | Out-Null
 
-            $alphaState = Join-Path $root '.limitshift-alpha-queue'
-            $betaState  = Join-Path $root '.limitshift-beta-queue'
+            $alphaState = Join-Path $root 'limitshift-alpha-queue'
+            $betaState  = Join-Path $root 'limitshift-beta-queue'
 
             Test-Path (Join-Path $alphaState 'status\task-01.done') | Should -BeTrue
             Test-Path (Join-Path $betaState  'status\task-01.done') | Should -BeTrue
@@ -2494,7 +2494,7 @@ exit 0
                 tasks    = @(@{ name = 'stale lock task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
             }
 
-            $stateDir = Join-Path $root '.limitshift-q'
+            $stateDir = Join-Path $root 'limitshift-q'
             New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
             $lockPath = Join-Path $stateDir 'limitshift.lock'
             '99999999' | Set-Content -LiteralPath $lockPath -Encoding UTF8 -NoNewline
@@ -2519,7 +2519,7 @@ exit 0
                 tasks    = @(@{ name = 'lock live task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
             }
 
-            $stateDir = Join-Path $root '.limitshift-q'
+            $stateDir = Join-Path $root 'limitshift-q'
             New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
             $lockPath = Join-Path $stateDir 'limitshift.lock'
 

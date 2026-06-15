@@ -36,7 +36,7 @@
           "type": "integer",
           "minimum": 0,
           "default": 24,
-          "description": "How many hours to cache the discovered model list under .limitshift-<queue>/capabilities/<cli>.json before re-querying. Set 0 to disable caching. Override with --refresh-capabilities / -RefreshCapabilities."
+          "description": "How many hours to cache the discovered model list under limitshift-<queue>/capabilities/<cli>.json before re-querying. Set 0 to disable caching. Override with --refresh-capabilities / -RefreshCapabilities."
         },
         "probeModels": {
           "type": "boolean",

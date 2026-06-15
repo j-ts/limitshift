@@ -11,7 +11,7 @@ FAIL=0
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/limitshift-shell-tests.XXXXXX")"
 
 cleanup() {
-  rm -rf "$TMP_ROOT" "$CONFIGS"/.limitshift-*
+  rm -rf "$TMP_ROOT" "$CONFIGS"/limitshift-* "$CONFIGS"/.limitshift-*
 }
 
 trap cleanup EXIT
@@ -52,7 +52,7 @@ assert_no_done_files() {
 }
 
 reset_fixture_state() {
-  rm -rf "$CONFIGS"/.limitshift-*
+  rm -rf "$CONFIGS"/limitshift-* "$CONFIGS"/.limitshift-*
 }
 
 source_runner_functions() {
@@ -77,7 +77,7 @@ run_dry_run_state_test() {
   local out exit_code state_dir
   out=$(bash "$SCRIPT" --queue "$CONFIGS/valid-full.json" --dry-run 2>&1)
   exit_code=$?
-  state_dir="$CONFIGS/.limitshift-valid-full"
+  state_dir="$CONFIGS/limitshift-valid-full"
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Command: claude' &&
@@ -201,7 +201,7 @@ run_duplicate_name_test() {
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_success "$bin_dir"
@@ -396,7 +396,7 @@ run_simple_mode_verbatim_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I did the thing, no marker","session_id":"s-1","is_error":false}'
@@ -446,7 +446,7 @@ run_simple_mode_override_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   # Reply WITHOUT a marker so completion-check mode would NOT mark done on the first run.
@@ -498,7 +498,7 @@ run_loose_marker_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"OK[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -544,7 +544,7 @@ run_stall_guard_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"I am ready to help. What would you like me to work on?","session_id":"s-1","is_error":false}'
@@ -591,7 +591,7 @@ run_clean_output_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local output_file="$root/.limitshift-queue/outputs/task-01-clean-output-output.txt"
+  local output_file="$root/limitshift-queue/outputs/task-01-clean-output-output.txt"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"Here is the clean answer\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -684,7 +684,7 @@ run_resume_repeats_prompt_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_dir="$root/received"
-  local status_dir="$root/.limitshift-queue/status"
+  local status_dir="$root/limitshift-queue/status"
 
   mkdir -p "$bin_dir" "$project_dir" "$received_dir"
 
@@ -847,7 +847,7 @@ run_state_layout_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local state_dir="$root/.limitshift-queue"
+  local state_dir="$root/limitshift-queue"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -901,7 +901,7 @@ run_done_marker_format_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local done_file="$root/.limitshift-queue/status/task-01.done"
+  local done_file="$root/limitshift-queue/status/task-01.done"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -1012,7 +1012,7 @@ run_legacy_done_reruns_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local received_file="$root/received.txt"
-  local done_file="$root/.limitshift-queue/status/task-01.done"
+  local done_file="$root/limitshift-queue/status/task-01.done"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_response "$bin_dir" "$received_file" '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
@@ -1025,7 +1025,7 @@ run_legacy_done_reruns_test() {
 EOF
 
   # Seed a legacy marker: a single timestamp line with no fingerprint (older format).
-  mkdir -p "$root/.limitshift-queue/status"
+  mkdir -p "$root/limitshift-queue/status"
   printf '%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$done_file"
 
   local out exit_code line_count fp_line
@@ -1088,13 +1088,13 @@ $out"
 }
 
 run_state_migration_test() {
-  local desc="old .ai-runner-<name> state folder migrates to .limitshift-<name>, preserving contents"
+  local desc="old .ai-runner-<name> state folder migrates to limitshift-<name>, preserving contents"
   local root="$TMP_ROOT/state-migration"
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local legacy_state_dir="$root/.ai-runner-queue"
-  local new_state_dir="$root/.limitshift-queue"
+  local new_state_dir="$root/limitshift-queue"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_fake_claude_success "$bin_dir"
@@ -1116,7 +1116,7 @@ EOF
   marker=$(cat "$new_state_dir/marker.txt" 2>/dev/null)
 
   if [ "$exit_code" -eq 0 ] &&
-     printf '%s' "$out" | grep -q 'Migrated state folder .ai-runner-queue -> .limitshift-queue' &&
+     printf '%s' "$out" | grep -q 'Migrated state folder .ai-runner-queue -> limitshift-queue' &&
      [ -d "$new_state_dir" ] &&
      [ ! -d "$legacy_state_dir" ] &&
      [ "$marker" = "preserve me 123" ]; then
@@ -1155,7 +1155,7 @@ EOF
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Using legacy queue filename ai-run-queue.json' &&
      printf '%s' "$out" | grep -q 'Task 1 done' &&
-     [ -f "$root/.limitshift-ai-run-queue/status/task-01.done" ]; then
+     [ -f "$root/limitshift-ai-run-queue/status/task-01.done" ]; then
     pass "$desc"
   else
     fail "$desc" "exit=$exit_code
@@ -1970,7 +1970,7 @@ run_model_rotation_switch_test() {
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
   local model_log="$root/models.txt"
-  local idx_file="$root/.limitshift-queue/sessions/task-01-model-index.txt"
+  local idx_file="$root/limitshift-queue/sessions/task-01-model-index.txt"
 
   mkdir -p "$bin_dir" "$project_dir"
   write_rotation_gemini "$bin_dir" "$model_log" "m-first"
@@ -2391,7 +2391,7 @@ run_refresh_capabilities_test() {
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local caps_dir="$root/.limitshift-queue/capabilities"
+  local caps_dir="$root/limitshift-queue/capabilities"
   mkdir -p "$bin_dir" "$project_dir" "$caps_dir"
 
   cat > "$bin_dir/agy" <<'EOF'
@@ -2484,7 +2484,7 @@ EOF
   local out exit_code state_dir
   out=$(PATH="$root/bin:$PATH" bash "$script_copy" --queue-path "$queue_name" 2>&1)
   exit_code=$?
-  state_dir="$root/.limitshift-myproject-queue"
+  state_dir="$root/limitshift-myproject-queue"
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -q 'Task 1 done' &&
@@ -2526,7 +2526,7 @@ $out"
 }
 
 run_queue_separate_state_dirs_test() {
-  local desc="two different queue files produce separate .limitshift-<name> state folders"
+  local desc="two different queue files produce separate limitshift-<name> state folders"
   local root="$TMP_ROOT/separate-state-dirs"
   local bin_dir="$root/bin"
   local project_dir="$root/project"
@@ -2551,11 +2551,11 @@ EOF
   PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$root/alpha-queue.json" >/dev/null 2>&1
   PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue-path "$root/beta-queue.json" >/dev/null 2>&1
 
-  if [ -f "$root/.limitshift-alpha-queue/status/task-01.done" ] &&
-     [ -f "$root/.limitshift-beta-queue/status/task-01.done" ]; then
+  if [ -f "$root/limitshift-alpha-queue/status/task-01.done" ] &&
+     [ -f "$root/limitshift-beta-queue/status/task-01.done" ]; then
     pass "$desc"
   else
-    fail "$desc" "done markers or state dirs missing; found: $(ls -d "$root"/.limitshift-* 2>/dev/null | tr '\n' ' ')"
+    fail "$desc" "done markers or state dirs missing; found: $(ls -d "$root"/limitshift-* 2>/dev/null | tr '\n' ' ')"
   fi
 }
 
@@ -2565,7 +2565,7 @@ run_queue_lock_stale_pid_proceeds_test() {
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local state_dir="$root/.limitshift-queue"
+  local state_dir="$root/limitshift-queue"
   local lock_path="$state_dir/limitshift.lock"
 
   mkdir -p "$bin_dir" "$project_dir" "$state_dir"
@@ -2599,7 +2599,7 @@ run_queue_lock_live_pid_blocks_test() {
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local state_dir="$root/.limitshift-queue"
+  local state_dir="$root/limitshift-queue"
   local lock_path="$state_dir/limitshift.lock"
 
   mkdir -p "$bin_dir" "$project_dir" "$state_dir"

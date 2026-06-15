@@ -1,5 +1,6 @@
 # Runner state (sessions, outputs, logs) — created next to the queue file.
-# Both the new and the legacy (pre-rename) state-folder names are ignored.
+# Current name plus legacy dot-prefixed names from older versions.
+limitshift-*/
 .limitshift-*/
 .ai-runner-*/
 .claude-runner-*/

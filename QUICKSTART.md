@@ -47,11 +47,11 @@ Keep the machine awake for long runs. On macOS, for example: `caffeinate -i ./li
 
 ## State & re-running
 
-All of LimitShift's memory lives in one folder, `.limitshift-limitshift-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `limitshift-log.txt`, and a `_README.txt` describing it all.
+All of LimitShift's memory lives in one folder, `limitshift-limitshift-queue/`, next to your queue file. It holds three subfolders — `sessions/` (resume ids), `outputs/` (full run output), and `status/` (`.done` / `.failed` markers) — plus `runs.csv` (one row per run), the transcript `limitshift-log.txt`, and a `_README.txt` describing it all.
 
 - Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` **auto-invalidates** its done marker, so that task re-runs with a fresh session next time.
 - To re-run one finished task, delete its `status/task-NN.done` file.
-- To start over completely, delete the whole `.limitshift-limitshift-queue/` folder.
+- To start over completely, delete the whole `limitshift-limitshift-queue/` folder.
 - The entire state folder is **safe to delete at any time** — it is rebuilt on the next run.
 
 ## Running multiple queues in parallel
@@ -60,17 +60,17 @@ Create one queue JSON per project, then open a separate terminal for each:
 
 ```powershell
 # terminal 1
-.\limitshift.ps1 -QueuePath surgemesh-queue.json
+.\limitshift.ps1 -QueuePath project-a-queue.json
 
 # terminal 2
-.\limitshift.ps1 -QueuePath papertrade-queue.json
+.\limitshift.ps1 -QueuePath project-b-queue.json
 ```
 ```bash
 # terminal 1
-./limitshift.sh --queue-path surgemesh-queue.json
+./limitshift.sh --queue-path project-a-queue.json
 
 # terminal 2
-./limitshift.sh --queue-path papertrade-queue.json
+./limitshift.sh --queue-path project-b-queue.json
 ```
 
-Each queue keeps its state in its own `.limitshift-<name>/` folder. If you accidentally start the same queue twice, the second run exits immediately with an error — you'll see the PID of the first run in the message.
+Each queue keeps its state in its own `limitshift-<name>/` folder. If you accidentally start the same queue twice, the second run exits immediately with an error — you'll see the PID of the first run in the message.
