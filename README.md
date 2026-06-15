@@ -22,7 +22,7 @@
 
 LimitShift is a tiny terminal app that runs [five agentic CLIs](#supported-tools) through a list of tasks, one at a time. It drives the *command-line* version of those tools. If you've only ever used the app, you install the matching CLI once and sign in with the same account.
 
-You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit. It **sleeps until your quota resets, then continues the same conversation.** That's the whole idea behind the name: your usage limit stops being a wall you hit and start over from, and becomes a pause the queue slides across. Start a long list and let it work unattended. How far it gets depends on your quota, how many prompts, and how large the tasks are.
+You write your tasks in one list and start it. When a tool says *"you're out of quota,"* LimitShift doesn't quit. It **sleeps until your quota resets, then continues the same conversation.** Start a long list and let it work unattended. How far it gets depends on your quota, how many prompts, and how large the tasks are.
 
 You don't need to be a programmer. You do need to open a terminal once or twice. Every step is spelled out.
 
@@ -205,7 +205,7 @@ From the LimitShift folder:
 ./limitshift.sh                     # Mac / Linux
 ```
 
-LimitShift prints each reply under a `--- agent response ---` header. It may sit quietly for a minute while the AI works; that's normal, not frozen. Press **Ctrl+C** to stop at any time; your progress is saved, so you can resume later and it picks up where it left off. You'll see `Task 1 completed` when a task finishes.
+LimitShift prints each reply under a `✦ response` header. It may sit quietly for a minute while the AI works; that's normal, not frozen. Press **Ctrl+C** to stop at any time; your progress is saved, so you can resume later and it picks up where it left off. You'll see `Task N done` when a task finishes.
 
 **Didn't go how you wanted?** Edit the task's `prompt` and run again. LimitShift notices the change and re-does just that task. Add a new task to refine further; finished tasks are skipped.
 
