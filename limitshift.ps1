@@ -2189,21 +2189,81 @@ function Invoke-CliTaskRun {
     return $result
 }
 
+# Build a DateTime from an optional date token and a clock token recovered from a CLI's
+# usage-limit error. With no date the clock is taken as today and rolled to tomorrow if already
+# past; with a date but no explicit year the current year is assumed and rolled to next year if
+# already past. Returns $null when nothing parses. Uses TryParseExact (no exceptions in the loop)
+# so a misparse can never silently abort the caller.
+function Convert-ResetClockToDateTime {
+    param([string]$DateText, [string]$TimeText)
+
+    $inv  = [System.Globalization.CultureInfo]::InvariantCulture
+    $none = [System.Globalization.DateTimeStyles]::None
+    $now  = Get-Date
+    # Normalize the clock: "7:21 PM" -> "7:21PM", "19:21" stays as-is.
+    $time = ($TimeText.ToUpper() -replace '\s+', '')
+
+    if ([string]::IsNullOrWhiteSpace($DateText)) {
+        foreach ($fmt in @('h:mmtt', 'htt', 'HH:mm', 'H:mm')) {
+            [datetime]$parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact($time, $fmt, $inv, $none, [ref]$parsed)) {
+                $candidate = $now.Date.Add($parsed.TimeOfDay)
+                if ($candidate -lt $now) { $candidate = $candidate.AddDays(1) }
+                return $candidate
+            }
+        }
+        return $null
+    }
+
+    # Strip abbreviation dots ("Jun." -> "Jun") and collapse runs of whitespace.
+    $date    = (($DateText.Trim() -replace '\.', '') -replace '\s+', ' ')
+    $hasYear = ($date -match '\d{4}')
+    $value   = $date + ' ' + $time
+
+    $formats = @(
+        'yyyy-MM-dd h:mmtt', 'yyyy-MM-dd htt', 'yyyy-MM-dd HH:mm', 'yyyy-MM-dd H:mm',
+        'MMM d h:mmtt', 'MMM d htt', 'MMM d HH:mm', 'MMM d H:mm',
+        'MMMM d h:mmtt', 'MMMM d htt', 'MMMM d HH:mm', 'MMMM d H:mm'
+    )
+    foreach ($fmt in $formats) {
+        [datetime]$parsed = [datetime]::MinValue
+        if ([datetime]::TryParseExact($value, $fmt, $inv, $none, [ref]$parsed)) {
+            $candidate = $parsed
+            # ParseExact with no year token defaults to the current year; advance if already past.
+            if (-not $hasYear -and $candidate -lt $now.AddMinutes(-5)) { $candidate = $candidate.AddYears(1) }
+            return $candidate
+        }
+    }
+
+    # Last resort: a free-form parse of the original "<date> <time>" text (handles ISO with 'T',
+    # 4-digit-year forms, and month spellings the explicit formats above miss, e.g. "Sept").
+    [datetime]$loose = [datetime]::MinValue
+    if ([datetime]::TryParse(($date + ' ' + $TimeText.Trim()), $inv,
+            [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$loose)) {
+        $candidate = $loose
+        if (-not $hasYear -and $candidate -lt $now.AddMinutes(-5)) { $candidate = $candidate.AddYears(1) }
+        return $candidate
+    }
+    return $null
+}
+
 function Get-ResetTimeFromErrorText {
     param([string]$ErrorText)
 
     if ([string]::IsNullOrWhiteSpace($ErrorText)) { return $null }
 
-    $m = [regex]::Match($ErrorText, '(?i)(?:try again at|resets? at|available (?:again )?at)\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)')
+    # "...try again at <when>" / "resets at <when>" / "available (again) at <when>". <when> is a
+    # clock time, optionally preceded by a date: codex emits a bare clock ("7:21 PM"); other CLIs
+    # sometimes add a date ("Jun 16, 7:21 PM", "2026-06-16 19:21", "2026-06-16T19:21"). Capture the
+    # optional date and the clock separately, then combine and parse.
+    $m = [regex]::Match($ErrorText,
+        '(?i)(?:try again at|resets? at|available (?:again )?at)\s+' +
+        '(?<date>(?:\d{4}-\d{2}-\d{2})|(?:[A-Za-z]{3,9}\.?\s+\d{1,2}))?' +
+        '[ ,T]*' +
+        '(?<time>\d{1,2}(?::\d{2})?\s*(?:am|pm)?)')
     if ($m.Success) {
-        foreach ($format in @('h:mmtt','htt','HH:mm','H:mm')) {
-            try {
-                $t = [datetime]::ParseExact($m.Groups[1].Value.ToUpper() -replace '\s+', '', $format, [System.Globalization.CultureInfo]::InvariantCulture)
-                $candidate = (Get-Date).Date.Add($t.TimeOfDay)
-                if ($candidate -lt (Get-Date)) { $candidate = $candidate.AddDays(1) }
-                return $candidate
-            } catch { }
-        }
+        $reset = Convert-ResetClockToDateTime -DateText $m.Groups['date'].Value -TimeText $m.Groups['time'].Value
+        if ($null -ne $reset) { return $reset }
     }
 
     $m = [regex]::Match($ErrorText, '(?i)try again in\s+(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?\s*(?:(\d+)\s*s(?:ec(?:onds?)?)?)?')
