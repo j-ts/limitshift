@@ -1242,6 +1242,16 @@ run_reset_time_test() {
     fail "$desc (picks first runnable)" "Got '$r', wanted 'Run 2 '"
   fi
 
+  # 1b. Wraps around from a non-zero start index to find an earlier runnable runner.
+  # start=2 (set aside) -> scan 2,0,1 -> runner0 (null) is first runnable.
+  states='[{"setAside":false,"limitedUntil":null},{"setAside":false,"limitedUntil":100000},{"setAside":true,"limitedUntil":null}]'
+  r=$(select_next_runner 2 500 "$states")
+  if [ "$r" = "Run 0 " ]; then
+    pass "$desc (wraps from non-zero start index)"
+  else
+    fail "$desc (wraps from non-zero start index)" "Got '$r', wanted 'Run 0 '"
+  fi
+
   # 2. Returns Wait with soonest within-24h reset when nothing is runnable
   # now=500. runner0 resets at 800 (in 300s), runner1 at 600 (in 100s).
   states='[{"setAside":false,"limitedUntil":800},{"setAside":false,"limitedUntil":600}]'
@@ -1250,6 +1260,16 @@ run_reset_time_test() {
     pass "$desc (returns wait for soonest)"
   else
     fail "$desc (returns wait for soonest)" "Got '$r', wanted 'Wait 1 600'"
+  fi
+
+  # 2b. Skips a >24h runner and waits for a within-24h runner when both are limited.
+  # now=500. runner0 resets at 500+90000 (>24h), runner1 at 7700 (in ~2h, <=24h).
+  states='[{"setAside":false,"limitedUntil":90500},{"setAside":false,"limitedUntil":7700}]'
+  r=$(select_next_runner 0 500 "$states")
+  if [ "$r" = "Wait 1 7700" ]; then
+    pass "$desc (skips >24h, waits within-24h)"
+  else
+    fail "$desc (skips >24h, waits within-24h)" "Got '$r', wanted 'Wait 1 7700'"
   fi
 
   # 3. Returns Fail when every live runner resets > 24h out

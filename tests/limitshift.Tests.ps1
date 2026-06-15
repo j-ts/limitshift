@@ -443,6 +443,18 @@ Describe 'limitshift.ps1' {
             $r.Action | Should -Be 'Run'
             $r.Index  | Should -Be 2
         }
+        It 'wraps around from a non-zero start index to find an earlier runnable runner' {
+            $now = Get-Date
+            $states = @(
+                @{ SetAside=$false; LimitedUntil=$null },
+                @{ SetAside=$false; LimitedUntil=$now.AddHours(2) },
+                @{ SetAside=$true;  LimitedUntil=$null }
+            )
+            # Start at index 2 (set aside) -> scan 2,0,1 -> index 0 is the first runnable.
+            $r = Select-NextRunner -States $states -StartIndex 2 -Now $now
+            $r.Action | Should -Be 'Run'
+            $r.Index  | Should -Be 0
+        }
         It 'returns Wait with the soonest within-24h reset when nothing is runnable' {
             $now = Get-Date
             $states = @(
@@ -453,6 +465,16 @@ Describe 'limitshift.ps1' {
             $r.Action | Should -Be 'Wait'
             $r.Index  | Should -Be 1
             ($r.WaitUntil - $now).TotalMinutes | Should -BeGreaterThan 55
+        }
+        It 'skips a >24h runner and waits for a within-24h runner when both are limited' {
+            $now = Get-Date
+            $states = @(
+                @{ SetAside=$false; LimitedUntil=$now.AddHours(48) },
+                @{ SetAside=$false; LimitedUntil=$now.AddHours(2) }
+            )
+            $r = Select-NextRunner -States $states -StartIndex 0 -Now $now
+            $r.Action | Should -Be 'Wait'
+            $r.Index  | Should -Be 1
         }
         It 'returns Fail when every live runner resets more than 24h out' {
             $now = Get-Date
