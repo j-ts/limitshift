@@ -723,11 +723,11 @@ task_completion_check() {
 }
 
 get_codex_resume_extra_args() {
-  local idx="$1"
+  local idx="$1" runner_idx="${2:-0}"
   local raw_args=() arg
   while IFS= read -r arg; do
     if [ -n "$arg" ]; then raw_args+=("$arg"); fi
-  done < <(get_task_extra_args "$idx")
+  done < <(get_runner_extra_args "$idx" "$runner_idx")
   CODEX_RESUME_EXTRA_ARGS=()
   local i=0
   while [ "$i" -lt "${#raw_args[@]}" ]; do
@@ -1623,15 +1623,15 @@ save_task_failed_marker() {
 }
 
 build_cli_args() {
-  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" prompt="${5:-}"
+  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" prompt="${5:-}" runner_idx="${6:-0}"
   local cli model effort project_path
-  cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
+  cli=$(get_runner_field "$idx" "$runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
   if [ -n "$model_override" ]; then
     model="$model_override"
   else
-    model=$(get_task_models "$idx" | sed -n '1p')
+    model=$(get_runner_models "$idx" "$runner_idx" | sed -n '1p')
   fi
-  effort=$(task_field "$idx" "effort")
+  effort=$(get_runner_field "$idx" "$runner_idx" "effort")
   project_path=$(task_field "$idx" "projectPath")
 
   CLI_ARGS=()
@@ -1640,7 +1640,7 @@ build_cli_args() {
   case "$cli" in
     claude)
       local ollama=0
-      if is_ollama_task "$idx"; then ollama=1; fi
+      if is_ollama_runner "$idx" "$runner_idx"; then ollama=1; fi
       local claude_args=()
       claude_args+=("-p")
       if [ "$mode" = "New" ]; then
@@ -1666,7 +1666,7 @@ build_cli_args() {
           fi
           claude_args+=("$arg")
         fi
-      done < <(get_task_extra_args "$idx")
+      done < <(get_runner_extra_args "$idx" "$runner_idx")
       if [ "$ollama" -eq 1 ]; then
         CLI_EXE="ollama"
         CLI_ARGS=("launch" "claude")
@@ -1681,7 +1681,7 @@ build_cli_args() {
       CLI_ARGS+=("exec")
       if [ "$mode" = "Resume" ]; then
         CLI_ARGS+=("resume" "$session_id")
-        get_codex_resume_extra_args "$idx"
+        get_codex_resume_extra_args "$idx" "$runner_idx"
       fi
       CLI_ARGS+=("--json")
       if [ -n "$model" ]; then CLI_ARGS+=("-m" "$model"); fi
@@ -1691,7 +1691,7 @@ build_cli_args() {
       else
         while IFS= read -r arg; do
           if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
-        done < <(get_task_extra_args "$idx")
+        done < <(get_runner_extra_args "$idx" "$runner_idx")
       fi
       ;;
     gemini)
@@ -1702,7 +1702,7 @@ build_cli_args() {
       if [ -n "$model" ]; then CLI_ARGS+=("-m" "$model"); fi
       while IFS= read -r arg; do
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
-      done < <(get_task_extra_args "$idx")
+      done < <(get_runner_extra_args "$idx" "$runner_idx")
       ;;
     agy)
       if [ "$mode" = "Resume" ]; then CLI_ARGS+=("-c"); fi
@@ -1710,7 +1710,7 @@ build_cli_args() {
       if [ -n "$model" ]; then CLI_ARGS+=("--model" "$model"); fi
       while IFS= read -r arg; do
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
-      done < <(get_task_extra_args "$idx")
+      done < <(get_runner_extra_args "$idx" "$runner_idx")
       ;;
     copilot)
       if [ "$mode" = "New" ]; then
@@ -1724,7 +1724,7 @@ build_cli_args() {
       if [ -n "$effort" ]; then CLI_ARGS+=("--effort" "$effort"); fi
       while IFS= read -r arg; do
         if [ -n "$arg" ]; then CLI_ARGS+=("$arg"); fi
-      done < <(get_task_extra_args "$idx")
+      done < <(get_runner_extra_args "$idx" "$runner_idx")
       ;;
   esac
 }
@@ -1911,10 +1911,10 @@ build_prompt_with_handoff() {
 }
 
 invoke_cli_task_run() {
-  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" quiet="${5:-0}"
+  local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" quiet="${5:-0}" runner_idx="${6:-0}" use_handoff="${7:-0}"
   local name cli project_path prompt
   name=$(task_field "$idx" "name")
-  cli=$(task_field "$idx" "cli" | tr '[:upper:]' '[:lower:]')
+  cli=$(get_runner_field "$idx" "$runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
   project_path=$(task_field "$idx" "projectPath")
   project_path="${project_path//\\//}"
   prompt=$(task_field "$idx" "prompt")
@@ -1936,7 +1936,9 @@ invoke_cli_task_run() {
 
   local prompt_with_marker
   if [ "$mode" = "New" ]; then
-    if [ "$completion_check" = "true" ]; then
+    if [ "$use_handoff" -eq 1 ]; then
+      prompt_with_marker=$(build_prompt_with_handoff "$idx" "$completion_check")
+    elif [ "$completion_check" = "true" ]; then
       prompt_with_marker=$(printf '%s%s\n' "$prompt" "$marker_block")
     else
       prompt_with_marker=$(printf '%s' "$prompt")
@@ -1945,7 +1947,7 @@ invoke_cli_task_run() {
     prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$prompt" "$marker_block")
   fi
 
-  build_cli_args "$idx" "$mode" "$session_id" "$model_override" "$prompt_with_marker"
+  build_cli_args "$idx" "$mode" "$session_id" "$model_override" "$prompt_with_marker" "$runner_idx"
 
   if [ "$quiet" -ne 1 ]; then
     ui_task_header "$((idx + 1))" "$UI_TASK_TOTAL" "$cli" "$mode" "$model_override" "$name" "$prompt"
@@ -2248,6 +2250,11 @@ run_queue() {
     hasPreviousNoMarker=0
     taskCompletionCheck=$(task_completion_check "$i")
 
+    local runnerCount
+    runnerCount=$(get_task_runner_count "$i")
+
+    if [ "$runnerCount" -eq 1 ]; then
+
     taskModels=()
     while IFS= read -r m; do taskModels+=("$m"); done < <(get_task_models "$i")
     modelCount=${#taskModels[@]}
@@ -2430,6 +2437,267 @@ run_queue() {
       ui_color "$UI_DIM" "  $GLYPH_RETRY Task $taskNumber/$TASK_COUNT $GLYPH_DOT $(task_field "$i" "name") not finished yet $GLYPH_DOT resuming the same session"
       printf '\n'
     done
+
+    else
+    # --- FALLBACKS PATH (multiple runners) ---
+    local setAside=() limitedUntil=() runnerModelIndices=() runnerReasons=()
+    local fb_j
+    for fb_j in $(seq 0 $((runnerCount - 1))); do
+      setAside+=("false")
+      limitedUntil+=("")
+      runnerModelIndices+=("0")
+      runnerReasons+=("")
+    done
+
+    local currentRunnerIndex=0 pendingHandoff=0
+    runCount=0; errorRetryCount=0; stallCount=0
+    previousNoMarkerText=""; hasPreviousNoMarker=0; mustWaitForFreshSession=0
+
+    while true; do
+      # Build states JSON for select_next_runner
+      local fb_states_json="["
+      local fb_sep=""
+      for fb_j in $(seq 0 $((runnerCount - 1))); do
+        local fb_limited_json
+        if [ -z "${limitedUntil[$fb_j]}" ]; then
+          fb_limited_json="null"
+        else
+          fb_limited_json="${limitedUntil[$fb_j]}"
+        fi
+        fb_states_json="${fb_states_json}${fb_sep}{\"setAside\":${setAside[$fb_j]},\"limitedUntil\":${fb_limited_json}}"
+        fb_sep=","
+      done
+      fb_states_json="${fb_states_json}]"
+
+      local fb_now; fb_now=$(date +%s)
+      local fb_sel; fb_sel=$(select_next_runner "$currentRunnerIndex" "$fb_now" "$fb_states_json")
+
+      local fb_action fb_index fb_wait_until
+      fb_action=$(printf '%s' "$fb_sel" | awk '{print $1}')
+      fb_index=$(printf '%s' "$fb_sel" | awk '{print $2}')
+      fb_wait_until=$(printf '%s' "$fb_sel" | awk '{print $3}')
+
+      if [ "$fb_action" = "Fail" ]; then
+        local fb_fail_reason="all runners exhausted"
+        local fb_parts=""
+        for fb_j in $(seq 0 $((runnerCount - 1))); do
+          if [ -n "${runnerReasons[$fb_j]}" ]; then
+            local fb_r_cli; fb_r_cli=$(get_runner_field "$i" "$fb_j" "cli" | tr '[:upper:]' '[:lower:]')
+            if [ -n "$fb_parts" ]; then fb_parts="$fb_parts; "; fi
+            fb_parts="${fb_parts}${fb_r_cli}: ${runnerReasons[$fb_j]}"
+          fi
+        done
+        if [ -n "$fb_parts" ]; then fb_fail_reason="$fb_fail_reason: $fb_parts"; fi
+        save_task_failed_marker "$i" "$fb_fail_reason"
+        printf '\n'
+        ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber failed (all runners exhausted):"
+        printf '\n'
+        ui_reason "$fb_fail_reason"
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber $fb_fail_reason" >&2
+          exit 1
+        fi
+        failedCount=$((failedCount + 1))
+        break
+      fi
+
+      if [ "$fb_action" = "Wait" ]; then
+        local fb_wait_runner_idx="$fb_index"
+        local fb_wake_time=$((fb_wait_until + RESET_BUFFER_MINUTES * 60))
+        local fb_wait_cli; fb_wait_cli=$(get_runner_field "$i" "$fb_wait_runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
+        ui_rest_with_summary "$fb_wait_cli" "$fb_wake_time"
+        limitedUntil[$fb_wait_runner_idx]=""
+        currentRunnerIndex="$fb_wait_runner_idx"
+        continue
+      fi
+
+      # Action = Run
+      local fb_new_idx="$fb_index"
+      if [ "$fb_new_idx" != "$currentRunnerIndex" ]; then
+        rm -f "$(get_task_session_file_path "$i")"
+        errorRetryCount=0; stallCount=0
+        previousNoMarkerText=""; hasPreviousNoMarker=0; mustWaitForFreshSession=0
+        local fb_switch_cli; fb_switch_cli=$(get_runner_field "$i" "$fb_new_idx" "cli" | tr '[:upper:]' '[:lower:]')
+        write_step "Task ${taskNumber}: switching to ${fb_switch_cli}"
+        currentRunnerIndex="$fb_new_idx"
+        pendingHandoff=1
+      fi
+
+      local fb_active_cli; fb_active_cli=$(get_runner_field "$i" "$currentRunnerIndex" "cli" | tr '[:upper:]' '[:lower:]')
+
+      local fb_runner_models=()
+      local fb_rm_entry
+      while IFS= read -r fb_rm_entry; do fb_runner_models+=("$fb_rm_entry"); done < <(get_runner_models "$i" "$currentRunnerIndex")
+      local fb_runner_model_count=${#fb_runner_models[@]}
+      local fb_cur_model_idx="${runnerModelIndices[$currentRunnerIndex]}"
+      if [ "$fb_cur_model_idx" -ge "$fb_runner_model_count" ] 2>/dev/null; then fb_cur_model_idx=0; fi
+      if [ "$fb_runner_model_count" -gt 0 ]; then
+        currentModel="${fb_runner_models[$fb_cur_model_idx]}"
+      else
+        currentModel=""
+      fi
+
+      runCount=$((runCount + 1))
+      if [ "$runCount" -gt "$MAX_RUNS_PER_TASK" ]; then
+        local fb_budget_reason="run budget exhausted (maxRunsPerTask=$MAX_RUNS_PER_TASK)"
+        save_task_failed_marker "$i" "$fb_budget_reason"
+        printf '\n'
+        ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber failed ($fb_budget_reason)"
+        printf '\n'
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber $fb_budget_reason" >&2
+          exit 1
+        fi
+        failedCount=$((failedCount + 1))
+        break
+      fi
+
+      if [ "$fb_active_cli" = "claude" ] && ! is_ollama_runner "$i" "$currentRunnerIndex" && [ "$DRY_RUN" -eq 0 ]; then
+        wait_until_claude_ready "$mustWaitForFreshSession"
+        mustWaitForFreshSession=0
+      fi
+
+      local quietHeader=0
+      [ "$runCount" -gt 1 ] && quietHeader=1
+
+      savedSessionId=$(get_saved_task_session_id "$i")
+      local fb_use_handoff=0
+      if [ "$pendingHandoff" -eq 1 ]; then fb_use_handoff=1; pendingHandoff=0; fi
+
+      if [ -z "$savedSessionId" ]; then
+        runMode="New"
+        sessionId=""
+        if [ "$fb_active_cli" = "claude" ] || [ "$fb_active_cli" = "agy" ] || [ "$fb_active_cli" = "copilot" ]; then
+          sessionId=$(new_task_session_id "$i")
+        fi
+        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" "$fb_use_handoff"
+      else
+        runMode="Resume"
+        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" 0
+      fi
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+        write_step "Dry run for task $taskNumber recorded the command only"
+        break
+      fi
+
+      result_ok="$R_OK"
+      result_is_limit="$R_IS_LIMIT"
+      result_text="$R_TEXT"
+      result_session_id="$R_SESSION_ID"
+      result_error_text="$R_ERROR_TEXT"
+
+      local runStatus runExit
+      if [ "$result_is_limit" -eq 1 ]; then runStatus="Limit"
+      elif [ "$result_ok" -eq 0 ]; then runStatus="Error"
+      elif [ "$taskCompletionCheck" != "true" ]; then runStatus="Done"
+      else
+        get_marker_status "$result_text"
+        if [ "$M_STATUS" = "Done" ]; then runStatus="Done"
+        elif [ "$M_STATUS" = "Blocked" ]; then runStatus="Blocked"
+        else runStatus="NoMarker"
+        fi
+      fi
+      if [ "$result_ok" -eq 0 ]; then runExit=1; else runExit=0; fi
+      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus"
+
+      if [ -n "$result_session_id" ]; then
+        printf '%s' "$result_session_id" > "$(get_task_session_file_path "$i")"
+      fi
+
+      if [ "$fb_active_cli" = "gemini" ] && [ "$result_ok" -eq 0 ] && \
+         printf '%s' "$result_error_text" | grep -qiE 'unknown option.*resume|not supported in non-interactive|unexpected argument|too many arguments|invalid.*resume'; then
+        rm -f "$(get_task_session_file_path "$i")"
+        write_step "Task $taskNumber: installed gemini rejects --resume; retrying with continuation prompt only"
+        continue
+      fi
+
+      if [ "$result_is_limit" -eq 1 ]; then
+        if [ "$fb_runner_model_count" -gt 1 ] && [ "$fb_cur_model_idx" -lt "$((fb_runner_model_count - 1))" ]; then
+          local fb_next_model_idx=$((fb_cur_model_idx + 1))
+          write_step "Task ${taskNumber}: limit on ${fb_runner_models[$fb_cur_model_idx]}; switching to ${fb_runner_models[$fb_next_model_idx]}"
+          runnerModelIndices[$currentRunnerIndex]="$fb_next_model_idx"
+          continue
+        fi
+        if [ "$fb_runner_model_count" -gt 1 ]; then runnerModelIndices[$currentRunnerIndex]=0; fi
+        local fb_claude_usage=""
+        if [ "$fb_active_cli" = "claude" ]; then
+          fb_claude_usage=$(cat "$USAGE_PATH" 2>/dev/null || true)
+        fi
+        limitedUntil[$currentRunnerIndex]=$(get_runner_reset_epoch "$fb_active_cli" "$result_error_text" "$LIMIT_WAIT_MINUTES" "$fb_claude_usage")
+        runnerReasons[$currentRunnerIndex]="limited"
+        continue
+      fi
+
+      if [ "$result_ok" -eq 0 ]; then
+        errorRetryCount=$((errorRetryCount + 1))
+        printf '\n'
+        ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber hit an error:"
+        printf '\n'
+        ui_reason "$result_error_text"
+        if [ "$errorRetryCount" -le "$MAX_RETRIES_ON_ERROR" ]; then
+          printf '\n'
+          ui_color "$UI_YELLOW" "  $GLYPH_RETRY retry $errorRetryCount of $MAX_RETRIES_ON_ERROR for Task $taskNumber/$TASK_COUNT $GLYPH_DOT $(task_field "$i" "name") $GLYPH_DOT resume"
+          printf '\n'
+          continue
+        fi
+        setAside[$currentRunnerIndex]="true"
+        runnerReasons[$currentRunnerIndex]="error: $result_error_text"
+        errorRetryCount=0
+        continue
+      fi
+
+      if [ "$taskCompletionCheck" != "true" ]; then
+        save_task_done_marker "$i"
+        ui_task_done "$taskNumber"
+        doneCount=$((doneCount + 1))
+        break
+      fi
+
+      get_marker_status "$result_text"
+      if [ "$M_STATUS" = "Done" ]; then
+        save_task_done_marker "$i"
+        ui_task_done "$taskNumber"
+        doneCount=$((doneCount + 1))
+        break
+      fi
+      if [ "$M_STATUS" = "Blocked" ]; then
+        save_task_failed_marker "$i" "$M_REASON"
+        printf '\n'
+        ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked:"
+        printf '\n'
+        ui_reason "$M_REASON"
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+          exit 1
+        fi
+        failedCount=$((failedCount + 1))
+        break
+      fi
+
+      currentText="$result_text"
+      if [ "$hasPreviousNoMarker" -eq 1 ] && [ "$currentText" = "$previousNoMarkerText" ]; then
+        stallCount=$((stallCount + 1))
+        if [ "$stallCount" -ge "$MAX_STALLS" ]; then
+          setAside[$currentRunnerIndex]="true"
+          runnerReasons[$currentRunnerIndex]="no progress: agent repeated the same response without a completion marker"
+          stallCount=0
+          previousNoMarkerText=""
+          hasPreviousNoMarker=0
+          continue
+        fi
+      fi
+      previousNoMarkerText="$currentText"
+      hasPreviousNoMarker=1
+
+      mustWaitForFreshSession=0
+      printf '\n'
+      ui_color "$UI_DIM" "  $GLYPH_RETRY Task $taskNumber/$TASK_COUNT $GLYPH_DOT $(task_field "$i" "name") not finished yet $GLYPH_DOT resuming the same session"
+      printf '\n'
+    done
+
+    fi
+    # end single-runner / fallbacks gate
 
     i=$((i + 1))
   done

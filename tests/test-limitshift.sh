@@ -3086,6 +3086,320 @@ run_reset_time_test
 run_runner_selection_test
 run_git_requirement_test
 
+# CLI rotation end-to-end tests
+
+run_cli_rotation_limit_switch_test() {
+  local desc="CLI rotation — switches from gemini to codex on limit, handoff note in prompt"
+  local root="$TMP_ROOT/cli-rot-limit-switch"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local stdin_log="$root/codex-stdin.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+exit 1
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<STUBEOF
+#!/usr/bin/env bash
+cat >> "$stdin_log"
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\\n\\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "limit-switch", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code stdin_content
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  stdin_content=""
+  if [ -f "$stdin_log" ]; then stdin_content=$(cat "$stdin_log"); fi
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'switching to codex' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
+     printf '%s' "$stdin_content" | grep -q 'A previous AI tool'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+output:
+$out
+stdin:
+$stdin_content"
+  fi
+}
+
+run_cli_rotation_error_switch_test() {
+  local desc="CLI rotation — switches to next runner after persistent errors (retries exhausted)"
+  local root="$TMP_ROOT/cli-rot-err-switch"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local gemini_counter="$root/gemini-count.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$gemini_counter" ] && n=\$(cat "$gemini_counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$gemini_counter"
+printf '%s\n' '{"session_id":"g-1","error":{"message":"Internal server error","code":"500"}}'
+exit 1
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": false, "maxRunsPerTask": 10, "maxRetriesOnError": 1, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "err-switch", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code gemini_calls
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  gemini_calls=0
+  [ -f "$gemini_counter" ] && gemini_calls=$(cat "$gemini_counter")
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ "$gemini_calls" -eq 2 ] &&
+     printf '%s' "$out" | grep -qi 'switching to codex' &&
+     printf '%s' "$out" | grep -q 'Task 1 done'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code gemini_calls=$gemini_calls
+$out"
+  fi
+}
+
+run_cli_rotation_blocked_no_switch_test() {
+  local desc="CLI rotation — does NOT switch runners on TASK_BLOCKED; task fails immediately"
+  local root="$TMP_ROOT/cli-rot-blocked"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local codex_counter="$root/codex-count.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"session_id":"g-1","response":"Cannot complete this.\n\n[[TASK_BLOCKED]] cannot do this"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$codex_counter" ] && n=\$(cat "$codex_counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$codex_counter"
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "blocked-task", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "completionCheck": true,
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code failed_file codex_calls
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  failed_file="$root/limitshift-queue/status/task-01.failed"
+  codex_calls=0
+  [ -f "$codex_counter" ] && codex_calls=$(cat "$codex_counter")
+
+  if [ "$exit_code" -eq 1 ] &&
+     ! printf '%s' "$out" | grep -qi 'switching to' &&
+     [ -f "$failed_file" ] &&
+     [ "$codex_calls" -eq 0 ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code failed_file_exists=$([ -f "$failed_file" ] && echo yes || echo no) codex_calls=$codex_calls
+$out"
+  fi
+}
+
+run_cli_rotation_no_fallbacks_backcompat_test() {
+  local desc="CLI rotation — no-fallbacks task waits-and-resumes on single-runner limit (back-compat)"
+  local root="$TMP_ROOT/cli-rot-backcompat"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/counter.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/gemini" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "backcompat", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it" }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'Hit a usage limit' &&
+     ! printf '%s' "$out" | grep -qi 'switching to' &&
+     printf '%s' "$out" | grep -q 'Task 1 done'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_cli_rotation_all_limited_wait_test() {
+  local desc="CLI rotation — waits for soonest-reset runner when all are limited"
+  local root="$TMP_ROOT/cli-rot-all-limited"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/counter.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 5s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+if [ "\$n" -eq 2 ]; then
+  printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+  printf '%s\n' '{"type":"error","message":"Rate limit exceeded. Try again in 5s."}'
+  exit 1
+fi
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 10, "maxRetriesOnError": 0, "limitWaitMinutes": 5, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "all-limited", "cli": "gemini", "model": "m-r0", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'Hit a usage limit' &&
+     printf '%s' "$out" | grep -qi 'switching to codex' &&
+     printf '%s' "$out" | grep -q 'Task 1 done'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_cli_rotation_limit_switch_test
+run_cli_rotation_error_switch_test
+run_cli_rotation_blocked_no_switch_test
+run_cli_rotation_no_fallbacks_backcompat_test
+run_cli_rotation_all_limited_wait_test
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 exit "$FAIL"
