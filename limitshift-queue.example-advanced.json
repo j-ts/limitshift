@@ -43,6 +43,28 @@
       "projectPath": "C:\\Users\\you\\Documents\\my-project",
       "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths. End with [[TASK_COMPLETE]] on its own line when done, or [[TASK_BLOCKED]] <reason> if you cannot finish.",
       "extraArgs": ["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]
+    },
+    {
+      "name": "Fix failing tests with CLI rotation (claude → codex → gemini)",
+      "cli": "claude",
+      "model": ["opus", "sonnet"],
+      "projectPath": ".",
+      "completionCheck": true,
+      "extraArgs": ["--permission-mode", "acceptEdits"],
+      "prompt": "Fix all failing tests. Run the test suite, identify each failure, apply targeted fixes, and verify everything passes. End with [[TASK_COMPLETE]] when all tests pass, or [[TASK_BLOCKED]] <reason> if genuinely blocked.",
+      "fallbacks": [
+        {
+          "cli": "codex",
+          "model": "gpt-5.5",
+          "effort": "high",
+          "extraArgs": ["--sandbox", "workspace-write"]
+        },
+        {
+          "cli": "gemini",
+          "model": ["gemini-3-flash-preview", "gemini-2.5-pro"],
+          "extraArgs": ["--approval-mode", "auto_edit"]
+        }
+      ]
     }
   ]
 }
