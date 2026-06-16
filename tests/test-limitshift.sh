@@ -2802,6 +2802,9 @@ run_shipped_examples_validate_test() {
   local root="$TMP_ROOT/shipped-examples"
   local project_dir="$root/project"
   mkdir -p "$project_dir"
+  # The advanced example carries a CLI-rotation (fallbacks) task, which requires its projectPath to
+  # be a git working tree; init the temp dir so that check passes here.
+  git -C "$project_dir" init -q
 
   local example
   for example in \

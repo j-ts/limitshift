@@ -3344,6 +3344,9 @@ exit 0
             $root = New-TestRoot
             $projectPath = Join-Path $root 'project'
             New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            # The advanced example carries a CLI-rotation (fallbacks) task, which requires its
+            # projectPath to be a git working tree; init the temp dir so that check passes here.
+            git -C $projectPath init -q
 
             # Rewrite ALL task projectPath values (the advanced example has several) to the temp dir.
             $config = Get-Content -LiteralPath $srcPath -Raw | ConvertFrom-Json
