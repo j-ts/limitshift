@@ -2072,14 +2072,16 @@ initialize_runs_csv() {
 }
 
 add_runs_csv_row() {
-  local task="$1" run="$2" mode="$3" exit_code="$4" status="$5"
-  printf '%s,%s,%s,%s,%s,%s\n' \
+  local task="$1" run="$2" mode="$3" exit_code="$4" status="$5" cli="$6" model="$7"
+  printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$(csv_field "$(date '+%Y-%m-%dT%H:%M:%S')")" \
     "$(csv_field "$task")" \
     "$(csv_field "$run")" \
     "$(csv_field "$mode")" \
     "$(csv_field "$exit_code")" \
-    "$(csv_field "$status")" >> "$RUNS_CSV_PATH"
+    "$(csv_field "$status")" \
+    "$(csv_field "$cli")" \
+    "$(csv_field "$model")" >> "$RUNS_CSV_PATH"
 }
 
 # --- MAIN EXECUTION ----------------------------------------------------------
@@ -2146,7 +2148,7 @@ LOG_PATH="$RUNNER_STATE_PATH/limitshift-log.txt"
 USAGE_PATH="$RUNNER_STATE_PATH/claude-usage-last.txt"
 RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
 STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
-RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status"
+RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status,cli,model"
 
 FRESH_SESSION_THRESHOLD_PERCENT=0
 POLL_SECONDS_AFTER_RESET_PASSED=60
@@ -2330,7 +2332,7 @@ run_queue() {
         fi
       fi
       if [ "$result_ok" -eq 0 ]; then runExit=1; else runExit=0; fi
-      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus"
+      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus" "$task_cli" "$currentModel"
 
       if [ -n "$result_session_id" ]; then
         printf '%s' "$result_session_id" > "$(get_task_session_file_path "$i")"
@@ -2614,7 +2616,7 @@ run_queue() {
         fi
       fi
       if [ "$result_ok" -eq 0 ]; then runExit=1; else runExit=0; fi
-      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus"
+      add_runs_csv_row "$taskNumber-$(task_field "$i" "name")" "$runCount" "$runMode" "$runExit" "$runStatus" "$fb_active_cli" "$currentModel"
 
       if [ -n "$result_session_id" ]; then
         printf '%s' "$result_session_id" > "$(get_task_session_file_path "$i")"

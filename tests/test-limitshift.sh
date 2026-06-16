@@ -880,8 +880,8 @@ EOF
      [ -f "$state_dir/_README.txt" ] &&
      grep -qi 'delete this whole folder' "$state_dir/_README.txt" &&
      [ -f "$state_dir/runs.csv" ] &&
-     [ "$(sed -n '1p' "$state_dir/runs.csv")" = "timestamp,task,run,mode,exit,status" ] &&
-     grep -q ',Done$' "$state_dir/runs.csv" &&
+     [ "$(sed -n '1p' "$state_dir/runs.csv")" = "timestamp,task,run,mode,exit,status,cli,model" ] &&
+     grep -q ',Done,' "$state_dir/runs.csv" &&
      [ -f "$state_dir/outputs/task-01-Layout-Task-output.txt" ]; then
     pass "$desc"
   else
@@ -3543,6 +3543,50 @@ $gemini_content"
   fi
 }
 
+run_runs_csv_columns_test() {
+  local desc="runs.csv header and rows include cli and model columns (Phase 8)"
+  local root="$TMP_ROOT/runs-csv-columns"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local state_dir="$root/limitshift-queue"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_claude_response "$bin_dir" "$root/received.txt" '{"result":"done\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 2, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "CSV Task", "cli": "claude", "model": "sonnet", "projectPath": "$project_dir", "prompt": "do it", "completionCheck": true }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  local header row_ok=0
+  header=$(sed -n '1p' "$state_dir/runs.csv" 2>/dev/null)
+  if grep -q ',Done,' "$state_dir/runs.csv" 2>/dev/null && \
+     grep -q ',claude,' "$state_dir/runs.csv" 2>/dev/null && \
+     grep -q ',sonnet' "$state_dir/runs.csv" 2>/dev/null; then
+    row_ok=1
+  fi
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ "$header" = "timestamp,task,run,mode,exit,status,cli,model" ] &&
+     [ "$row_ok" -eq 1 ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code header='$header' row_ok=$row_ok
+$out
+--- runs.csv ---
+$(cat "$state_dir/runs.csv" 2>/dev/null)"
+  fi
+}
+
 run_cli_rotation_limit_switch_test
 run_cli_rotation_error_switch_test
 run_cli_rotation_blocked_no_switch_test
@@ -3550,6 +3594,7 @@ run_cli_rotation_no_fallbacks_backcompat_test
 run_cli_rotation_all_limited_wait_test
 run_cli_rotation_claude_precheck_switch_test
 run_cli_rotation_handoff_after_wait_test
+run_runs_csv_columns_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"
