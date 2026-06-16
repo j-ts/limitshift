@@ -11,7 +11,7 @@
     {
       "name": "Implement fixes with Codex",
       "cli": "codex",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": ".",
       "model": "gpt-5.4",
       "effort": "medium",
       "extraArgs": ["--sandbox", "workspace-write"],
@@ -20,7 +20,7 @@
     {
       "name": "Write release notes with Gemini",
       "cli": "gemini",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": ".",
       "model": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro"],
       "effort": null,
       "extraArgs": ["--approval-mode", "auto_edit"],
@@ -29,7 +29,7 @@
     {
       "name": "Audit the project with Claude",
       "cli": "claude",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": ".",
       "model": "sonnet",
       "extraArgs": ["--permission-mode", "acceptEdits"],
       "completionCheck": true,
@@ -40,7 +40,7 @@
       "cli": "copilot",
       "model": ["gpt-4o", "claude-3.5-sonnet"],
       "effort": "high",
-      "projectPath": "C:\\Users\\you\\Documents\\my-project",
+      "projectPath": ".",
       "prompt": "Read the codebase and write a code-quality audit to docs/audit.md. List concrete issues with file paths. End with [[TASK_COMPLETE]] on its own line when done, or [[TASK_BLOCKED]] <reason> if you cannot finish.",
       "extraArgs": ["--allow-tool=read,write,shell(npm:*),shell(npx:*),shell(git:*)", "--deny-tool=shell(git push)", "--no-ask-user"]
     },
