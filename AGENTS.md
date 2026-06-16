@@ -62,6 +62,7 @@ Useful optional fields:
 - `completionCheck` - `true` for multi-step work that should resume until `[[TASK_COMPLETE]]`;
   `false` for one-shot prompts.
 - `extraArgs` - CLI flags. Use array form for reliability.
+- `fallbacks` - backup runners for CLI rotation; see [CLI rotation (fallbacks)](#cli-rotation-fallbacks) below.
 
 ## Model and Effort Guidance
 
@@ -134,6 +135,53 @@ have no Ollama path here.
 - Ask agents to summarize changed files and verification commands in their final response.
 - Use `completionCheck: true` for tasks that may need multiple resumes; prompts should end by
   emitting `[[TASK_COMPLETE]]` or `[[TASK_BLOCKED]] <reason>`.
+
+## CLI rotation (fallbacks)
+
+Add a `fallbacks` list to any task to give it backup runners. When the primary runner hits a usage limit (all its models are capped) or fails persistently (past `maxRetriesOnError`), LimitShift starts a fresh session on the next runner and prepends a handoff note telling it to inspect `git status` and `git diff` before starting.
+
+```json
+{
+  "name": "Fix the failing tests",
+  "cli": "claude",
+  "model": ["opus", "sonnet"],
+  "projectPath": "C:/Users/you/my-project",
+  "completionCheck": true,
+  "extraArgs": ["--permission-mode", "acceptEdits"],
+  "prompt": "Fix all failing tests until they pass.",
+  "fallbacks": [
+    { "cli": "codex", "model": "gpt-5.5", "extraArgs": ["--sandbox", "workspace-write"] },
+    { "cli": "gemini", "model": ["gemini-3-flash-preview", "gemini-2.5-pro"], "extraArgs": ["--approval-mode", "auto_edit"] }
+  ]
+}
+```
+
+**Shape rules:**
+
+- `cli` is required in every fallback; `model`, `effort`, and `extraArgs` are optional.
+- Each fallback carries its **own** `extraArgs` (including permission flag). Permission flags differ by
+  tool, so every runner that should edit files needs its own flag.
+- `model` in a fallback may be a string or an array — an array gives that runner model rotation.
+- `effort` follows the same per-cli rules as the top-level field; omit or set `null` when unsupported.
+- `name`, `projectPath`, `prompt`, and `completionCheck` are shared — they describe the goal, which
+  every runner pursues.
+
+**When to use fallbacks vs a model array:**
+
+- **Same tool, different models** → use a `model` array on one runner (shared session, one error/stall
+  budget, no handoff overhead).
+- **Different tools** → use `fallbacks`. If runners share the same `cli` and `extraArgs`, a tool-level
+  failure (bad flag, missing binary) will re-occur once per runner; switching tools is most useful when
+  each runner genuinely brings different access or capabilities.
+
+**`[[TASK_BLOCKED]]` does not trigger a switch.** A block means the agent concluded the task is
+impossible. LimitShift treats this as authoritative and stops the task without trying other runners
+(matching `stopOnError`). Use `[[TASK_BLOCKED]]` for genuine dead-ends, not permission problems —
+fix the permission flags instead.
+
+**Git is required.** A task with a non-empty `fallbacks` list must have its `projectPath` pointing at a
+git working tree. Validation fails with a clear message if it is not. See [STRATEGIES.md](STRATEGIES.md)
+for why and for the commit-before-rotation guidance.
 
 ## Multiple Queues
 
