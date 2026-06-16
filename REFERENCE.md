@@ -23,6 +23,7 @@ The queue file is `limitshift-queue.json` (copy an example and edit). `settings`
 | `tasks[].effort` | string or null | no | — | Reasoning effort (see [Models](#models)) |
 | `tasks[].completionCheck` | boolean | no | inherits settings | Per-task override |
 | `tasks[].extraArgs` | string or array | no | — | Extra CLI flags — where [permission](#permissions) and [Ollama](README.md#run-with-local-models-through-ollama) flags go |
+| `tasks[].fallbacks` | array | no | — | Backup runners for [CLI rotation](#cli-rotation). Each entry requires `cli`; `model`, `effort`, `extraArgs` are optional and follow the same shapes/rules as the top-level fields. `projectPath` must be a git working tree. |
 
 Windows paths in JSON need **doubled backslashes** (`"C:\\Users\\me\\repo"`) or forward slashes (`"C:/Users/me/repo"`). Keep the `$schema` line from an example file to get inline validation in editors that support it.
 
@@ -75,6 +76,34 @@ LimitShift validates model names at runtime against each CLI's own model list du
 **Typo detection:** if a model is missing, LimitShift suggests the nearest known model names (edit distance ≤ 4).
 
 **Cache location:** `limitshift-<queue>/capabilities/<cli>.json` next to the queue file.
+
+## CLI rotation
+
+Add a `fallbacks` array to any task to give it backup runners. When the current runner can't continue, LimitShift picks the next runnable runner per these rules.
+
+**The five run outcomes:**
+
+| Outcome | Detection | What happens |
+| --- | --- | --- |
+| **Complete** | last non-empty line contains `[[TASK_COMPLETE]]` | Task done. |
+| **Blocked** | last non-empty line contains `[[TASK_BLOCKED]] <reason>` | Task fails without switching runners; `stopOnError` applies. |
+| **Limit** | usage-limit regex matches | Rotate to the runner's next model. When all models on this runner are capped, mark the runner **limited** (records its reset time) and switch to the next runner. |
+| **Error** | non-zero exit, not a limit | Retry the same runner up to `maxRetriesOnError`. When retries are exhausted, **set the runner aside** permanently for this task and switch. |
+| **Stall** | successive identical no-marker replies from the same runner | After `maxStalls` repeats, set the runner aside and switch. With no fallbacks, the task fails (unchanged behavior). |
+
+**Runner selection:** the next runner is the first one, scanning from the current position, that is not set aside and whose reset time (if limited) is in the past.
+
+**Soonest-reset waiting:** when no runner is immediately runnable, LimitShift waits for the runner with the soonest reset within 24 hours and retries. If every live runner is more than 24 hours away (weekly caps), or every runner has been set aside, the task fails per `stopOnError`.
+
+**Handoff note:** when the runner changes, LimitShift prepends an exact note to the new session's prompt telling it to inspect `git status` (new/untracked files) and `git diff` (tracked-file changes) before starting.
+
+**Git requirement:** a task with a non-empty `fallbacks` list requires its `projectPath` to be a git working tree. `--validate-only` fails with a clear error if it is not. A repo with no commits emits a non-fatal warning (the handoff is less precise without a baseline — see [STRATEGIES.md](STRATEGIES.md)).
+
+**`runs.csv` columns:** rotation adds `cli` and `model` columns to every row so the full tool-switch history is reconstructable from the log.
+
+**State files (fallbacks tasks only):** LimitShift saves a `task-NN-runner-index.txt` file (current runner index) and per-runner model-index files (`task-NN-runner-K-model-index.txt`). These are **not** created for single-runner tasks. When a task's definition changes (fingerprint changes), both are dropped along with the done marker and session id.
+
+**`maxRunsPerTask` and rotation:** the default cap of 20 counts every CLI invocation. A rotation task legitimately uses more runs (runners × models × retries × stalls × progress-resumes). When the cap is reached on a fallbacks task, the task fails per `stopOnError` rather than aborting the whole queue. See [STRATEGIES.md](STRATEGIES.md) for budget guidance.
 
 ## Permissions
 
