@@ -2507,7 +2507,10 @@ run_queue() {
         local fb_wait_cli; fb_wait_cli=$(get_runner_field "$i" "$fb_wait_runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
         ui_rest_with_summary "$fb_wait_cli" "$fb_wake_time"
         limitedUntil[$fb_wait_runner_idx]=""
-        currentRunnerIndex="$fb_wait_runner_idx"
+        # Do NOT advance currentRunnerIndex here: the cleared runner is now the only runnable one,
+        # so the next select_next_runner returns it, and the Run branch's switch detection treats
+        # resuming into a runner different from the one that last ran as a runner change (fresh
+        # session + handoff note + counter reset, spec 6.1/7).
         continue
       fi
 
@@ -2537,6 +2540,23 @@ run_queue() {
         currentModel=""
       fi
 
+      # Runner-scoped claude pre-check (spec 8). For a cloud-claude runner WITH fallbacks we must
+      # never block: query usage, and if this runner is capped, record it as limited and re-select
+      # (the next pass rotates to a fallback instead of waiting/aborting). A local-Ollama claude
+      # runner never queries the cloud /usage endpoint. This runs before the run-budget increment
+      # because a pre-check rotation is not a CLI invocation (spec 5.8: waits/probes do not count).
+      if [ "$fb_active_cli" = "claude" ] && ! is_ollama_runner "$i" "$currentRunnerIndex" && [ "$DRY_RUN" -eq 0 ]; then
+        get_claude_usage
+        if [ "$SESSION_PERCENT" -ge 100 ] || [ "$WEEK_PERCENT" -ge 100 ]; then
+          local fb_pc_usage="WeekReset:${WEEK_RESET}|SessionReset:${SESSION_RESET}"
+          limitedUntil[$currentRunnerIndex]=$(get_runner_reset_epoch "claude" "" "$LIMIT_WAIT_MINUTES" "$fb_pc_usage")
+          runnerReasons[$currentRunnerIndex]="limited"
+          write_step "Task ${taskNumber}: claude usage is capped (pre-check); rotating to the next runner"
+          continue
+        fi
+        mustWaitForFreshSession=0
+      fi
+
       runCount=$((runCount + 1))
       if [ "$runCount" -gt "$MAX_RUNS_PER_TASK" ]; then
         local fb_budget_reason="run budget exhausted (maxRunsPerTask=$MAX_RUNS_PER_TASK)"
@@ -2550,11 +2570,6 @@ run_queue() {
         fi
         failedCount=$((failedCount + 1))
         break
-      fi
-
-      if [ "$fb_active_cli" = "claude" ] && ! is_ollama_runner "$i" "$currentRunnerIndex" && [ "$DRY_RUN" -eq 0 ]; then
-        wait_until_claude_ready "$mustWaitForFreshSession"
-        mustWaitForFreshSession=0
       fi
 
       local quietHeader=0

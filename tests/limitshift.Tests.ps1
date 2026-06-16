@@ -1478,6 +1478,138 @@ exit 0
             }
             finally { $env:PATH = $oldPath }
         }
+
+        It 'a capped cloud-claude runner rotates to a fallback at the pre-check instead of waiting/aborting (spec 8)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            # Week is capped with a reset more than 24h out. The OLD blocking pre-check would
+            # refuse to wait (>24h) and abort the run; the spec 8 pre-check must instead mark the
+            # claude runner limited and rotate to the codex fallback without waiting.
+            $weekReset = (Get-Date).AddHours(48).ToString('MMM d, h:mmtt', [System.Globalization.CultureInfo]::InvariantCulture)
+            $claudeRan = Join-Path $root 'claude-ran.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 20% used'
+    Write-Output 'Current week (all models): 100% used, resets $weekReset (UTC)'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+[System.IO.File]::AppendAllText('$($claudeRan -replace '\\','\\')', 'ran' + [Environment]::NewLine)
+Write-Output '{"result":"claude should not have run","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $codexPath = Join-Path $binPath 'codex.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'claude-precheck-switch'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to codex'
+                $run.Output | Should -Match 'Task 1 done'
+                # The capped claude runner must never have executed the task.
+                Test-Path -LiteralPath $claudeRan | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'prepends the handoff note and starts fresh when resuming into a different runner after a wait (spec 6.1, 7)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiStdin = Join-Path $root 'gemini-stdin.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini (runner 0): call 1 limits; later calls log their stdin and succeed.
+            @"
+`$stdin = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 12s.","code":"429"}}'
+    exit 1
+}
+[System.IO.File]::AppendAllText('$($geminiStdin -replace '\\','\\')', `$stdin + [Environment]::NewLine + '<<<END>>>' + [Environment]::NewLine)
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex (runner 1): call 2 limits (shares the counter with gemini).
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+if (`$n -eq 2) {
+    Write-Output '{"type":"error","message":"Rate limit exceeded. Try again in 90s."}'
+    exit 1
+}
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 10; maxRetriesOnError = 0; limitWaitMinutes = 5; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'wait-then-switch-back'; cli = 'gemini'; model = 'm-r0'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to codex'
+                # Resuming gemini after the wait is a runner change -> must print the switch beat...
+                $run.Output | Should -Match 'switching to gemini'
+                $run.Output | Should -Match 'Task 1 done'
+                # ...and that fresh gemini run must carry the cross-tool handoff note.
+                $geminiContent = Get-Content -LiteralPath $geminiStdin -Raw
+                $geminiContent | Should -Match 'A previous AI tool'
+            }
+            finally { $env:PATH = $oldPath }
+        }
     }
 
     Context 'Invoke-NativeProcess stdin delivery' {

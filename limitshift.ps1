@@ -2958,7 +2958,10 @@ try {
                 $waitRunnerIdx = $sel.Index
                 Wait-ForRunnerReset -Until $sel.WaitUntil -Cli ([string]$runners[$waitRunnerIdx].Cli) -Settings $config.Settings
                 $limitedUntil[$waitRunnerIdx] = $null
-                $currentRunnerIndex = $waitRunnerIdx
+                # Do NOT advance $currentRunnerIndex here: the cleared runner is now the only
+                # runnable one, so the next Select-NextRunner returns it, and the Run branch's
+                # switch detection treats resuming into a runner different from the one that last
+                # ran as a runner change (fresh session + handoff note + counter reset, spec 6.1/7).
                 continue
             }
 
@@ -2992,6 +2995,23 @@ try {
                 CompletionCheck = $task.CompletionCheck
             }
 
+            # Runner-scoped claude pre-check (spec 8). For a cloud-claude runner WITH fallbacks we
+            # must never block: query usage, and if this runner is capped, record it as limited and
+            # re-select (the next pass rotates to a fallback instead of waiting/aborting). A
+            # local-Ollama claude runner never queries the cloud /usage endpoint. This runs before
+            # the run-budget increment because a pre-check rotation is not a CLI invocation (spec 5.8:
+            # waits/probes do not count toward maxRunsPerTask).
+            if ($activeRunner.Cli -eq 'claude' -and -not (Test-IsOllamaRunner -Runner $activeRunner) -and -not $DryRun) {
+                $preUsage = Get-ClaudeUsage
+                if ($preUsage.SessionPercent -ge 100 -or $preUsage.WeekPercent -ge 100) {
+                    $limitedUntil[$currentRunnerIndex] = Get-RunnerResetTime -Cli 'claude' -ErrorText '' -LimitWaitMinutes $config.Settings.LimitWaitMinutes -ClaudeUsage $preUsage
+                    $runnerReasons[$currentRunnerIndex] = 'limited'
+                    Write-Step "Task ${taskNumber}: claude usage is capped (pre-check); rotating to the next runner"
+                    continue
+                }
+                $mustWaitForFreshSession = $false
+            }
+
             $runCount++
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
                 $failReason = "run budget exhausted (maxRunsPerTask=$($config.Settings.MaxRunsPerTask))"
@@ -3001,12 +3021,6 @@ try {
                 if ($config.Settings.StopOnError) { throw "Task $taskNumber $failReason" }
                 $failedCount++
                 break
-            }
-
-            # Runner-scoped claude pre-check (skip for Ollama runners and non-claude runners)
-            if ($activeRunner.Cli -eq 'claude' -and -not (Test-IsOllamaRunner -Runner $activeRunner) -and -not $DryRun) {
-                Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
-                $mustWaitForFreshSession = $false
             }
 
             $quietHeader = ($runCount -gt 1)

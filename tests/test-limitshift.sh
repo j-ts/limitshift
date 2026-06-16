@@ -3394,11 +3394,162 @@ $out"
   fi
 }
 
+run_cli_rotation_claude_precheck_switch_test() {
+  local desc="CLI rotation — capped cloud-claude runner rotates to a fallback at the pre-check (spec 8)"
+  local root="$TMP_ROOT/cli-rot-claude-precheck"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local claude_ran="$root/claude-ran.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  # Week is capped with a reset more than 24h out. The OLD blocking pre-check would wait (or, on
+  # ps1, abort); the spec 8 pre-check must instead mark the claude runner limited and rotate to the
+  # codex fallback without waiting.
+  local week_reset
+  week_reset=$(date -d '+48 hours' '+%b %d %Y %I:%M%p' 2>/dev/null || date -v+48H '+%b %d %Y %I:%M%p')
+
+  cat > "$bin_dir/claude" <<STUBEOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 20% used'
+  printf '%s\n' 'Current week (all models): 100% used, resets $week_reset (UTC)'
+  exit 0
+fi
+cat > /dev/null
+printf 'ran\n' >> "$claude_ran"
+printf '%s\n' '{"result":"claude should not run","session_id":"s-1","is_error":false}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$bin_dir/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "claude-precheck-switch", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'switching to codex' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
+     [ ! -f "$claude_ran" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code claude_ran=$([ -f "$claude_ran" ] && echo yes || echo no)
+$out"
+  fi
+}
+
+run_cli_rotation_handoff_after_wait_test() {
+  local desc="CLI rotation — resuming into a different runner after a wait switches fresh with handoff (spec 6.1/7)"
+  local root="$TMP_ROOT/cli-rot-wait-switchback"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/counter.txt"
+  local gemini_stdin="$root/gemini-stdin.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  # gemini (runner 0): call 1 limits with a reset far enough out that it is still pending when codex
+  # also limits (forcing a real wait); later calls log their stdin and succeed.
+  cat > "$bin_dir/gemini" <<STUBEOF
+#!/usr/bin/env bash
+stdin=\$(cat)
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 12s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' "\$stdin" >> "$gemini_stdin"
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  # codex (runner 1): call 2 limits with a much later reset (so gemini, not codex, is the soonest).
+  cat > "$bin_dir/codex" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+if [ "\$n" -eq 2 ]; then
+  printf '%s\n' '{"type":"error","message":"Rate limit exceeded. Try again in 90s."}'
+  exit 1
+fi
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 10, "maxRetriesOnError": 0, "limitWaitMinutes": 5, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "wait-then-switch-back", "cli": "gemini", "model": "m-r0", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code gemini_content
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  gemini_content=""
+  if [ -f "$gemini_stdin" ]; then gemini_content=$(cat "$gemini_stdin"); fi
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'switching to codex' &&
+     printf '%s' "$out" | grep -qi 'switching to gemini' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
+     printf '%s' "$gemini_content" | grep -q 'A previous AI tool'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+output:
+$out
+gemini stdin:
+$gemini_content"
+  fi
+}
+
 run_cli_rotation_limit_switch_test
 run_cli_rotation_error_switch_test
 run_cli_rotation_blocked_no_switch_test
 run_cli_rotation_no_fallbacks_backcompat_test
 run_cli_rotation_all_limited_wait_test
+run_cli_rotation_claude_precheck_switch_test
+run_cli_rotation_handoff_after_wait_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"
