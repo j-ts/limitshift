@@ -1330,12 +1330,6 @@ function Get-ClaudeUsage {
         throw "Could not parse Claude weekly reset time from /usage output.`n$usageText"
     }
 
-    Write-Host "Claude usage command exit code: $usageExitCode"
-    Write-Host "Session usage: $sessionPercent%"
-    Write-Host "Session reset: $(if ($null -ne $sessionReset) { "$sessionReset ($sessionTimezone)" } else { "N/A" })"
-    Write-Host "Week usage: $weekPercent%"
-    Write-Host "Week reset: $(if ($null -ne $weekReset) { "$weekReset ($weekTimezone)" } else { "N/A" })"
-
     return @{
         Text            = $usageText
         ExitCode        = $usageExitCode
@@ -1398,8 +1392,10 @@ function Wait-UntilClaudeUsageReady {
 
         if ($sessionReady -and $weekReady) {
             Write-Step "Claude usage is available"
-            Write-Host "Current session usage: $($usage.SessionPercent)%"
-            Write-Host "Current weekly usage: $($usage.WeekPercent)%"
+            $sessionResetStr = if ($null -ne $usage.SessionReset) { "  resets $($usage.SessionReset) ($($usage.SessionTimezone))" } else { "" }
+            $weekResetStr    = if ($null -ne $usage.WeekReset)    { "  resets $($usage.WeekReset) ($($usage.WeekTimezone))" }    else { "" }
+            Write-Host "Session: $($usage.SessionPercent)%$sessionResetStr"
+            Write-Host "Week:    $($usage.WeekPercent)%$weekResetStr"
             return
         }
 

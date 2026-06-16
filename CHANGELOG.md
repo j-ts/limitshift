@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.1] - 2026-06-15
+## [1.0.1] - 2026-06-16
 
 ### Fixed
+- **Claude usage printed once instead of twice (`limitshift.ps1`).** `Get-ClaudeUsage` contained leftover debug `Write-Host` lines that printed exit code, session %, and week % immediately after parsing; `Wait-UntilClaudeUsageReady` then printed the same numbers again as proper user-facing output. Removed the debug lines and consolidated into a single print that includes the reset times.
 - **Usage-limit reset times are now honored instead of being silently dropped (`limitshift.ps1`).** `Get-ResetTimeFromErrorText` always failed to parse the `try again at <time>` form: the `-replace` written inside the `[datetime]::ParseExact(...)` call had its comma bound as a method-argument separator, producing a four-argument `ParseExact` with no matching overload. The exception was swallowed by an empty `catch`, so a precise reset time (e.g. codex's `try again at 7:21 PM`) was discarded and the runner always fell back to the configured `limitWaitMinutes` wait — surfacing as `no reset time in the error · waiting the configured 30 min` even when the error clearly stated the time.
 
 ### Added
