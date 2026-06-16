@@ -370,6 +370,7 @@ Configuration, models, permissions, run options, state, and troubleshooting → 
 | [REFERENCE.md](REFERENCE.md) | Configuration, models, permissions, run options, state, troubleshooting |
 | [QUICKSTART.md](QUICKSTART.md) | The shortest path from zero to a first run |
 | [AGENTS.md](AGENTS.md) | How to have an AI agent build your queue: fields, model choices, permissions |
+| [STRATEGIES.md](STRATEGIES.md) | Prompt quality, commit-before-rotation, model/tool choice, completion-check vs simple mode, `maxRunsPerTask` budget, example workflows |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in each version |
 | [`limitshift-queue.schema.json`](limitshift-queue.schema.json) | The full queue schema (gives inline validation in editors) |
 | Examples | [simple](limitshift-queue.example-simple.json) · [workflow](limitshift-queue.example-workflow.json) · [advanced](limitshift-queue.example-advanced.json) |
