@@ -733,6 +733,54 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'runs.csv columns (Phase 8)' {
+        It 'header constant includes cli and model columns' {
+            $RunsCsvHeader | Should -Be 'timestamp,task,run,mode,exit,status,cli,model'
+        }
+
+        It 'runs.csv rows include cli and model populated from the active runner' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"done\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 2; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'csv-test'; cli = 'claude'; model = 'sonnet'; projectPath = $projectPath; prompt = 'do it'; completionCheck = $true })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+
+                $csvPath = Join-Path $root 'limitshift-queue\runs.csv'
+                $csvLines = @(Get-Content -LiteralPath $csvPath)
+                $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status,cli,model'
+                $dataRow = $csvLines | Where-Object { $_ -match 'Done' } | Select-Object -First 1
+                $dataRow | Should -Match 'claude'
+                $dataRow | Should -Match 'sonnet'
+            } finally {
+                $env:PATH = $oldPath
+            }
+        }
+    }
+
     Context 'Get-CliArguments' {
         It 'builds a claude new-session command without the prompt in the args' {
             $task = [pscustomobject]@{
@@ -2606,7 +2654,7 @@ exit 0
                 $csvPath = Join-Path $fx.Root 'limitshift-queue\runs.csv'
                 Test-Path -LiteralPath $csvPath | Should -BeTrue
                 $csvLines = @(Get-Content -LiteralPath $csvPath)
-                $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status'
+                $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status,cli,model'
                 @($csvLines | Where-Object { $_ -match 'Done' }).Count | Should -BeGreaterThan 0
             }
             finally {

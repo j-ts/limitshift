@@ -73,7 +73,7 @@ if (-not $LoadFunctionsOnly) {
     $LockPath = Join-Path $RunnerStatePath 'limitshift.lock'
 }
 
-$RunsCsvHeader = "timestamp,task,run,mode,exit,status"
+$RunsCsvHeader = "timestamp,task,run,mode,exit,status,cli,model"
 
 $FreshSessionThresholdPercent = 0
 $PollSecondsAfterResetPassed = 60
@@ -689,7 +689,9 @@ function Add-RunsCsvRow {
         [int]$Run,
         [string]$Mode,
         $Exit,
-        [string]$Status
+        [string]$Status,
+        [string]$Cli,
+        [string]$Model
     )
 
     $row = @(
@@ -698,7 +700,9 @@ function Add-RunsCsvRow {
         (ConvertTo-CsvField -Value ([string]$Run)),
         (ConvertTo-CsvField -Value $Mode),
         (ConvertTo-CsvField -Value ([string]$Exit)),
-        (ConvertTo-CsvField -Value $Status)
+        (ConvertTo-CsvField -Value $Status),
+        (ConvertTo-CsvField -Value $Cli),
+        (ConvertTo-CsvField -Value $Model)
     ) -join ','
 
     $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
@@ -2804,7 +2808,7 @@ try {
                 elseif ($runMarker.Status -eq 'Blocked') { $runStatus = 'Blocked' }
                 else                                     { $runStatus = 'NoMarker' }
             }
-            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus
+            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus -Cli $task.Cli -Model $currentModel
 
             # Persist the session id the CLI reported (this is how codex thread ids get captured)
             if (-not [string]::IsNullOrWhiteSpace($result.SessionId)) {
@@ -3053,7 +3057,7 @@ try {
                 elseif ($runMarker.Status -eq 'Blocked') { $runStatus = 'Blocked' }
                 else                                      { $runStatus = 'NoMarker' }
             }
-            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus
+            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus -Cli $activeRunner.Cli -Model $currentModel
 
             if (-not [string]::IsNullOrWhiteSpace($result.SessionId)) {
                 $result.SessionId | Set-Content -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Encoding UTF8
