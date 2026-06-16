@@ -3587,6 +3587,255 @@ $(cat "$state_dir/runs.csv" 2>/dev/null)"
   fi
 }
 
+run_runner_index_switch_test() {
+  local desc="CLI rotation (fallbacks) — runner-index file written after runner switch (Task 9.2)"
+  local root="$TMP_ROOT/runner-idx-switch"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+exit 1
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\\n\\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "rotate-idx", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code idx_file idx_val
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  idx_file="$root/limitshift-queue/sessions/task-01-runner-index.txt"
+  idx_val=$(cat "$idx_file" 2>/dev/null | tr -d ' \r\n')
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$idx_file" ] &&
+     [ "$idx_val" = "1" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code idx_exists=$([ -f "$idx_file" ] && echo yes || echo no) idx_val=[$idx_val]
+$out"
+  fi
+}
+
+run_runner_model_index_per_runner_test() {
+  local desc="CLI rotation (fallbacks) — per-runner model-index file scoped to runner (task-NN-runner-R-model-index.txt) (Task 9.2)"
+  local root="$TMP_ROOT/runner-model-idx"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+model=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-m" ]; then model="$a"; fi
+  prev="$a"
+done
+if [ "$model" = "m-first" ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\\n\\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "per-runner-model-idx", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "model": ["m-first", "m-second"],
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out exit_code model_idx_file flat_idx_file model_idx_val
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  model_idx_file="$root/limitshift-queue/sessions/task-01-runner-0-model-index.txt"
+  flat_idx_file="$root/limitshift-queue/sessions/task-01-model-index.txt"
+  model_idx_val=$(cat "$model_idx_file" 2>/dev/null | tr -d ' \r\n')
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ -f "$model_idx_file" ] &&
+     [ "$model_idx_val" = "1" ] &&
+     [ ! -f "$flat_idx_file" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code model_idx_exists=$([ -f "$model_idx_file" ] && echo yes || echo no) model_idx_val=[$model_idx_val] flat_exists=$([ -f "$flat_idx_file" ] && echo yes || echo no)
+$out"
+  fi
+}
+
+run_runner_index_rerun_invalidation_test() {
+  local desc="CLI rotation (fallbacks) — changed fallback drops runner-index and per-runner model-index on re-run (Task 9.2)"
+  local root="$TMP_ROOT/runner-idx-invalidate"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter_file="$root/gemini-counter"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<EOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+if [ -f "$counter_file" ]; then n=\$(cat "$counter_file"); fi
+n=\$((n+1))
+printf '%s' "\$n" > "$counter_file"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+  exit 1
+fi
+printf '%s\n' '{"session_id":"g-1","response":"done\\n\\n[[TASK_COMPLETE]]"}'
+exit 0
+EOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"turn.started"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\\n\\n[[TASK_COMPLETE]]"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "invalidate-runner-state", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
+  ]
+}
+EOF
+
+  local out1 out2 exit_code idx_path m_idx_path counter_val
+  out1=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+
+  idx_path="$root/limitshift-queue/sessions/task-01-runner-index.txt"
+  m_idx_path="$root/limitshift-queue/sessions/task-01-runner-1-model-index.txt"
+
+  # Plant a per-runner model-index to verify it gets deleted on re-run.
+  printf '%s' '0' > "$m_idx_path"
+
+  # Change fallback model to trigger re-run invalidation.
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "invalidate-runner-state", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex", "model": "c-2-changed" } ] }
+  ]
+}
+EOF
+
+  out2=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  counter_val=$(cat "$counter_file" 2>/dev/null | tr -d ' \r\n')
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ ! -f "$idx_path" ] &&
+     [ ! -f "$m_idx_path" ] &&
+     [ "$counter_val" = "2" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code idx_exists=$([ -f "$idx_path" ] && echo yes || echo no) m_idx_exists=$([ -f "$m_idx_path" ] && echo yes || echo no) counter=[$counter_val]
+--- run1 ---
+$out1
+--- run2 ---
+$out2"
+  fi
+}
+
+run_runner_index_no_fallbacks_test() {
+  local desc="CLI rotation (fallbacks) — no-fallbacks task creates no runner-index file (Task 9.2)"
+  local root="$TMP_ROOT/runner-idx-no-fallbacks"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/gemini" <<'STUBEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "no-fallbacks", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it" }
+  ]
+}
+EOF
+
+  local out exit_code idx_file
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  idx_file="$root/limitshift-queue/sessions/task-01-runner-index.txt"
+
+  if [ "$exit_code" -eq 0 ] &&
+     [ ! -f "$idx_file" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code idx_exists=$([ -f "$idx_file" ] && echo yes || echo no)
+$out"
+  fi
+}
+
 run_cli_rotation_limit_switch_test
 run_cli_rotation_error_switch_test
 run_cli_rotation_blocked_no_switch_test
@@ -3595,6 +3844,10 @@ run_cli_rotation_all_limited_wait_test
 run_cli_rotation_claude_precheck_switch_test
 run_cli_rotation_handoff_after_wait_test
 run_runs_csv_columns_test
+run_runner_index_switch_test
+run_runner_model_index_per_runner_test
+run_runner_index_rerun_invalidation_test
+run_runner_index_no_fallbacks_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

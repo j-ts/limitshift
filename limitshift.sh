@@ -1552,6 +1552,59 @@ save_task_model_index() {
   printf '%s' "$2" > "$path"
 }
 
+# Task 9.2: runner-index and per-runner model-index persistence (fallbacks tasks only).
+get_task_runner_index_file_path() {
+  local idx="$1" key
+  key=$(get_task_key "$idx")
+  printf '%s' "$SESSION_STATE_PATH/$key-runner-index.txt"
+}
+
+get_saved_task_runner_index() {
+  local path raw
+  path=$(get_task_runner_index_file_path "$1")
+  if [ -f "$path" ]; then
+    raw=$(cat "$path" | tr -d '\r' | awk '{$1=$1;print}')
+    case "$raw" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$raw" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
+
+save_task_runner_index() {
+  local path
+  path=$(get_task_runner_index_file_path "$1")
+  printf '%s' "$2" > "$path"
+}
+
+get_task_runner_model_index_file_path() {
+  local idx="$1" runner="$2" key
+  key=$(get_task_key "$idx")
+  printf '%s' "$SESSION_STATE_PATH/$key-runner-$runner-model-index.txt"
+}
+
+get_saved_task_runner_model_index() {
+  local path raw
+  path=$(get_task_runner_model_index_file_path "$1" "$2")
+  if [ -f "$path" ]; then
+    raw=$(cat "$path" | tr -d '\r' | awk '{$1=$1;print}')
+    case "$raw" in
+      ''|*[!0-9]*) printf '0' ;;
+      *) printf '%s' "$raw" ;;
+    esac
+  else
+    printf '0'
+  fi
+}
+
+save_task_runner_model_index() {
+  local path
+  path=$(get_task_runner_model_index_file_path "$1" "$2")
+  printf '%s' "$3" > "$path"
+}
+
 get_task_output_file_path() {
   local idx="$1" key slug
   key=$(get_task_key "$idx")
@@ -2242,6 +2295,13 @@ run_queue() {
       rm -f "$(get_task_done_file_path "$i")"
       rm -f "$(get_task_session_file_path "$i")"
       rm -f "$(get_task_model_index_file_path "$i")"
+      # Task 9.2: drop runner-index and per-runner model-indices (exist only for fallbacks tasks).
+      rm -f "$(get_task_runner_index_file_path "$i")"
+      local rerun_rcount rerun_r
+      rerun_rcount=$(get_task_runner_count "$i")
+      for rerun_r in $(seq 0 $((rerun_rcount - 1))); do
+        rm -f "$(get_task_runner_model_index_file_path "$i" "$rerun_r")"
+      done
     fi
 
     runCount=0
@@ -2447,11 +2507,14 @@ run_queue() {
     for fb_j in $(seq 0 $((runnerCount - 1))); do
       setAside+=("false")
       limitedUntil+=("")
-      runnerModelIndices+=("0")
+      runnerModelIndices+=("$(get_saved_task_runner_model_index "$i" "$fb_j")")
       runnerReasons+=("")
     done
 
-    local currentRunnerIndex=0 pendingHandoff=0
+    local currentRunnerIndex
+    currentRunnerIndex=$(get_saved_task_runner_index "$i")
+    if [ "$currentRunnerIndex" -ge "$runnerCount" ] 2>/dev/null; then currentRunnerIndex=0; fi
+    local pendingHandoff=0
     runCount=0; errorRetryCount=0; stallCount=0
     previousNoMarkerText=""; hasPreviousNoMarker=0; mustWaitForFreshSession=0
 
@@ -2525,6 +2588,7 @@ run_queue() {
         local fb_switch_cli; fb_switch_cli=$(get_runner_field "$i" "$fb_new_idx" "cli" | tr '[:upper:]' '[:lower:]')
         write_step "Task ${taskNumber}: switching to ${fb_switch_cli}"
         currentRunnerIndex="$fb_new_idx"
+        save_task_runner_index "$i" "$currentRunnerIndex"
         pendingHandoff=1
       fi
 
@@ -2634,9 +2698,13 @@ run_queue() {
           local fb_next_model_idx=$((fb_cur_model_idx + 1))
           write_step "Task ${taskNumber}: limit on ${fb_runner_models[$fb_cur_model_idx]}; switching to ${fb_runner_models[$fb_next_model_idx]}"
           runnerModelIndices[$currentRunnerIndex]="$fb_next_model_idx"
+          save_task_runner_model_index "$i" "$currentRunnerIndex" "$fb_next_model_idx"
           continue
         fi
-        if [ "$fb_runner_model_count" -gt 1 ]; then runnerModelIndices[$currentRunnerIndex]=0; fi
+        if [ "$fb_runner_model_count" -gt 1 ]; then
+          runnerModelIndices[$currentRunnerIndex]=0
+          save_task_runner_model_index "$i" "$currentRunnerIndex" "0"
+        fi
         local fb_claude_usage=""
         if [ "$fb_active_cli" = "claude" ]; then
           fb_claude_usage=$(cat "$USAGE_PATH" 2>/dev/null || true)
