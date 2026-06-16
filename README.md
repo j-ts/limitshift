@@ -78,6 +78,7 @@ Anyone who uses an AI coding app or agent CLI with a subscription or tier (Claud
 - **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
 - **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
 - **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
+- **[CLI rotation](#cli-rotation)** — list backup tools per task; if one hits its limit or fails persistently, LimitShift hands the same task to the next tool without waiting.
 - **[Completion checking](#completion-checking)** — keeps nudging a task across several rounds until the AI signals it's genuinely done.
 - **[Local models via Ollama](#run-with-local-models-through-ollama)** — run `claude` or `codex` against a model on your own machine.
 
@@ -268,6 +269,40 @@ Set `model` to an **array** of names in preference order (e.g. `["gemini-3-flash
 
 Model rotation is not limited by CLI tool, but in practice it is most useful on Gemini and Antigravity because they have separate usage limits for different model tiers.
 
+### CLI rotation
+
+When the tool running a task hits a usage limit or fails persistently, LimitShift can automatically hand the **same task** to a backup tool instead of waiting. Add a `fallbacks` list to any task:
+
+```json
+{
+  "name": "Fix the failing tests",
+  "cli": "claude",
+  "model": ["opus", "sonnet"],
+  "projectPath": "C:/Users/you/my-project",
+  "completionCheck": true,
+  "extraArgs": ["--permission-mode", "acceptEdits"],
+  "prompt": "Fix all failing tests until they pass.",
+  "fallbacks": [
+    { "cli": "codex", "model": "gpt-5.5", "extraArgs": ["--sandbox", "workspace-write"] },
+    { "cli": "gemini", "model": ["gemini-3-flash-preview", "gemini-2.5-pro"], "extraArgs": ["--approval-mode", "auto_edit"] }
+  ]
+}
+```
+
+Each fallback carries its **own** permission flag, because the flag differs per tool. The task's `name`, `projectPath`, `prompt`, and `completionCheck` are shared across all runners.
+
+When LimitShift switches tools:
+
+- **Usage limit** (all models on the current tool are capped) → switch to the next tool, fresh session.
+- **Persistent failure** (failed past `maxRetriesOnError`) → set the tool aside and switch.
+- **`[[TASK_BLOCKED]]`** → the agent decided the task is impossible; **no switch happens**.
+
+If every listed tool is temporarily capped, LimitShift waits for the **soonest reset** (within 24 hours) and resumes that tool. The incoming tool starts a fresh session and receives a **handoff note** telling it to inspect `git status` and `git diff` before starting.
+
+**Git is required.** A fallbacks task's `projectPath` must be a git working tree — LimitShift checks this at validation time. The handoff note tells the incoming tool to inspect both `git status` (for new/untracked files) and `git diff` (for changes to tracked files). For the cleanest handoff, **commit a baseline before running a rotation task** so the diff clearly shows the partial progress.
+
+See [STRATEGIES.md](STRATEGIES.md) for prompt-writing tips, model and tool choice guidance, and example workflows using CLI rotation.
+
 ### Turn off your PC when it finishes
 
 Because LimitShift is just a terminal command, you can chain it with anything your operating system can do. For example, shut down one minute after the queue finishes:
@@ -317,7 +352,7 @@ Configuration, models, permissions, run options, state, and troubleshooting → 
 
 ## Roadmap
 
-- [ ] **CLI rotation on usage limits.** When you hit a limit on one CLI (e.g. `claude`), automatically switch to another (e.g. `codex`) for the same task. Like [model rotation](#model-rotation), but across different tools.
+- [x] **CLI rotation on usage limits.** When you hit a limit on one CLI (e.g. `claude`), automatically switch to another (e.g. `codex`) for the same task. Like [model rotation](#model-rotation), but across different tools.
 
 ## Glossary
 
