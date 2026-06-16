@@ -1202,6 +1202,284 @@ exit 0
         }
     }
 
+    Context 'CLI rotation (fallbacks) — end-to-end' {
+        It 'switches from runner 0 to runner 1 on a limit, fresh session + handoff note' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $stdinLog = Join-Path $root 'codex-stdin.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini always limits
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+exit 1
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex logs stdin and succeeds
+            @"
+`$stdin = [Console]::In.ReadToEnd()
+`$log = '$($stdinLog -replace '\\','\\')'
+[System.IO.File]::AppendAllText(`$log, `$stdin + [Environment]::NewLine)
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'limit-switch'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to codex'
+                $run.Output | Should -Match 'Task 1 done'
+
+                $stdinContent = Get-Content -LiteralPath $stdinLog -Raw
+                $stdinContent | Should -Match 'A previous AI tool'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'switches to the next runner after persistent errors (retries exhausted)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $geminiLog = Join-Path $root 'gemini-calls.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini always errors (non-limit 500), logs each call
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$log = '$($geminiLog -replace '\\','\\')'
+[System.IO.File]::AppendAllText(`$log, 'called' + [Environment]::NewLine)
+Write-Output '{"session_id":"g-1","error":{"message":"Internal server error","code":"500"}}'
+exit 1
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex succeeds
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $false; maxRunsPerTask = 10; maxRetriesOnError = 1; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'error-switch'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to codex'
+                $run.Output | Should -Match 'Task 1 done'
+
+                $geminiCalls = @(Get-Content -LiteralPath $geminiLog | Where-Object { $_ })
+                $geminiCalls.Count | Should -Be 2
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'does NOT switch runners on TASK_BLOCKED; task fails immediately' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $codexCounter = Join-Path $root 'codex-calls.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini returns BLOCKED
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"g-1","response":"[[TASK_BLOCKED]] missing credentials"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex counts its calls
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counter = '$($codexCounter -replace '\\','\\')'
+[System.IO.File]::AppendAllText(`$counter, 'called' + [Environment]::NewLine)
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $false; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'blocked-task'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Not -Match 'switching to'
+
+                $failedPath = Join-Path $root 'limitshift-queue\status\task-01.failed'
+                Test-Path -LiteralPath $failedPath | Should -BeTrue
+                Test-Path -LiteralPath $codexCounter | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'a no-fallbacks task still waits-and-resumes on a single-runner limit (back-compat)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            # limits once (counter=1) then succeeds — no fallbacks, back-compat path
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 0s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'back-compat'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'; model = 'only-model' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Hit a usage limit'
+                $run.Output | Should -Not -Match 'switching to'
+                $run.Output | Should -Match 'Task 1 done'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'when all runners are limited, waits for the soonest reset and resumes on that runner' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $counterFile = Join-Path $root 'counter.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini: counter=1 → limit; otherwise → success
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 5s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex: counter=2 → limit; otherwise → success (shares counter file with gemini)
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 2) {
+    Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+    Write-Output '{"type":"error","message":"Rate limit exceeded. Try again in 5s."}'
+    exit 1
+}
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 10; maxRetriesOnError = 0; limitWaitMinutes = 5; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'all-limited'; cli = 'gemini'; model = 'm-r0'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Hit a usage limit'
+                $run.Output | Should -Match 'switching to codex'
+                $run.Output | Should -Match 'Task 1 done'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
     Context 'Invoke-NativeProcess stdin delivery' {
         It 'round-trips a multi-line prompt with quotes through stdin to a .cmd shim' {
             $root = New-TestRoot

@@ -731,6 +731,12 @@ function Test-IsOllamaTask {
     return (Test-ExtraArgsRequestOllama -ExtraArgs $Task.ExtraArgs)
 }
 
+function Test-IsOllamaRunner {
+    param($Runner)
+    if ($Runner.Cli -ne 'claude') { return $false }
+    return (Test-ExtraArgsRequestOllama -ExtraArgs $Runner.ExtraArgs)
+}
+
 function Test-IsGitRepo {
     param([string]$Path)
     # Using Start-Process to avoid triggering $ErrorActionPreference = 'Stop' from git's stderr/exit code.
@@ -2150,7 +2156,10 @@ function Invoke-CliTaskRun {
         # When set, suppress the task header. The caller (main loop) is responsible for printing a
         # contextual one-liner (limit summary, retry line, no-marker resume) BEFORE this call instead.
         # Used for any within-run continuation so the task header doesn't repeat.
-        [switch]$Quiet
+        [switch]$Quiet,
+        # When set on a New-mode run, prepend the runner-handoff preamble so the incoming runner
+        # knows partial work may already exist in the working tree.
+        [switch]$UseHandoffNote
     )
 
     $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex -Task $Task
@@ -2159,7 +2168,7 @@ function Invoke-CliTaskRun {
     }
 
     if ($Mode -eq 'New') {
-        $prompt = Get-TaskPromptWithCompletionMarker -Task $Task
+        $prompt = if ($UseHandoffNote) { Get-TaskPromptWithHandoff -Task $Task } else { Get-TaskPromptWithCompletionMarker -Task $Task }
     }
     else {
         $prompt = Get-ResumePrompt -Task $Task
@@ -2390,6 +2399,12 @@ function Wait-ForLimitReset {
     # what stubs in the test suite produce). The wrapper prints the "Hit a usage limit" beat
     # regardless and skips the actual sleep when WakeTime is already in the past.
     Invoke-UiRestWithSummary -Cli ([string]$Task.Cli) -WakeTime $wakeTime
+}
+
+function Wait-ForRunnerReset {
+    param([datetime]$Until, [string]$Cli, $Settings)
+    $wakeTime = $Until.AddMinutes($Settings.ResetBufferMinutes)
+    Invoke-UiRestWithSummary -Cli $Cli -WakeTime $wakeTime
 }
 
 function Test-QueuePreflight {
@@ -2711,6 +2726,12 @@ try {
             Remove-Item -LiteralPath (Get-TaskModelIndexFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
         }
 
+        $runners = @($task.Runners)
+        $runnerCount = $runners.Count
+
+        if ($runnerCount -eq 1) {
+
+        # --- NO-FALLBACKS PATH (single runner — existing code unchanged) ---
         $runCount = 0
         $errorRetryCount = 0
         $mustWaitForFreshSession = $false
@@ -2896,6 +2917,214 @@ try {
             Write-Host ""
             Write-Host ("  " + $script:GlyphRetry + " Task " + $taskNumber + "/" + $Tasks.Count + " " + $script:GlyphDot + " " + $task.Name + " not finished yet " + $script:GlyphDot + " resuming the same session") -ForegroundColor DarkGray
         }
+
+        } else {
+
+        # --- FALLBACKS PATH (multiple runners) ---
+        $setAside          = New-Object 'bool[]'   $runnerCount
+        $limitedUntil      = New-Object 'object[]' $runnerCount
+        $runnerModelIndices = New-Object 'int[]'   $runnerCount
+        $runnerReasons     = New-Object 'string[]' $runnerCount
+        $currentRunnerIndex = 0
+        $pendingHandoff    = $false
+        $runCount          = 0
+        $errorRetryCount   = 0
+        $stallCount        = 0
+        $previousNoMarkerText = $null
+        $mustWaitForFreshSession = $false
+
+        while ($true) {
+            # Runner selection
+            $states = @(for ($j = 0; $j -lt $runnerCount; $j++) {
+                @{ SetAside = $setAside[$j]; LimitedUntil = $limitedUntil[$j] }
+            })
+            $sel = Select-NextRunner -States $states -StartIndex $currentRunnerIndex -Now (Get-Date)
+
+            if ($sel.Action -eq 'Fail') {
+                $parts = @(for ($j = 0; $j -lt $runnerCount; $j++) {
+                    if ($runnerReasons[$j]) { "$($runners[$j].Cli): $($runnerReasons[$j])" }
+                })
+                $failReason = "all runners exhausted" + $(if ($parts.Count -gt 0) { ": " + ($parts -join '; ') } else { '' })
+                Save-TaskFailedMarker -TaskIndex $i -Reason $failReason -Task $task
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " failed (all runners exhausted):") -ForegroundColor Red
+                Write-UiReason -Text $failReason
+                if ($config.Settings.StopOnError) { throw "Task $taskNumber $failReason" }
+                $failedCount++
+                break
+            }
+
+            if ($sel.Action -eq 'Wait') {
+                $waitRunnerIdx = $sel.Index
+                Wait-ForRunnerReset -Until $sel.WaitUntil -Cli ([string]$runners[$waitRunnerIdx].Cli) -Settings $config.Settings
+                $limitedUntil[$waitRunnerIdx] = $null
+                $currentRunnerIndex = $waitRunnerIdx
+                continue
+            }
+
+            # Action = 'Run'
+            $newRunnerIdx = $sel.Index
+            if ($newRunnerIdx -ne $currentRunnerIndex) {
+                Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+                $errorRetryCount = 0; $stallCount = 0
+                $previousNoMarkerText = $null; $mustWaitForFreshSession = $false
+                Write-Step "Task ${taskNumber}: switching to $($runners[$newRunnerIdx].Cli)"
+                $currentRunnerIndex = $newRunnerIdx
+                $pendingHandoff = $true
+            }
+
+            $activeRunner = $runners[$currentRunnerIndex]
+            $runnerModels = @($activeRunner.Models)
+            $runnerModelCount = $runnerModels.Count
+            $currentModelIndexForRunner = $runnerModelIndices[$currentRunnerIndex]
+            if ($currentModelIndexForRunner -ge $runnerModelCount) { $currentModelIndexForRunner = 0 }
+            $currentModel = if ($runnerModelCount -gt 0) { [string]$runnerModels[$currentModelIndexForRunner] } else { '' }
+
+            $effectiveTask = [pscustomobject]@{
+                Name            = $task.Name
+                Cli             = $activeRunner.Cli
+                ProjectPath     = $task.ProjectPath
+                Model           = if ($runnerModels.Count -gt 0) { [string]$runnerModels[0] } else { '' }
+                Models          = $runnerModels
+                Effort          = $activeRunner.Effort
+                Prompt          = $task.Prompt
+                ExtraArgs       = @($activeRunner.ExtraArgs)
+                CompletionCheck = $task.CompletionCheck
+            }
+
+            $runCount++
+            if ($runCount -gt $config.Settings.MaxRunsPerTask) {
+                $failReason = "run budget exhausted (maxRunsPerTask=$($config.Settings.MaxRunsPerTask))"
+                Save-TaskFailedMarker -TaskIndex $i -Reason $failReason -Task $task
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " exceeded run budget") -ForegroundColor Red
+                if ($config.Settings.StopOnError) { throw "Task $taskNumber $failReason" }
+                $failedCount++
+                break
+            }
+
+            # Runner-scoped claude pre-check (skip for Ollama runners and non-claude runners)
+            if ($activeRunner.Cli -eq 'claude' -and -not (Test-IsOllamaRunner -Runner $activeRunner) -and -not $DryRun) {
+                Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
+                $mustWaitForFreshSession = $false
+            }
+
+            $quietHeader = ($runCount -gt 1)
+            $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
+
+            if ([string]::IsNullOrWhiteSpace($savedSessionId)) {
+                $runMode = 'New'
+                $sessionId = $null
+                if ($effectiveTask.Cli -eq 'claude' -or $effectiveTask.Cli -eq 'agy' -or $effectiveTask.Cli -eq 'copilot') {
+                    $sessionId = New-TaskSessionId -TaskIndex $i
+                }
+                $useHandoff = $pendingHandoff; $pendingHandoff = $false
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader -UseHandoffNote:$useHandoff
+            } else {
+                $runMode = 'Resume'
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader
+            }
+
+            if ($DryRun) { Write-Step "Dry run for task $taskNumber recorded the command only"; break }
+
+            if ($result.IsLimit) {
+                $runStatus = 'Limit'
+            } elseif (-not $result.Ok) {
+                $runStatus = 'Error'
+            } elseif (-not $task.CompletionCheck) {
+                $runStatus = 'Done'
+            } else {
+                $runMarker = Get-MarkerStatus -Text $result.Text
+                if ($runMarker.Status -eq 'Done')    { $runStatus = 'Done' }
+                elseif ($runMarker.Status -eq 'Blocked') { $runStatus = 'Blocked' }
+                else                                      { $runStatus = 'NoMarker' }
+            }
+            Add-RunsCsvRow -Task ("{0}-{1}" -f $taskNumber, $task.Name) -Run $runCount -Mode $runMode -Exit $(if ($result.Ok) { 0 } else { 1 }) -Status $runStatus
+
+            if (-not [string]::IsNullOrWhiteSpace($result.SessionId)) {
+                $result.SessionId | Set-Content -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Encoding UTF8
+            }
+
+            # Gemini-only: installed CLI rejected --resume — drop session and retry without it
+            if ($effectiveTask.Cli -eq 'gemini' -and -not $result.Ok -and
+                $result.ErrorText -match '(?i)unknown option.*resume|not supported in non-interactive|unexpected argument|too many arguments|invalid.*resume') {
+                Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+                Write-Step "Task ${taskNumber}: installed gemini rejects --resume; retrying with continuation prompt only"
+                continue
+            }
+
+            if ($result.IsLimit) {
+                if ($runnerModelCount -gt 1 -and $currentModelIndexForRunner -lt ($runnerModelCount - 1)) {
+                    $nextModelIdx = $currentModelIndexForRunner + 1
+                    Write-Step "Task ${taskNumber}: limit on $($runnerModels[$currentModelIndexForRunner]); switching to $($runnerModels[$nextModelIdx])"
+                    $runnerModelIndices[$currentRunnerIndex] = $nextModelIdx
+                    continue
+                }
+                if ($runnerModelCount -gt 1) { $runnerModelIndices[$currentRunnerIndex] = 0 }
+                $limitedUntil[$currentRunnerIndex] = Get-RunnerResetTime -Cli ([string]$activeRunner.Cli) -ErrorText $result.ErrorText -LimitWaitMinutes $config.Settings.LimitWaitMinutes
+                $runnerReasons[$currentRunnerIndex] = 'limited'
+                continue
+            }
+
+            if (-not $result.Ok) {
+                $errorRetryCount++
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " hit an error:") -ForegroundColor Red
+                Write-UiReason -Text $result.ErrorText
+                if ($errorRetryCount -le $config.Settings.MaxRetriesOnError) {
+                    Write-Host ""
+                    Write-Host ("  " + $script:GlyphRetry + " retry " + $errorRetryCount + " of " + $config.Settings.MaxRetriesOnError + " for Task " + $taskNumber + "/" + $Tasks.Count + " " + $script:GlyphDot + " " + $task.Name + " " + $script:GlyphDot + " resume") -ForegroundColor Yellow
+                    continue
+                }
+                $setAside[$currentRunnerIndex] = $true
+                $runnerReasons[$currentRunnerIndex] = "error: $($result.ErrorText)"
+                $errorRetryCount = 0
+                continue
+            }
+
+            if (-not $task.CompletionCheck) {
+                Save-TaskDoneMarker -TaskIndex $i -Task $task
+                Write-UiTaskDone -TaskNumber $taskNumber
+                $doneCount++
+                break
+            }
+
+            $marker = Get-MarkerStatus -Text $result.Text
+            if ($marker.Status -eq 'Done') {
+                Save-TaskDoneMarker -TaskIndex $i -Task $task
+                Write-UiTaskDone -TaskNumber $taskNumber
+                $doneCount++
+                break
+            }
+            if ($marker.Status -eq 'Blocked') {
+                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked:") -ForegroundColor Yellow
+                Write-UiReason -Text $marker.Reason
+                if ($config.Settings.StopOnError) { throw "Task $taskNumber is blocked: $($marker.Reason)" }
+                $failedCount++
+                break
+            }
+
+            # Stall: with fallbacks, set runner aside and try the next one
+            $currentText = if ($null -ne $result.Text) { ([string]$result.Text).Trim() } else { '' }
+            if ($null -ne $previousNoMarkerText -and $currentText -eq $previousNoMarkerText) {
+                $stallCount++
+                if ($stallCount -ge $config.Settings.MaxStalls) {
+                    $stallReason = 'no progress: agent repeated the same response without a completion marker'
+                    $setAside[$currentRunnerIndex] = $true
+                    $runnerReasons[$currentRunnerIndex] = $stallReason
+                    $stallCount = 0; $previousNoMarkerText = $null
+                    continue
+                }
+            }
+            $previousNoMarkerText = $currentText
+
+            Write-Host ""
+            Write-Host ("  " + $script:GlyphRetry + " Task " + $taskNumber + "/" + $Tasks.Count + " " + $script:GlyphDot + " " + $task.Name + " not finished yet " + $script:GlyphDot + " resuming the same session") -ForegroundColor DarkGray
+        }
+
+        } # end else (fallbacks path)
     }
 
     Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -SkippedCount $skippedCount -FailedCount $failedCount `
