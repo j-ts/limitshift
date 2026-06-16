@@ -1660,6 +1660,243 @@ exit 0
         }
     }
 
+    Context 'CLI rotation (fallbacks) — runner index persistence (Task 9.1)' {
+        It 'after a runner switch, the runner-index file holds the new runner index' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini always limits
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+exit 1
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex succeeds
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'persist-runner'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to codex'
+
+                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
+                Test-Path -LiteralPath $idxPath | Should -BeTrue
+                (Get-Content -LiteralPath $idxPath -Raw).Trim() | Should -Be '1'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'the model-index file is scoped per-runner (task-NN-runner-R-model-index.txt)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            $codexPath  = Join-Path $binPath 'codex.ps1'
+
+            # gemini runner 0: first model (m-first) limits; second model (m-second) succeeds
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$model = ''
+for (`$k = 0; `$k -lt `$args.Count; `$k++) { if (`$args[`$k] -eq '-m') { `$model = `$args[`$k + 1] } }
+if (`$model -eq 'm-first') {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done`n`n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            # codex not needed (runner 0 succeeds on model 2)
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done`n`n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'per-runner-model-idx'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       model = @('m-first', 'm-second')
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'switching to m-second'
+
+                # Runner-scoped model-index file must exist for runner 0 (the gemini runner)
+                $modelIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-0-model-index.txt'
+                Test-Path -LiteralPath $modelIdxPath | Should -BeTrue
+                (Get-Content -LiteralPath $modelIdxPath -Raw).Trim() | Should -Be '1'
+
+                # The old flat model-index file must NOT exist (this is a fallbacks task)
+                $flatIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-model-index.txt'
+                Test-Path -LiteralPath $flatIdxPath | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'a changed fallback drops both the runner-index and per-runner model-index files on re-run' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $geminiPath  = Join-Path $binPath 'gemini.ps1'
+            $codexPath   = Join-Path $binPath 'codex.ps1'
+            $counterFile = Join-Path $root 'gemini-counter.txt'
+
+            # gemini: limits on call #1 only; succeeds on call #2+ (counter persists across runs).
+            # This lets the second script run retry gemini and succeed — proving the runner-index
+            # was reset to 0 so gemini was actually tried again.
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"g-1","error":{"message":"Quota exceeded. Try again in 1s.","code":"429"}}'
+    exit 1
+}
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"type":"thread.started","thread_id":"c-1"}'
+Write-Output '{"type":"turn.started"}'
+Write-Output '{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"done\n\n[[TASK_COMPLETE]]"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+exit 0
+"@ | Set-Content -LiteralPath $codexPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'invalidate-runner-state'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                       fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                # First run: gemini limits (call 1) → codex succeeds. runner-index = 1.
+                $run1 = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run1.ExitCode | Should -Be 0
+
+                $idxPath  = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
+                $mIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-1-model-index.txt'
+                Test-Path -LiteralPath $idxPath | Should -BeTrue
+
+                # Manually plant a per-runner model-index so we can verify it gets deleted.
+                '0' | Set-Content -LiteralPath $mIdxPath -Encoding UTF8
+
+                # Change the fallback model — this changes the fingerprint and triggers a re-run.
+                Write-TestQueue -Path $queuePath -Config @{
+                    settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                    tasks = @(
+                        @{ name = 'invalidate-runner-state'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it'
+                           fallbacks = @(@{ cli = 'codex'; model = 'c-2-changed' }) }
+                    )
+                }
+
+                # Second run: invalidation drops runner-index + mIdxPath. Then gemini is tried at
+                # runner 0 (call 2) and succeeds — no switch, so no new runner-index is written.
+                $run2 = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run2.ExitCode | Should -Be 0
+
+                # runner-index deleted by invalidation and not re-created (no switch in run 2)
+                Test-Path -LiteralPath $idxPath  | Should -BeFalse
+                # per-runner model-index also deleted and not re-created
+                Test-Path -LiteralPath $mIdxPath | Should -BeFalse
+                # gemini was called twice total (call 1 in run 1, call 2 in run 2), proving run 2
+                # started at runner 0 (not skipped to runner 1).
+                [int](Get-Content -LiteralPath $counterFile -Raw) | Should -Be 2
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'a no-fallbacks task creates no runner-index file' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"g-1","response":"done`n`n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks = @(
+                    @{ name = 'no-fallbacks-task'; cli = 'gemini'; projectPath = $projectPath; prompt = 'do it' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+
+                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
+                Test-Path -LiteralPath $idxPath | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
     Context 'Invoke-NativeProcess stdin delivery' {
         It 'round-trips a multi-line prompt with quotes through stdin to a .cmd shim' {
             $root = New-TestRoot

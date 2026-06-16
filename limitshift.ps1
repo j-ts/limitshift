@@ -1181,6 +1181,56 @@ function Save-TaskModelIndex {
     [string]$ModelIndex | Set-Content -LiteralPath $path -Encoding UTF8
 }
 
+# Task 9.1: runner-index and per-runner model-index persistence (fallbacks tasks only).
+# These files are created ONLY when a task has fallbacks (Runners.Count > 1). The runner-index
+# file records which runner is active so a Ctrl-C restart resumes the same runner; the per-runner
+# model-index scopes the existing model-rotation index to the specific runner.
+function Get-TaskRunnerIndexFilePath {
+    param([int]$TaskIndex)
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    return Join-Path $SessionStatePath "$taskKey-runner-index.txt"
+}
+
+function Get-SavedTaskRunnerIndex {
+    param([int]$TaskIndex)
+    $path = Get-TaskRunnerIndexFilePath -TaskIndex $TaskIndex
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Content -LiteralPath $path -Raw).Trim()
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) { return $parsed }
+    }
+    return 0
+}
+
+function Save-TaskRunnerIndex {
+    param([int]$TaskIndex, [int]$RunnerIndex)
+    $path = Get-TaskRunnerIndexFilePath -TaskIndex $TaskIndex
+    [string]$RunnerIndex | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Get-TaskRunnerModelIndexFilePath {
+    param([int]$TaskIndex, [int]$RunnerIndex)
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    return Join-Path $SessionStatePath "$taskKey-runner-$RunnerIndex-model-index.txt"
+}
+
+function Get-SavedTaskRunnerModelIndex {
+    param([int]$TaskIndex, [int]$RunnerIndex)
+    $path = Get-TaskRunnerModelIndexFilePath -TaskIndex $TaskIndex -RunnerIndex $RunnerIndex
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Content -LiteralPath $path -Raw).Trim()
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) { return $parsed }
+    }
+    return 0
+}
+
+function Save-TaskRunnerModelIndex {
+    param([int]$TaskIndex, [int]$RunnerIndex, [int]$ModelIndex)
+    $path = Get-TaskRunnerModelIndexFilePath -TaskIndex $TaskIndex -RunnerIndex $RunnerIndex
+    [string]$ModelIndex | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
 function Get-TaskOutputFilePath {
     param(
         [int]$TaskIndex,
@@ -2728,6 +2778,12 @@ try {
             Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
             # Task 6: also drop the stale model-rotation index so a changed task starts at model #1.
             Remove-Item -LiteralPath (Get-TaskModelIndexFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+            # Task 9.1: drop runner-index and per-runner model-indices (exist only for fallbacks tasks).
+            Remove-Item -LiteralPath (Get-TaskRunnerIndexFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+            $reRunRunners = @($task.Runners)
+            for ($r = 0; $r -lt $reRunRunners.Count; $r++) {
+                Remove-Item -LiteralPath (Get-TaskRunnerModelIndexFilePath -TaskIndex $i -RunnerIndex $r) -Force -ErrorAction SilentlyContinue
+            }
         }
 
         $runners = @($task.Runners)
@@ -2929,7 +2985,12 @@ try {
         $limitedUntil      = New-Object 'object[]' $runnerCount
         $runnerModelIndices = New-Object 'int[]'   $runnerCount
         $runnerReasons     = New-Object 'string[]' $runnerCount
-        $currentRunnerIndex = 0
+        # Task 9.1: restore the persisted runner index and per-runner model indices across restarts.
+        $currentRunnerIndex = Get-SavedTaskRunnerIndex -TaskIndex $i
+        if ($currentRunnerIndex -ge $runnerCount) { $currentRunnerIndex = 0 }
+        for ($r = 0; $r -lt $runnerCount; $r++) {
+            $runnerModelIndices[$r] = Get-SavedTaskRunnerModelIndex -TaskIndex $i -RunnerIndex $r
+        }
         $pendingHandoff    = $false
         $runCount          = 0
         $errorRetryCount   = 0
@@ -2977,6 +3038,8 @@ try {
                 $previousNoMarkerText = $null; $mustWaitForFreshSession = $false
                 Write-Step "Task ${taskNumber}: switching to $($runners[$newRunnerIdx].Cli)"
                 $currentRunnerIndex = $newRunnerIdx
+                # Task 9.1: persist the new runner index so a restart resumes the correct runner.
+                Save-TaskRunnerIndex -TaskIndex $i -RunnerIndex $currentRunnerIndex
                 $pendingHandoff = $true
             }
 
@@ -3076,9 +3139,14 @@ try {
                     $nextModelIdx = $currentModelIndexForRunner + 1
                     Write-Step "Task ${taskNumber}: limit on $($runnerModels[$currentModelIndexForRunner]); switching to $($runnerModels[$nextModelIdx])"
                     $runnerModelIndices[$currentRunnerIndex] = $nextModelIdx
+                    # Task 9.1: persist the per-runner model index so a restart resumes at the right model.
+                    Save-TaskRunnerModelIndex -TaskIndex $i -RunnerIndex $currentRunnerIndex -ModelIndex $nextModelIdx
                     continue
                 }
-                if ($runnerModelCount -gt 1) { $runnerModelIndices[$currentRunnerIndex] = 0 }
+                if ($runnerModelCount -gt 1) {
+                    $runnerModelIndices[$currentRunnerIndex] = 0
+                    Save-TaskRunnerModelIndex -TaskIndex $i -RunnerIndex $currentRunnerIndex -ModelIndex 0
+                }
                 $limitedUntil[$currentRunnerIndex] = Get-RunnerResetTime -Cli ([string]$activeRunner.Cli) -ErrorText $result.ErrorText -LimitWaitMinutes $config.Settings.LimitWaitMinutes
                 $runnerReasons[$currentRunnerIndex] = 'limited'
                 continue
