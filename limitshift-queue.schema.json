@@ -42,6 +42,12 @@
           "type": "boolean",
           "default": false,
           "description": "When true AND --validate-only / -ValidateOnly is active, run a cheap non-editing prompt for each unique CLI to verify model connectivity. Not triggered during normal queue execution. Enable per-run with --probe-models / -ProbeModels."
+        },
+        "recoveryAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "When > 0, a task that ends with [[TASK_BLOCKED]] is given up to that many same-session recovery rounds before being flagged for a human review. Default 0 (off)."
         }
       }
     },
@@ -71,6 +77,11 @@
           "completionCheck": {
             "type": "boolean",
             "description": "Per-task override of settings.completionCheck. true keeps the [[TASK_COMPLETE]] marker workflow; false sends this task's prompt verbatim and marks it done after the first OK run (only a usage limit resumes it)."
+          },
+          "recoveryAttempts": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Per-task recoveryAttempts. Placement is either/or with settings.recoveryAttempts: set it here OR in settings, never both (validation fails if both are present). When > 0, a task that ends with [[TASK_BLOCKED]] is given up to that many same-session recovery rounds before being flagged for a human review."
           },
           "extraArgs": {
             "oneOf": [

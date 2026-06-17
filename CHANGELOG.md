@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-17
+
+### Added
+- **Block recovery (`recoveryAttempts`).** An opt-in integer (`settings.recoveryAttempts` **or** `tasks[].recoveryAttempts`, never both — default `0`/off) that turns a `[[TASK_BLOCKED]] <reason>` into up to N same-session recovery rounds before the task is flagged for a human, instead of stopping on the first block. Each round re-runs the **same** tool (it never cascades into `fallbacks`) and counts toward `maxRunsPerTask`. Two recovery prompts: **Variant A** — a short same-session nudge that re-feeds the newest blocked reason and tells the agent to reconsider or ask for a human; **Variant B** — when a normal limit/error/stall runner switch starts a fresh session and recovery is enabled, the existing handoff note is enriched with the previous runner's failure reason plus a tail of its output. A **`HUMAN:` short-circuit** (`[[TASK_BLOCKED]] HUMAN: <reason>`, case-insensitive) stops recovery immediately and flags the task. Exhausted or human-blocked tasks get a distinct `status/task-NN.needs-human` marker (alongside the usual `.failed`), a `Task N needs human review: <reason>` console beat, and a separate "need human review" count in the end-of-run summary. `recoveryAttempts` is excluded from the task fingerprint, so toggling it does not invalidate a `.done` marker, and queues that never set it behave byte-for-byte as before. `--validate-only` enforces the integer ≥ 0 rule, the either/or placement, and the `completionCheck: true` requirement. Implemented identically in `limitshift.ps1` and `limitshift.sh`, with new tests in both the Pester and bash suites.
+
 ## [1.1.0] - 2026-06-17
 
 ### Added

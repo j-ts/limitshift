@@ -502,6 +502,63 @@ exit 0
         }
     }
 
+    Context 'Block recovery — validation' {
+        It 'rejects recoveryAttempts in settings and on a task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ recoveryAttempts = 1 }
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts = 2 })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*recoveryAttempts may be set in settings OR on individual tasks, not both*'
+        }
+
+        It 'rejects recoveryAttempts in settings and on a task even when settings value is zero' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ recoveryAttempts = 0 }
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts = 2 })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*recoveryAttempts may be set in settings OR on individual tasks, not both*'
+        }
+
+        It 'rejects recoveryAttempts > 0 when completionCheck is false' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts = 1; completionCheck = $false })
+            }
+            { Read-QueueConfig -Path $queuePath } | Should -Throw '*recoveryAttempts > 0 but completionCheck is false*'
+        }
+
+        It 'accepts valid recoveryAttempts in settings' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ recoveryAttempts = 3 }
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p' })
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].RecoveryAttempts | Should -Be 3
+        }
+
+        It 'accepts valid recoveryAttempts on a task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'; New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='t'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts = 2 })
+            }
+            $cfg = Read-QueueConfig -Path $queuePath
+            $cfg.Tasks[0].RecoveryAttempts | Should -Be 2
+        }
+    }
+
     Context 'CLI rotation (fallbacks) — handoff note' {
         It 'prepends the exact handoff note in completion-check mode' {
             $task = [pscustomobject]@{ Name='t'; Cli='codex'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='do the thing'; ExtraArgs=@(); CompletionCheck=$true }
@@ -524,6 +581,30 @@ exit 0
             $p.StartsWith($expectedNote) | Should -Be $true
             $p | Should -Match "do the thing"
             $p | Should -Not -Match "\[\[TASK_COMPLETE\]\]"
+        }
+    }
+
+    Context 'Block recovery — Variant B handoff' {
+        It 'enriches the handoff with the failure reason and output tail when recovery is enabled' {
+            $task = [pscustomobject]@{ Name='t'; Cli='codex'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='do the thing'; ExtraArgs=@(); CompletionCheck=$true; RecoveryAttempts=1 }
+            $p = Get-TaskPromptWithHandoff -Task $task -FailureReason 'usage limit' -FailureOutputTail 'Quota exceeded. Try again in 2h.'
+
+            # Spec §6.2: the note opens with the failure-context section and carries the tail.
+            $p.StartsWith('A previous AI tool worked on this task and could not continue (usage limit).') | Should -Be $true
+            $p | Should -Match 'This is why the previous attempt did not finish:'
+            $p | Should -Match 'Quota exceeded\. Try again in 2h\.'
+            # The original task and completion-marker instructions still follow.
+            $p | Should -Match 'do the thing'
+            $p | Should -Match 'IMPORTANT AUTOMATION INSTRUCTIONS'
+        }
+
+        It 'emits the unchanged handoff note when recovery is off, even if failure context is passed' {
+            $task = [pscustomobject]@{ Name='t'; Cli='codex'; ProjectPath='C:\p'; Model=$null; Effort=$null; Prompt='do the thing'; ExtraArgs=@(); CompletionCheck=$true; RecoveryAttempts=0 }
+            $p = Get-TaskPromptWithHandoff -Task $task -FailureReason 'usage limit' -FailureOutputTail 'Quota exceeded.'
+
+            $expectedNote = "A previous AI tool started this task and was interrupted (usage limit or failure)."
+            $p.StartsWith($expectedNote) | Should -Be $true
+            $p | Should -Not -Match 'This is why the previous attempt did not finish:'
         }
     }
 
@@ -3523,7 +3604,6 @@ exit 0
             New-Item -ItemType Directory -Path $binDir -Force | Out-Null
             Write-FakeClaudeSuccess -BinDir $binDir
 
-            # Copy the runner to $root so its PSScriptRoot is $root, place queue next to it
             $scriptCopy = Join-Path $root 'limitshift.ps1'
             Copy-Item -LiteralPath $script:__limitshiftScriptPath -Destination $scriptCopy -Force
             $queueName = 'myproject-queue.json'
@@ -3638,7 +3718,6 @@ exit 0
             New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
             $lockPath = Join-Path $stateDir 'limitshift.lock'
 
-            # Start a background process to get a live PID, write it to the lock file
             $mockProc = Start-Process -FilePath $script:__limitshiftPowerShellExe `
                 -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep 5') `
                 -PassThru -WindowStyle Hidden
@@ -3650,6 +3729,146 @@ exit 0
 
             $run.ExitCode | Should -Be 2
             $run.Output   | Should -Match '(?i)Another LimitShift|already running|PID \d+'
+        }
+    }
+
+    Context 'Block recovery — end-to-end' {
+        It 'handles TASK_BLOCKED by resuming the same session with recovery nudge' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $claudeStdin = Join-Path $root 'claude-stdin.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            $counterFile = Join-Path $root 'counter.txt'
+
+            # call 1: BLOCKED; call 2: success
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$stdin = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+[System.IO.File]::AppendAllText('$($claudeStdin -replace '\\','\\')', "--- CALL `$n ---`n" + `$stdin + "`n")
+if (`$n -eq 1) {
+    Write-Output '{"session_id":"s-1","result":"[[TASK_BLOCKED]] missing info"}'
+    exit 0
+}
+Write-Output '{"session_id":"s-2","result":"done now\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='rec'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts=1; extraArgs=@('--permission-mode','acceptEdits') })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'blocked; recovery round 1 of 1'
+                $run.Output | Should -Match 'Task 1 done'
+
+                $stdin = Get-Content -LiteralPath $claudeStdin -Raw
+                $stdin | Should -Match '--- CALL 2 ---'
+                $stdin | Should -Match 'You ended with \[\[TASK_BLOCKED\]\]: missing info'
+                $stdin | Should -Not -Match 'A previous AI tool worked on this task and could not continue'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'HUMAN: short-circuits recovery rounds' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $counterFile = Join-Path $root 'counter.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+Write-Output '{"session_id":"s-1","result":"[[TASK_BLOCKED]] HUMAN: need keys"}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                tasks = @(@{ name='hum'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts=5 })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.Output | Should -Match 'blocked \(HUMAN: short-circuit\)'
+                $run.Output | Should -Not -Match 'recovery round'
+                [int](Get-Content -LiteralPath $counterFile -Raw) | Should -Be 1
+
+                $needsHumanPath = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                Test-Path -LiteralPath $needsHumanPath | Should -BeTrue
+                (Get-Content -LiteralPath $needsHumanPath -Raw) | Should -Match 'HUMAN: need keys'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'writes .needs-human marker and summary breakdown when recovery is exhausted' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+            git -C $projectPath init -q
+
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"s-1","result":"[[TASK_BLOCKED]] still stuck"}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $false }
+                tasks = @(@{ name='exh'; cli='claude'; projectPath=$projectPath; prompt='p'; recoveryAttempts=1 })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.Output | Should -Match 'needs human review: still stuck'
+                $run.Output | Should -Match '1 need human review'
+
+                Test-Path -LiteralPath (Join-Path $root 'limitshift-queue\status\task-01.needs-human') | Should -BeTrue
+            }
+            finally { $env:PATH = $oldPath }
         }
     }
 }

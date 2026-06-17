@@ -14,6 +14,7 @@ The queue file is `limitshift-queue.json` (copy an example and edit). `settings`
 | `settings.limitWaitMinutes` | integer | no | `30` | Fallback wait when the reset time can't be parsed |
 | `settings.resetBufferMinutes` | integer | no | `2` | Extra buffer added after a parsed reset time |
 | `settings.completionCheck` | boolean | no | `true` | See [Completion checking](README.md#completion-checking) |
+| `settings.recoveryAttempts` | integer | no | `0` | Queue-wide same-session recovery rounds on `[[TASK_BLOCKED]]`; do not also set it on tasks |
 | `settings.maxStalls` | integer | no | `2` | Fail a task after this many identical no-marker replies in a row |
 | `tasks[].name` | string | **yes** | — | Human-readable task name |
 | `tasks[].cli` | string | **yes** | — | `claude`, `codex`, `gemini`, `agy`, or `copilot` |
@@ -22,6 +23,7 @@ The queue file is `limitshift-queue.json` (copy an example and edit). `settings`
 | `tasks[].model` | string or array | no | — | See [Models](#models) and [Model rotation](README.md#model-rotation) |
 | `tasks[].effort` | string or null | no | — | Reasoning effort (see [Models](#models)) |
 | `tasks[].completionCheck` | boolean | no | inherits settings | Per-task override |
+| `tasks[].recoveryAttempts` | integer | no | `0` when settings omits it | Per-task same-session recovery rounds; only allowed when `settings.recoveryAttempts` is absent |
 | `tasks[].extraArgs` | string or array | no | — | Extra CLI flags — where [permission](#permissions) and [Ollama](README.md#run-with-local-models-through-ollama) flags go |
 | `tasks[].fallbacks` | array | no | — | Backup runners for [CLI rotation](#cli-rotation). Each entry requires `cli`; `model`, `effort`, `extraArgs` are optional and follow the same shapes/rules as the top-level fields. `projectPath` must be a git working tree. |
 
@@ -104,6 +106,21 @@ Add a `fallbacks` array to any task to give it backup runners. When the current 
 **State files (fallbacks tasks only):** LimitShift saves a `task-NN-runner-index.txt` file (current runner index) and per-runner model-index files (`task-NN-runner-K-model-index.txt`). These are **not** created for single-runner tasks. When a task's definition changes (fingerprint changes), both are dropped along with the done marker and session id.
 
 **`maxRunsPerTask` and rotation:** the default cap of 20 counts every CLI invocation. A rotation task legitimately uses more runs (runners × models × retries × stalls × progress-resumes). When the cap is reached on a fallbacks task, the task fails per `stopOnError` rather than aborting the whole queue. See [STRATEGIES.md](STRATEGIES.md) for budget guidance.
+
+## Block recovery
+
+When an AI tool decides a task is impossible and ends with `[[TASK_BLOCKED]] <reason>`, LimitShift can automatically nudge it to reconsider. Set `recoveryAttempts` to a number greater than 0 in either `settings` or individual tasks, but not both.
+
+**Recovery process:**
+1. **Short nudge (Variant A):** each block-recovery round resumes the same session with a short nudge that re-feeds the newest blocked reason.
+2. **Fresh-session handoff (Variant B):** when a normal limit/error/stall runner switch starts a fresh session and recovery is enabled, the handoff note includes the previous runner's failure reason plus a tail of its output.
+
+**Rules:**
+- **`HUMAN:` short-circuit:** a block reason starting with `HUMAN:` (e.g. `[[TASK_BLOCKED]] HUMAN: need AWS keys`) stops immediately without recovery.
+- **Completion check required:** `recoveryAttempts > 0` requires `completionCheck: true`.
+- **Either/or placement:** set `recoveryAttempts` in `settings` or on tasks, never both.
+- **No cascading fallbacks:** a blocked task (even after recovery exhaustion) never rotates to the next fallback runner.
+- **Needs-human marker:** tasks that remain blocked after recovery are flagged with a `task-NN.needs-human` marker in the status folder and shown in the final summary.
 
 ## Permissions
 

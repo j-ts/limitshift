@@ -77,6 +77,7 @@ Anyone who uses an AI coding app or agent CLI with a subscription or tier (Claud
 - **Mix and match CLIs** — `claude`, `codex`, `gemini`, Antigravity (`agy`), and `copilot` in one queue, mixable task by task.
 - **Resumable & safe** — press Ctrl+C anytime; progress is saved, and it's built for Git-backed folders so nothing is lost.
 - **Cross-platform, no build step** — one PowerShell script for Windows, one Bash script for Mac/Linux.
+- **[Block recovery](#block-recovery)** — if the AI decides a task is impossible, LimitShift can resume with the failure reason and nudge it to try again.
 - **[Model rotation](#model-rotation)** — give a task a list of models and it switches the instant one is capped, with no waiting.
 - **[CLI rotation](#cli-rotation)** — list backup tools per task; if one hits its limit or fails persistently, LimitShift hands the same task to the next tool without waiting.
 - **[Completion checking](#completion-checking)** — keeps nudging a task across several rounds until the AI signals it's genuinely done.
@@ -243,6 +244,31 @@ Handy capabilities you can reach for when you need them. None are required for a
 With `completionCheck: true` (the default), LimitShift appends `[[TASK_COMPLETE]]` instructions to every prompt and keeps resuming the task until the **last non-empty line** of a reply contains that marker (or `[[TASK_BLOCKED]] <reason>` if the AI gets stuck). Write prompts with a concrete end state, e.g. *"write `docs/audit.md` and summarize the changes."* This is what lets a single task run for several rounds until it's genuinely finished.
 
 With `completionCheck: false` ("simple mode"), the prompt runs once and the task is marked done after the first OK run; only a usage limit triggers a resume.
+
+### Block recovery
+
+When an AI tool decides a task is impossible and ends with `[[TASK_BLOCKED]] <reason>`, LimitShift can automatically nudge it to reconsider. Set `recoveryAttempts` to a number greater than 0 in either `settings` or on individual tasks, but not both:
+
+```json
+{
+  "settings": { "recoveryAttempts": 2 },
+  "tasks": [
+    {
+      "name": "Hard refactor",
+      "cli": "claude",
+      "completionCheck": true,
+      "prompt": "Refactor the entire auth system safely."
+    }
+  ]
+}
+```
+
+If a task is blocked, LimitShift:
+1. Resumes the same session with the newest block reason.
+2. Nudges the AI to find another way to finish the task.
+3. If exhausted, flags the task for human review with `status/task-NN.needs-human` and stops.
+
+A block reason starting with `HUMAN:` (e.g. `[[TASK_BLOCKED]] HUMAN: I need the production API key`) always stops immediately without recovery. Recovery requires `completionCheck: true`.
 
 ### Run with local models through Ollama
 

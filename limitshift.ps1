@@ -324,6 +324,7 @@ function Write-UiSummary {
         [int]$DoneCount,
         [int]$FailedCount,
         [int]$SkippedCount,
+        [int]$NeedsHumanCount,
         [bool]$AllCompletionCheck,
         [string]$LogPath,
         [string]$StatePath,
@@ -361,7 +362,13 @@ function Write-UiSummary {
         Write-Host ("  " + $script:GlyphDiamond + " Done") -ForegroundColor $script:UiAccentColor -NoNewline
         Write-Host (" " + $script:GlyphDash + " " + $ranCount + " of " + $TaskCount + " queued tasks ran this turn:") -ForegroundColor Gray
         Write-Host ("      " + $script:GlyphDot + " " + $DoneCount + " newly completed") -ForegroundColor Green
-        Write-Host ("      " + $script:GlyphDot + " " + $FailedCount + " failed") -ForegroundColor Red
+        if ($NeedsHumanCount -gt 0) {
+            Write-Host ("      " + $script:GlyphDot + " " + $NeedsHumanCount + " need human review") -ForegroundColor Yellow
+        }
+        $otherFailed = $FailedCount - $NeedsHumanCount
+        if ($otherFailed -gt 0) {
+            Write-Host ("      " + $script:GlyphDot + " " + $otherFailed + " failed") -ForegroundColor Red
+        }
         if ($SkippedCount -gt 0) {
             Write-Host ("      " + $script:GlyphDot + " " + $SkippedCount + " already done (skipped)") -ForegroundColor DarkGray
         }
@@ -705,7 +712,7 @@ function Invoke-UiDemo {
     # Real loop's settings.completionCheck applies to all tasks by default in this workflow JSON,
     # so the demo summary takes the "all completion-check, all succeeded" variant. Log path here
     # is illustrative only - nothing is written.
-    Write-UiSummary -TaskCount $count -DoneCount $count -SkippedCount 0 -FailedCount 0 -AllCompletionCheck $true `
+    Write-UiSummary -TaskCount $count -DoneCount $count -SkippedCount 0 -FailedCount 0 -NeedsHumanCount 0 -AllCompletionCheck $true `
         -LogPath '.\limitshift-queue\limitshift-log.txt' -StatePath '.\limitshift-queue'
 }
 
@@ -1052,6 +1059,21 @@ function Read-QueueConfig {
         }
     }
 
+    # recoveryAttempts: non-negative integer, default 0.
+    $globalRecoveryAttempts = 0
+    $globalRecoveryAttemptsPresent = $false
+    if ($null -ne $settingsNode -and $null -ne $settingsNode.Value) {
+        $recoveryNode = $settingsNode.Value.PSObject.Properties['recoveryAttempts']
+        if ($null -ne $recoveryNode -and $null -ne $recoveryNode.Value) {
+            $globalRecoveryAttemptsPresent = $true
+            if ($recoveryNode.Value -isnot [int] -or $recoveryNode.Value -lt 0) {
+                throw "settings.recoveryAttempts must be an integer >= 0."
+            }
+            $globalRecoveryAttempts = [int]$recoveryNode.Value
+        }
+    }
+    $settings['RecoveryAttempts'] = $globalRecoveryAttempts
+
     $tasks = @()
     for ($i = 0; $i -lt $rawTasks.Count; $i++) {
         $t = $rawTasks[$i]
@@ -1074,6 +1096,23 @@ function Read-QueueConfig {
         if (-not (Test-Path -LiteralPath $projectPath -PathType Container)) {
             throw "Project path does not exist for task $n (`"$($t.name)`"): $projectPath"
         }
+
+        # recoveryAttempts: placement is strictly either/or.
+        $taskRecoveryAttempts = 0
+        $tRecoveryNode = $t.PSObject.Properties['recoveryAttempts']
+        if ($null -ne $tRecoveryNode -and $null -ne $tRecoveryNode.Value) {
+            if ($tRecoveryNode.Value -isnot [int] -or $tRecoveryNode.Value -lt 0) {
+                throw "Task $n recoveryAttempts must be an integer >= 0."
+            }
+            $taskRecoveryAttempts = [int]$tRecoveryNode.Value
+
+            # Either/or placement (spec 5.2).
+            if ($globalRecoveryAttemptsPresent) {
+                throw "recoveryAttempts may be set in settings OR on individual tasks, not both - found in settings and on task $n."
+            }
+        }
+
+        $effectiveRecoveryAttempts = if ($null -ne $tRecoveryNode -and $null -ne $tRecoveryNode.Value) { $taskRecoveryAttempts } else { $globalRecoveryAttempts }
 
         # Parse the flat task fields as Runner 0.
         $runners = @(Parse-Runner -Node $t -TaskNumber $n -Label 'task')
@@ -1104,19 +1143,25 @@ function Read-QueueConfig {
             $completionCheck = [bool]$completionCheckNode.Value
         }
 
+        # Completion-check dependency (spec 5.3).
+        if ($effectiveRecoveryAttempts -gt 0 -and -not $completionCheck) {
+            throw "Task $n (`"$($t.name)`") has recoveryAttempts > 0 but completionCheck is false. Recovery requires completion checking."
+        }
+
         # The task object keeps the runner 0 fields at the top level for back-compat (Mode,
         # Effort, etc used by fingerprinting and the UI) and carries the full runner list.
         $tasks += [pscustomobject]@{
-            Name            = [string]$t.name
-            Cli             = $runners[0].Cli
-            ProjectPath     = $projectPath
-            Model           = $runners[0].Model
-            Models          = $runners[0].Models
-            Effort          = $runners[0].Effort
-            Prompt          = [string]$t.prompt
-            ExtraArgs       = $runners[0].ExtraArgs
-            Runners         = $runners
-            CompletionCheck = $completionCheck
+            Name             = [string]$t.name
+            Cli              = $runners[0].Cli
+            ProjectPath      = $projectPath
+            Model            = $runners[0].Model
+            Models           = $runners[0].Models
+            Effort           = $runners[0].Effort
+            Prompt           = [string]$t.prompt
+            ExtraArgs        = $runners[0].ExtraArgs
+            Runners          = $runners
+            CompletionCheck  = $completionCheck
+            RecoveryAttempts = $effectiveRecoveryAttempts
         }
     }
 
@@ -1344,6 +1389,51 @@ function Save-TaskRunnerModelIndex {
     [string]$ModelIndex | Set-Content -LiteralPath $path -Encoding UTF8
 }
 
+function Get-TaskRecoveryAttemptsFilePath {
+    param([int]$TaskIndex)
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    return Join-Path $SessionStatePath "$taskKey-recovery-attempts.txt"
+}
+
+function Get-SavedTaskRecoveryAttempts {
+    param([int]$TaskIndex)
+    $path = Get-TaskRecoveryAttemptsFilePath -TaskIndex $TaskIndex
+    if (Test-Path -LiteralPath $path) {
+        $raw = (Get-Content -LiteralPath $path -Raw).Trim()
+        $parsed = 0
+        if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) { return $parsed }
+    }
+    return 0
+}
+
+function Save-TaskRecoveryAttempts {
+    param([int]$TaskIndex, [int]$Attempts)
+    $path = Get-TaskRecoveryAttemptsFilePath -TaskIndex $TaskIndex
+    [string]$Attempts | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Clear-TaskRecoveryAttempts {
+    param([int]$TaskIndex)
+    Remove-Item -LiteralPath (Get-TaskRecoveryAttemptsFilePath -TaskIndex $TaskIndex) -Force -ErrorAction SilentlyContinue
+}
+
+function Save-TaskNeedsHumanMarker {
+    param([int]$TaskIndex, [string]$Reason)
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    $Reason | Set-Content -LiteralPath (Join-Path $StatusStatePath "$taskKey.needs-human") -Encoding UTF8
+}
+
+function Get-TaskOutputTail {
+    param([string]$FilePath, [int]$MaxLines = 40, [int]$MaxBytes = 2048)
+    if (-not (Test-Path -LiteralPath $FilePath)) { return '' }
+    $lines = @(Get-Content -LiteralPath $FilePath -Tail $MaxLines)
+    $text = $lines -join [Environment]::NewLine
+    if ($text.Length -gt $MaxBytes) {
+        $text = $text.Substring($text.Length - $MaxBytes)
+    }
+    return $text
+}
+
 function Get-TaskOutputFilePath {
     param(
         [int]$TaskIndex,
@@ -1413,6 +1503,9 @@ function Save-TaskDoneMarker {
     $doneFilePath = Get-TaskDoneFilePath -TaskIndex $TaskIndex
     $fingerprint = Get-TaskFingerprint -Task $Task
     @((Get-Date).ToString("s"), $fingerprint) | Set-Content -LiteralPath $doneFilePath -Encoding UTF8
+    $taskKey = Get-TaskKey -TaskIndex $TaskIndex
+    Remove-Item -LiteralPath (Join-Path $StatusStatePath "$taskKey.needs-human") -Force -ErrorAction SilentlyContinue
+    Clear-TaskRecoveryAttempts -TaskIndex $TaskIndex
 }
 
 function Convert-ClaudeResetTextToDateTime {
@@ -1593,11 +1686,30 @@ function Wait-UntilClaudeUsageReady {
 
 $script:HandoffNoteBase = "A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both ``git status`` (for new/untracked files) and ``git diff`` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
 
+$script:RecoveryNudgeBase = @"
+You ended with $($TaskBlockedMarker): {0}.
+Recovery is enabled - do not stop yet. Reconsider and find another way to finish this task.
+Inspect ``git status`` and ``git diff`` first so you do not redo work already done.
+
+- If you finish, end your final response with $($TaskCompleteMarker).
+- If you genuinely need a human (secrets/credentials you cannot access, an irreversible
+  or destructive action, a product/design decision, or something you cannot verify
+  yourself), end with $($TaskBlockedMarker) HUMAN: <one-line reason> and stop.
+- If you are still stuck but it is not a human-only blocker, end with $($TaskBlockedMarker) <reason>.
+"@
+
 function Get-TaskPromptWithHandoff {
-    param($Task)
+    param($Task, [string]$FailureReason = $null, [string]$FailureOutputTail = $null)
 
     $note = $script:HandoffNoteBase
-    if ($Task.CompletionCheck) {
+    $recoveryAttempts = [int](Get-ObjectPropertyValue -Object $Task -Name 'RecoveryAttempts' -Default 0)
+    if ($recoveryAttempts -gt 0 -and (-not [string]::IsNullOrWhiteSpace($FailureReason) -or -not [string]::IsNullOrWhiteSpace($FailureOutputTail))) {
+        $note = "A previous AI tool worked on this task and could not continue ($FailureReason). Partial work may already exist - inspect ``git status`` and ``git diff`` first; continue from there, do not redo finished work.`n`nThis is why the previous attempt did not finish:`n"
+        if ($FailureReason) { $note += "$FailureReason`n" }
+        if ($FailureOutputTail) { $note += "$FailureOutputTail`n" }
+    }
+
+    if ([bool](Get-ObjectPropertyValue -Object $Task -Name 'CompletionCheck' -Default $true)) {
         $note += " End your final response with ``$TaskCompleteMarker`` when the task is fully done, or ``$TaskBlockedMarker <reason>`` if it genuinely cannot be completed."
     }
 
@@ -1631,17 +1743,23 @@ $(Get-CompletionMarkerInstructions)
 }
 
 function Get-ResumePrompt {
-    param($Task)
+    param($Task, [string]$RecoveryReason = $null)
+
+    $preamble = "Continue the previous task in this same session from where you stopped. Do not restart from scratch.`nIf the session has no prior progress, start the task now."
+    $recoveryAttempts = [int](Get-ObjectPropertyValue -Object $Task -Name 'RecoveryAttempts' -Default 0)
+    if ($recoveryAttempts -gt 0 -and $RecoveryReason) {
+        $preamble = $script:RecoveryNudgeBase -f $RecoveryReason
+    }
 
     # The marker block is only appended when completion checking is on (Task 2).
-    $markerBlock = if ($Task.CompletionCheck) { "`n`n" + (Get-CompletionMarkerInstructions) } else { '' }
+    $completionCheck = [bool](Get-ObjectPropertyValue -Object $Task -Name 'CompletionCheck' -Default $true)
+    $markerBlock = if ($completionCheck) { "`n`n" + (Get-CompletionMarkerInstructions) } else { '' }
 
     # Task 3 (Bug C): one unified resume template for all three CLIs. The resume prompt now
     # repeats the original task verbatim so a thin session and slash commands (e.g. /goal)
     # survive the resume instead of leaving the agent with nothing to continue.
     return @"
-Continue the previous task in this same session from where you stopped. Do not restart from scratch.
-If the session has no prior progress, start the task now.
+$preamble
 
 Original task (for reference — do not redo finished work):
 $($Task.Prompt)$markerBlock
@@ -2337,7 +2455,10 @@ function Invoke-CliTaskRun {
         [switch]$Quiet,
         # When set on a New-mode run, prepend the runner-handoff preamble so the incoming runner
         # knows partial work may already exist in the working tree.
-        [switch]$UseHandoffNote
+        [switch]$UseHandoffNote,
+        # Block recovery: pass the failure context for Variant B (New mode) or Variant A (Resume).
+        [string]$RecoveryReason,
+        [string]$RecoveryOutputTail
     )
 
     $outputFilePath = Get-TaskOutputFilePath -TaskIndex $TaskIndex -Task $Task
@@ -2346,10 +2467,10 @@ function Invoke-CliTaskRun {
     }
 
     if ($Mode -eq 'New') {
-        $prompt = if ($UseHandoffNote) { Get-TaskPromptWithHandoff -Task $Task } else { Get-TaskPromptWithCompletionMarker -Task $Task }
+        $prompt = if ($UseHandoffNote) { Get-TaskPromptWithHandoff -Task $Task -FailureReason $RecoveryReason -FailureOutputTail $RecoveryOutputTail } else { Get-TaskPromptWithCompletionMarker -Task $Task }
     }
     else {
-        $prompt = Get-ResumePrompt -Task $Task
+        $prompt = Get-ResumePrompt -Task $Task -RecoveryReason $RecoveryReason
     }
 
     $cliArgsParams = @{ Task = $Task; Mode = $Mode; SessionId = $SessionId; Prompt = $prompt }
@@ -2877,6 +2998,7 @@ try {
     $doneCount = 0
     $skippedCount = 0
     $failedCount = 0
+    $needsHumanCount = 0
 
     for ($i = 0; $i -lt $Tasks.Count; $i++) {
         $task = $Tasks[$i]
@@ -2907,6 +3029,7 @@ try {
             Write-Host "Task $taskNumber changed since last run; previous done marker invalidated."
             Remove-Item -LiteralPath (Get-TaskDoneFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Get-TaskRecoveryAttemptsFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
             # Task 6: also drop the stale model-rotation index so a changed task starts at model #1.
             Remove-Item -LiteralPath (Get-TaskModelIndexFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
             # Task 9.1: drop runner-index and per-runner model-indices (exist only for fallbacks tasks).
@@ -2922,12 +3045,14 @@ try {
 
         if ($runnerCount -eq 1) {
 
-        # --- NO-FALLBACKS PATH (single runner — existing code unchanged) ---
+        # --- NO-FALLBACKS PATH (single runner) ---
         $runCount = 0
         $errorRetryCount = 0
         $mustWaitForFreshSession = $false
         $stallCount = 0
         $previousNoMarkerText = $null
+        $recoveryReason = $null
+        $recoveryOutputTail = $null
 
         # Task 6: per-task model-rotation list and the persisted current index (kept across restarts).
         $models = @($task.Models)
@@ -2938,6 +3063,17 @@ try {
         while ($true) {
             $runCount++
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
+                if ($task.RecoveryAttempts -gt 0 -and (Get-SavedTaskRecoveryAttempts -TaskIndex $i) -gt 0) {
+                    $failReason = "run budget exhausted during block recovery (maxRunsPerTask=$($config.Settings.MaxRunsPerTask))"
+                    Save-TaskFailedMarker -TaskIndex $i -Reason $failReason -Task $task
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $failReason
+                    $needsHumanCount++
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphErr) -Message ("Task " + $taskNumber + " needs human review: " + $failReason) -Color Yellow
+                    if ($config.Settings.StopOnError) { throw "Task $taskNumber $failReason" }
+                    $failedCount++
+                    break
+                }
                 throw "Task $taskNumber exceeded maxRunsPerTask=$($config.Settings.MaxRunsPerTask)"
             }
 
@@ -2967,13 +3103,15 @@ try {
                 # claude is given a session id up front (passed as --session-id). agy/copilot need a
                 # stable session id so the NEXT run can resume the same conversation.
                 if ($task.Cli -eq 'claude' -or $task.Cli -eq 'agy' -or $task.Cli -eq 'copilot') { $sessionId = New-TaskSessionId -TaskIndex $i }
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader -UseHandoffNote:([bool]$recoveryReason) -RecoveryReason $recoveryReason -RecoveryOutputTail $recoveryOutputTail
             }
             else {
                 $runMode = 'Resume'
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $task -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader -RecoveryReason $recoveryReason
             }
 
+            $recoveryReason = $null
+            $recoveryOutputTail = $null
             if ($DryRun) {
                 Write-Step "Dry run for task $taskNumber recorded the command only"
                 break
@@ -3074,7 +3212,45 @@ try {
                 break
             }
             if ($marker.Status -eq 'Blocked') {
+                # HUMAN: short-circuit (spec 7.2).
+                if ($marker.Reason -match '^HUMAN:') {
+                    Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $marker.Reason
+                    $needsHumanCount++
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphErr) -Message ("Task " + $taskNumber + " needs human review: " + $marker.Reason) -Color Yellow
+                    Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked (HUMAN: short-circuit):") -ForegroundColor Yellow
+                    Write-UiReason -Text $marker.Reason
+                    if ($config.Settings.StopOnError) { throw "Task $taskNumber is blocked: $($marker.Reason)" }
+                    $failedCount++
+                    break
+                }
+
+                # Recovery rounds (spec 7.1).
+                $currentRecoveryAttempts = Get-SavedTaskRecoveryAttempts -TaskIndex $i
+                if ($task.RecoveryAttempts -gt 0 -and $currentRecoveryAttempts -lt $task.RecoveryAttempts) {
+                    $currentRecoveryAttempts++
+                    Save-TaskRecoveryAttempts -TaskIndex $i -Attempts $currentRecoveryAttempts
+                    $errorRetryCount = 0; $stallCount = 0; $previousNoMarkerText = $null
+                    $mustWaitForFreshSession = $false
+
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphRetry) -Message ("Task " + $taskNumber + " blocked; recovery round " + $currentRecoveryAttempts + " of " + $task.RecoveryAttempts + "...") -Color Yellow
+                    Write-UiReason -Text $marker.Reason
+
+                    # Same-session recovery uses Variant A in the resume prompt.
+                    $recoveryReason = $marker.Reason
+                    continue
+                }
+
+                # Recovery exhausted or off.
                 Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
+                if ($task.RecoveryAttempts -gt 0) {
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $marker.Reason
+                    $needsHumanCount++
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphErr) -Message ("Task " + $taskNumber + " needs human review: " + $marker.Reason) -Color Yellow
+                }
                 Write-Host ""
                 Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked:") -ForegroundColor Yellow
                 Write-UiReason -Text $marker.Reason
@@ -3130,6 +3306,10 @@ try {
         $stallCount        = 0
         $previousNoMarkerText = $null
         $mustWaitForFreshSession = $false
+        $recoveryReason    = $null
+        $recoveryOutputTail = $null
+        $pendingHandoffReason = $null
+        $pendingHandoffOutputTail = $null
 
         while ($true) {
             # Runner selection
@@ -3166,9 +3346,19 @@ try {
             # Action = 'Run'
             $newRunnerIdx = $sel.Index
             if ($newRunnerIdx -ne $currentRunnerIndex) {
+                if ($task.RecoveryAttempts -gt 0) {
+                    $pendingHandoffReason = $runnerReasons[$currentRunnerIndex]
+                    $pendingHandoffOutputTail = Get-TaskOutputTail -FilePath (Get-TaskOutputFilePath -TaskIndex $i -Task $task)
+                }
+                else {
+                    $pendingHandoffReason = $null
+                    $pendingHandoffOutputTail = $null
+                }
                 Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
                 $errorRetryCount = 0; $stallCount = 0
                 $previousNoMarkerText = $null; $mustWaitForFreshSession = $false
+                # Block recovery is runner-specific; discard same-session recovery context if we rotate.
+                $recoveryReason = $null; $recoveryOutputTail = $null
                 Write-Step "Task ${taskNumber}: switching to $($runners[$newRunnerIdx].Cli)"
                 $currentRunnerIndex = $newRunnerIdx
                 # Task 9.1: persist the new runner index so a restart resumes the correct runner.
@@ -3184,15 +3374,16 @@ try {
             $currentModel = if ($runnerModelCount -gt 0) { [string]$runnerModels[$currentModelIndexForRunner] } else { '' }
 
             $effectiveTask = [pscustomobject]@{
-                Name            = $task.Name
-                Cli             = $activeRunner.Cli
-                ProjectPath     = $task.ProjectPath
-                Model           = if ($runnerModels.Count -gt 0) { [string]$runnerModels[0] } else { '' }
-                Models          = $runnerModels
-                Effort          = $activeRunner.Effort
-                Prompt          = $task.Prompt
-                ExtraArgs       = @($activeRunner.ExtraArgs)
-                CompletionCheck = $task.CompletionCheck
+                Name             = $task.Name
+                Cli              = $activeRunner.Cli
+                ProjectPath      = $task.ProjectPath
+                Model            = if ($runnerModels.Count -gt 0) { [string]$runnerModels[0] } else { '' }
+                Models           = $runnerModels
+                Effort           = $activeRunner.Effort
+                Prompt           = $task.Prompt
+                ExtraArgs        = @($activeRunner.ExtraArgs)
+                CompletionCheck  = $task.CompletionCheck
+                RecoveryAttempts = $task.RecoveryAttempts
             }
 
             # Runner-scoped claude pre-check (spec 8). For a cloud-claude runner WITH fallbacks we
@@ -3216,6 +3407,10 @@ try {
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
                 $failReason = "run budget exhausted (maxRunsPerTask=$($config.Settings.MaxRunsPerTask))"
                 Save-TaskFailedMarker -TaskIndex $i -Reason $failReason -Task $task
+                if ($task.RecoveryAttempts -gt 0 -and (Get-SavedTaskRecoveryAttempts -TaskIndex $i) -gt 0) {
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $failReason
+                    $needsHumanCount++
+                }
                 Write-Host ""
                 Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " exceeded run budget") -ForegroundColor Red
                 if ($config.Settings.StopOnError) { throw "Task $taskNumber $failReason" }
@@ -3235,12 +3430,16 @@ try {
                     $sessionId = New-TaskSessionId -TaskIndex $i
                 }
                 $useHandoff = $pendingHandoff; $pendingHandoff = $false
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader -UseHandoffNote:$useHandoff
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode New -SessionId $sessionId -ModelOverride $currentModel -Quiet:$quietHeader -UseHandoffNote:$useHandoff -RecoveryReason $pendingHandoffReason -RecoveryOutputTail $pendingHandoffOutputTail
+                $pendingHandoffReason = $null
+                $pendingHandoffOutputTail = $null
             } else {
                 $runMode = 'Resume'
-                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader
+                $result = Invoke-CliTaskRun -TaskIndex $i -Task $effectiveTask -Mode Resume -SessionId $savedSessionId -ModelOverride $currentModel -Quiet:$quietHeader -RecoveryReason $recoveryReason
             }
 
+            $recoveryReason = $null
+            $recoveryOutputTail = $null
             if ($DryRun) { Write-Step "Dry run for task $taskNumber recorded the command only"; break }
 
             if ($result.IsLimit) {
@@ -3318,6 +3517,56 @@ try {
                 break
             }
             if ($marker.Status -eq 'Blocked') {
+                # HUMAN: short-circuit (spec 7.2).
+                if ($marker.Reason -match '^HUMAN:') {
+                    Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $marker.Reason
+                    $needsHumanCount++
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphErr) -Message ("Task " + $taskNumber + " needs human review: " + $marker.Reason) -Color Yellow
+                    Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked (HUMAN: short-circuit):") -ForegroundColor Yellow
+                    Write-UiReason -Text $marker.Reason
+                    if ($config.Settings.StopOnError) { throw "Task $taskNumber is blocked: $($marker.Reason)" }
+                    $failedCount++
+                    break
+                }
+
+                # Recovery rounds (spec 7.1).
+                $currentRecoveryAttempts = Get-SavedTaskRecoveryAttempts -TaskIndex $i
+                if ($task.RecoveryAttempts -gt 0 -and $currentRecoveryAttempts -lt $task.RecoveryAttempts) {
+                    $currentRecoveryAttempts++
+                    Save-TaskRecoveryAttempts -TaskIndex $i -Attempts $currentRecoveryAttempts
+                    $errorRetryCount = 0; $stallCount = 0; $previousNoMarkerText = $null
+                    $mustWaitForFreshSession = $false
+
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphRetry) -Message ("Task " + $taskNumber + " blocked; recovery round " + $currentRecoveryAttempts + " of " + $task.RecoveryAttempts + "...") -Color Yellow
+                    Write-UiReason -Text $marker.Reason
+
+                    # Same-session recovery uses Variant A in the resume prompt.
+                    $recoveryReason = $marker.Reason
+                    continue
+                }
+
+                # Recovery exhausted or off.
+                Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
+                if ($task.RecoveryAttempts -gt 0) {
+                    Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $marker.Reason
+                    $needsHumanCount++
+                    Write-Host ""
+                    Write-UiBeat -Glyph ([string]$script:GlyphErr) -Message ("Task " + $taskNumber + " needs human review: " + $marker.Reason) -Color Yellow
+                    Write-Host ""
+                    Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked:") -ForegroundColor Yellow
+                    Write-UiReason -Text $marker.Reason
+                    if ($config.Settings.StopOnError) { throw "Task $taskNumber is blocked: $($marker.Reason)" }
+                    $failedCount++
+                    break
+                }
+
+                # If no recovery enabled, blocked is handled by rotation (spec 8).
+                # Wait, spec says: "a [[TASK_BLOCKED]] from an AI tool WITHOUT recoveryAttempts > 0... stops execution of that task immediately.
+                # Do NOT rotate to the next fallback."
+                # My previous logic for fallbacks (L3352) already broke the loop on Blocked.
                 Save-TaskFailedMarker -TaskIndex $i -Reason $marker.Reason -Task $task
                 Write-Host ""
                 Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " is blocked:") -ForegroundColor Yellow
@@ -3349,6 +3598,7 @@ try {
     }
 
     Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -SkippedCount $skippedCount -FailedCount $failedCount `
+        -NeedsHumanCount $needsHumanCount `
         -AllCompletionCheck (-not ($Tasks | Where-Object { -not $_.CompletionCheck })) `
         -LogPath $LogPath -StatePath $RunnerStatePath -DryRun:$DryRun
 }

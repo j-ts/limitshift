@@ -63,6 +63,9 @@ Useful optional fields:
   `false` for one-shot prompts. With `completionCheck: true` the runner auto-injects the
   `[[TASK_COMPLETE]]` / `[[TASK_BLOCKED]]` instructions (via `Get-TaskPromptWithCompletionMarker`),
   so you do **not** need to add them to the `prompt` yourself.
+- `recoveryAttempts` - integer >= 0. When > 0, if the AI ends with `[[TASK_BLOCKED]]`, LimitShift
+  will automatically resume the same session with a recovery nudge (see [Block recovery](#block-recovery)
+  below).
 - `extraArgs` - CLI flags. Use array form for reliability.
 - `fallbacks` - backup runners for CLI rotation; see [CLI rotation (fallbacks)](#cli-rotation-fallbacks) below.
 
@@ -176,12 +179,30 @@ Add a `fallbacks` list to any task to give it backup runners. When the primary r
 - **Different tools** → use `fallbacks`. If runners share the same `cli` and `extraArgs`, a tool-level
   failure (bad flag, missing binary) will re-occur once per runner; switching tools is most useful when
   each runner genuinely brings different access or capabilities.
-
 **`[[TASK_BLOCKED]]` does not trigger a switch.** A block means the agent concluded the task is
 impossible. LimitShift treats this as authoritative and stops the task without trying other runners
 (matching `stopOnError`). Use `[[TASK_BLOCKED]]` for genuine dead-ends, not permission problems —
 fix the permission flags instead.
 
+## Block recovery
+
+When a task ends with `[[TASK_BLOCKED]] <reason>`, LimitShift can automatically nudge the agent to
+reconsider. Set `recoveryAttempts` (integer > 0) in `settings` or on individual tasks, but never both.
+Recovery requires effective `completionCheck: true`.
+
+- **Recovery rounds:** the runner resumes the same session and prepends a short nudge with the newest
+  block reason.
+- **Runner switches:** if a normal limit/error/stall switch starts a fresh fallback runner while recovery
+  is enabled, the handoff note includes the previous runner's failure reason and output tail.
+- **Short-circuit:** if the block reason begins with `HUMAN:` (e.g. `[[TASK_BLOCKED]] HUMAN: I need
+  the prod password`), recovery is skipped and the task stops immediately.
+- **Marker:** tasks that exhaust recovery rounds are flagged with a `.needs-human` marker in the
+  status folder.
+
+Use recovery for complex tasks where an agent might give up too early but could find a path forward
+if pushed to reconsider its failure context.
+
+## Multiple Queues
 **Git is required.** A task with a non-empty `fallbacks` list must have its `projectPath` pointing at a
 git working tree. Validation fails with a clear message if it is not. See [STRATEGIES.md](STRATEGIES.md)
 for why and for the commit-before-rotation guidance.

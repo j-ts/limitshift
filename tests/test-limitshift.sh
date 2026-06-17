@@ -4113,6 +4113,272 @@ $out"
   fi
 }
 
+run_block_recovery_validation_test() {
+  local desc="block recovery — rejects settings and task placement even when settings is zero"
+  local root="$TMP_ROOT/block-rec-validation"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$project_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "recoveryAttempts": 0 },
+  "tasks": [
+    { "name": "bad", "cli": "claude", "projectPath": "$project_dir", "prompt": "p", "recoveryAttempts": 1 }
+  ]
+}
+EOF
+
+  check "$desc" 2 'recoveryAttempts may be set in settings OR on individual tasks' bash "$SCRIPT" --queue "$queue_path" --validate-only
+}
+
+run_block_recovery_no_recovery_backcompat_test() {
+  local desc="block recovery — recoveryAttempts absent does not retry a blocked task"
+  local root="$TMP_ROOT/block-rec-off"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/count"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used' 'Current week (all models): 0% used'
+  exit 0
+fi
+cat >/dev/null
+n=0; [ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n+1)); printf '%s' "\$n" > "$counter"
+printf '%s\n' '{"session_id":"s-1","result":"[[TASK_BLOCKED]] missing info","is_error":false}'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": false, "maxRunsPerTask": 3, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "blocked", "cli": "claude", "projectPath": "$project_dir", "prompt": "p" }
+  ]
+}
+EOF
+
+  local out exit_code count_val needs_path
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  count_val=$(cat "$counter" 2>/dev/null | tr -d ' \r\n')
+  needs_path="$root/limitshift-queue/status/task-01.needs-human"
+  if [ "$exit_code" -eq 0 ] && [ "$count_val" = "1" ] && [ ! -f "$needs_path" ] && ! printf '%s' "$out" | grep -q 'recovery round'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code count=[$count_val] needs=$([ -f "$needs_path" ] && echo yes || echo no)
+$out"
+  fi
+}
+
+run_block_recovery_success_test() {
+  local desc="block recovery — blocked task resumes same session with Variant A and completes"
+  local root="$TMP_ROOT/block-rec-success"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/count"
+  local stdin_log="$root/stdin.log"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used' 'Current week (all models): 0% used'
+  exit 0
+fi
+stdin=\$(cat)
+n=0; [ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n+1)); printf '%s' "\$n" > "$counter"
+printf '%s\n%s\n' "--- CALL \$n ---" "\$stdin" >> "$stdin_log"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"session_id":"s-1","result":"[[TASK_BLOCKED]] missing info","is_error":false}'
+else
+  printf '%s\n' '{"session_id":"s-1","result":"done\n[[TASK_COMPLETE]]","is_error":false}'
+fi
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 3, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "recover", "cli": "claude", "projectPath": "$project_dir", "prompt": "p", "recoveryAttempts": 1 }
+  ]
+}
+EOF
+
+  local out exit_code stdin_text
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  stdin_text=$(cat "$stdin_log" 2>/dev/null)
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'recovery round 1 of 1' &&
+     printf '%s' "$stdin_text" | grep -q 'You ended with \[\[TASK_BLOCKED\]\]: missing info' &&
+     ! printf '%s' "$stdin_text" | grep -q 'A previous AI tool worked on this task'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- output ---
+$out
+--- stdin ---
+$stdin_text"
+  fi
+}
+
+run_block_recovery_human_short_circuit_test() {
+  local desc="block recovery — HUMAN short-circuits recovery and writes needs-human marker"
+  local root="$TMP_ROOT/block-rec-human"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/count"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used' 'Current week (all models): 0% used'
+  exit 0
+fi
+cat >/dev/null
+n=0; [ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n+1)); printf '%s' "\$n" > "$counter"
+printf '%s\n' '{"session_id":"s-1","result":"[[TASK_BLOCKED]] human: need prod creds","is_error":false}'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": false, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "human", "cli": "claude", "projectPath": "$project_dir", "prompt": "p", "recoveryAttempts": 3 }
+  ]
+}
+EOF
+
+  local out exit_code count_val marker
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  count_val=$(cat "$counter" 2>/dev/null | tr -d ' \r\n')
+  marker="$root/limitshift-queue/status/task-01.needs-human"
+  if [ "$exit_code" -eq 0 ] && [ "$count_val" = "1" ] && [ -f "$marker" ] &&
+     grep -q 'human: need prod creds' "$marker" &&
+     printf '%s' "$out" | grep -q 'needs human review: human: need prod creds'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code count=[$count_val] marker=$([ -f "$marker" ] && cat "$marker" || echo missing)
+$out"
+  fi
+}
+
+run_block_recovery_exhaustion_test() {
+  local desc="block recovery — exhaustion writes failed and needs-human markers"
+  local root="$TMP_ROOT/block-rec-exhaust"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-p" ] && [ "${2:-}" = "/usage" ]; then
+  printf '%s\n' 'Current session: 0% used' 'Current week (all models): 0% used'
+  exit 0
+fi
+cat >/dev/null
+printf '%s\n' '{"session_id":"s-1","result":"[[TASK_BLOCKED]] still stuck","is_error":false}'
+exit 0
+EOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": false, "maxRunsPerTask": 3, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "exhaust", "cli": "claude", "projectPath": "$project_dir", "prompt": "p", "recoveryAttempts": 1 }
+  ]
+}
+EOF
+
+  local out exit_code failed_marker needs_marker
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  failed_marker="$root/limitshift-queue/status/task-01.failed"
+  needs_marker="$root/limitshift-queue/status/task-01.needs-human"
+  if [ "$exit_code" -eq 0 ] && [ -f "$failed_marker" ] && [ -f "$needs_marker" ] &&
+     grep -q 'still stuck' "$needs_marker" &&
+     printf '%s' "$out" | grep -q '1 need human review'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code failed=$([ -f "$failed_marker" ] && echo yes || echo no) needs=$([ -f "$needs_marker" ] && echo yes || echo no)
+$out"
+  fi
+}
+
+run_block_recovery_variant_b_handoff_test() {
+  local desc="block recovery — runner switch handoff includes failure reason and output tail when enabled"
+  local root="$TMP_ROOT/block-rec-variant-b"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local codex_stdin="$root/codex.stdin"
+  mkdir -p "$bin_dir" "$project_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '{"error":{"message":"Quota exceeded. Try again in 1s.","code":"429"},"session_id":"g-1"}'
+exit 1
+EOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$bin_dir/codex" <<EOF
+#!/usr/bin/env bash
+cat > "$codex_stdin"
+printf '%s\n' '{"type":"thread.started","thread_id":"c-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done\n[[TASK_COMPLETE]]"}}'
+exit 0
+EOF
+  chmod +x "$bin_dir/codex"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 3, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0, "recoveryAttempts": 1 },
+  "tasks": [
+    { "name": "handoff", "cli": "gemini", "projectPath": "$project_dir", "prompt": "do it",
+      "fallbacks": [ { "cli": "codex" } ] }
+  ]
+}
+EOF
+
+  local out exit_code prompt
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  prompt=$(cat "$codex_stdin" 2>/dev/null)
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$prompt" | grep -q 'This is why the previous attempt did not finish:' &&
+     printf '%s' "$prompt" | grep -q 'limited' &&
+     printf '%s' "$prompt" | grep -q 'Quota exceeded'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+--- output ---
+$out
+--- prompt ---
+$prompt"
+  fi
+}
+
 run_cli_rotation_limit_switch_test
 run_graceful_stop_after_step_test
 run_cli_rotation_error_switch_test
@@ -4126,6 +4392,12 @@ run_runner_index_switch_test
 run_runner_model_index_per_runner_test
 run_runner_index_rerun_invalidation_test
 run_runner_index_no_fallbacks_test
+run_block_recovery_validation_test
+run_block_recovery_no_recovery_backcompat_test
+run_block_recovery_success_test
+run_block_recovery_human_short_circuit_test
+run_block_recovery_exhaustion_test
+run_block_recovery_variant_b_handoff_test
 
 echo
 echo "passed: $PASS  failed: $FAIL"

@@ -25,6 +25,15 @@ CAPABILITY_CACHE_HOURS=24
 TASK_COMPLETE_MARKER="[[TASK_COMPLETE]]"
 TASK_BLOCKED_MARKER="[[TASK_BLOCKED]]"
 HANDOFF_NOTE_BASE="A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both \`git status\` (for new/untracked files) and \`git diff\` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
+RECOVERY_NUDGE_BASE="You ended with \$TASK_BLOCKED_MARKER: {0}.
+Recovery is enabled - do not stop yet. Reconsider and find another way to finish this task.
+Inspect \`git status\` and \`git diff\` first so you do not redo work already done.
+
+- If you finish, end your final response with \$TASK_COMPLETE_MARKER.
+- If you genuinely need a human (secrets/credentials you cannot access, an irreversible
+  or destructive action, a product/design decision, or something you cannot verify
+  yourself), end with \$TASK_BLOCKED_MARKER HUMAN: <one-line reason> and stop.
+- If you are still stuck but it is not a human-only blocker, end with \$TASK_BLOCKED_MARKER <reason>."
 
 usage() {
   echo "Usage: $0 [options]"
@@ -377,7 +386,7 @@ ui_print_session_total_time() {
 #       log_path, state_path, dry_run
 ui_summary() {
   local task_count="$1" done_count="$2" failed_count="$3" skipped_count="$4"
-  local all_completion_check="$5" log_path="$6" state_path="$7" dry_run="${8:-0}"
+  local all_completion_check="$5" log_path="$6" state_path="$7" dry_run="${8:-0}" needs_human_count="${9:-0}"
   printf '\n'
   ui_separator
   printf '\n'
@@ -415,8 +424,15 @@ ui_summary() {
     printf '\n'
     ui_color "$UI_GREEN" "      $GLYPH_DOT ${done_count} newly completed"
     printf '\n'
-    ui_color "$UI_RED" "      $GLYPH_DOT ${failed_count} failed"
-    printf '\n'
+    if [ "$needs_human_count" -gt 0 ]; then
+      ui_color "$UI_YELLOW" "      $GLYPH_DOT ${needs_human_count} need human review"
+      printf '\n'
+    fi
+    local other_failed=$((failed_count - needs_human_count))
+    if [ "$other_failed" -gt 0 ]; then
+      ui_color "$UI_RED" "      $GLYPH_DOT ${other_failed} failed"
+      printf '\n'
+    fi
     if [ "$skipped_count" -gt 0 ]; then
       ui_color "$UI_DIM" "      $GLYPH_DOT ${skipped_count} already done (skipped)"
       printf '\n'
@@ -812,7 +828,7 @@ read_queue_config() {
     exit 2
   fi
 
-  STOP_ON_ERROR=$(jq -r '.settings.stopOnError // true' "$QUEUE_PATH" | tr -d '\r')
+  STOP_ON_ERROR=$(jq -r '(.settings // {}) | if has("stopOnError") then .stopOnError else true end' "$QUEUE_PATH" | tr -d '\r')
   MAX_RUNS_PER_TASK=$(jq -r '.settings.maxRunsPerTask // 20' "$QUEUE_PATH" | tr -d '\r')
   MAX_RETRIES_ON_ERROR=$(jq -r '.settings.maxRetriesOnError // 2' "$QUEUE_PATH" | tr -d '\r')
   LIMIT_WAIT_MINUTES=$(jq -r '.settings.limitWaitMinutes // 30' "$QUEUE_PATH" | tr -d '\r')
@@ -821,6 +837,14 @@ read_queue_config() {
   MAX_STALLS=$(jq -r '.settings.maxStalls // 2' "$QUEUE_PATH" | tr -d '\r')
   MODEL_VALIDATION=$(jq -r '.settings.modelValidation // "strictWhenDiscoverable"' "$QUEUE_PATH" | tr -d '\r')
   CAPABILITY_CACHE_HOURS=$(jq -r '.settings.capabilityCacheHours // 24' "$QUEUE_PATH" | tr -d '\r')
+  GLOBAL_RECOVERY_ATTEMPTS=$(jq -r '.settings.recoveryAttempts // 0' "$QUEUE_PATH" | tr -d '\r')
+  SETTINGS_RECOVERY_ATTEMPTS_PRESENT=$(jq -r 'if (.settings // {}) | has("recoveryAttempts") then 1 else 0 end' "$QUEUE_PATH" | tr -d '\r')
+  if [ "$SETTINGS_RECOVERY_ATTEMPTS_PRESENT" -eq 1 ]; then
+    if ! [[ "$GLOBAL_RECOVERY_ATTEMPTS" =~ ^[0-9]+$ ]] || [ "$GLOBAL_RECOVERY_ATTEMPTS" -lt 0 ]; then
+      echo "ERROR: settings.recoveryAttempts must be an integer >= 0." >&2
+      exit 2
+    fi
+  fi
   local probe_from_config; probe_from_config=$(jq -r 'if .settings.probeModels == true then 1 else 0 end' "$QUEUE_PATH" | tr -d '\r')
   [ "$PROBE_MODELS" -eq 0 ] && PROBE_MODELS=$probe_from_config
 
@@ -853,8 +877,44 @@ read_queue_config() {
       fi
     fi
 
-    # Task 2.2: Validate all runners (task + fallbacks)
-    local r_count; r_count=$(get_task_runner_count "$i")
+    local task_recovery_attempts
+    task_recovery_attempts=$(jq -r ".tasks[$i].recoveryAttempts // \"\"" "$QUEUE_PATH" | tr -d '\r')
+
+    if [ -n "$task_recovery_attempts" ]; then
+      if ! [[ "$task_recovery_attempts" =~ ^[0-9]+$ ]] || [ "$task_recovery_attempts" -lt 0 ]; then
+        echo "ERROR: Task $n recoveryAttempts must be an integer >= 0." >&2
+        exit 2
+      fi
+      if [ "$SETTINGS_RECOVERY_ATTEMPTS_PRESENT" -eq 1 ]; then
+        echo "ERROR: recoveryAttempts may be set in settings OR on individual tasks, not both - found in settings and on task $n." >&2
+        exit 2
+      fi
+    else
+      task_recovery_attempts=0
+    fi
+    local effective_recovery_attempts
+    if [ -n "$task_recovery_attempts" ]; then
+      effective_recovery_attempts="$task_recovery_attempts"
+    else
+      effective_recovery_attempts="$GLOBAL_RECOVERY_ATTEMPTS"
+    fi
+
+    # completionCheck: per-task override beats the global setting, which defaults to true.
+    local task_completion_check
+    task_completion_check=$(jq -r ".tasks[$i] | if has(\"completionCheck\") then .completionCheck else \"\" end" "$QUEUE_PATH" | tr -d '\r')
+    if [ "$task_completion_check" = "true" ] || [ "$task_completion_check" = "false" ]; then
+      COMPLETION_CHECK_FOR_TASK="$task_completion_check"
+    elif [ "${COMPLETION_CHECK:-true}" = "false" ]; then
+      COMPLETION_CHECK_FOR_TASK="false"
+    else
+      COMPLETION_CHECK_FOR_TASK="true"
+    fi
+
+    # Completion-check dependency (spec 5.3).
+    if [ "$effective_recovery_attempts" -gt 0 ] && [ "$COMPLETION_CHECK_FOR_TASK" != "true" ]; then
+      echo "ERROR: Task $n (\"$(task_field "$i" "name")\") has recoveryAttempts > 0 but completionCheck is false. Recovery requires completion checking." >&2
+      exit 2
+    fi
     local r=0
     while [ "$r" -lt "$r_count" ]; do
       local label=""
@@ -1679,6 +1739,47 @@ get_task_failed_file_path() {
   printf '%s' "$STATUS_STATE_PATH/$key.failed"
 }
 
+get_task_recovery_attempts_file_path() {
+  local idx="$1" key
+  key=$(get_task_key "$idx")
+  printf '%s' "$SESSION_STATE_PATH/$key-recovery-attempts.txt"
+}
+
+get_saved_task_recovery_attempts() {
+  local idx="$1" path raw
+  path=$(get_task_recovery_attempts_file_path "$idx")
+  if [ -f "$path" ]; then
+    raw=$(tr -d '\r' < "$path" | xargs)
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$raw"
+      return
+    fi
+  fi
+  printf '0'
+}
+
+save_task_recovery_attempts() {
+  local idx="$1" attempts="$2" path
+  path=$(get_task_recovery_attempts_file_path "$idx")
+  printf '%s' "$attempts" > "$path"
+}
+
+save_task_needs_human_marker() {
+  local idx="$1" reason="$2" key
+  key=$(get_task_key "$idx")
+  printf '%s' "$reason" > "$STATUS_STATE_PATH/$key.needs-human"
+}
+
+get_task_output_tail() {
+  local file_path="$1" max_lines="${2:-40}" max_bytes="${3:-2048}" text
+  if [ ! -f "$file_path" ]; then
+    printf ''
+    return
+  fi
+  text=$(tail -n "$max_lines" "$file_path")
+  printf '%s' "$text" | tail -c "$max_bytes"
+}
+
 get_saved_task_session_id() {
   local path
   path=$(get_task_session_file_path "$1")
@@ -1706,10 +1807,13 @@ test_task_already_done() {
 }
 
 save_task_done_marker() {
-  local path fp
+  local path fp key
   path=$(get_task_done_file_path "$1")
   fp=$(get_task_fingerprint "$1")
   printf '%s\n%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$fp" > "$path"
+  key=$(get_task_key "$1")
+  rm -f "$STATUS_STATE_PATH/$key.needs-human"
+  rm -f "$(get_task_recovery_attempts_file_path "$1")"
 }
 
 get_saved_done_fingerprint() {
@@ -2010,9 +2114,31 @@ get_task_prompt_with_completion_marker() {
 build_prompt_with_handoff() {
   local idx="$1"
   local completion_check="$2"
+  local failure_reason="${3:-}"
+  local failure_output_tail="${4:-}"
+
+  local recovery_attempts
+  recovery_attempts=$(jq -r ".tasks[$idx].recoveryAttempts // .settings.recoveryAttempts // 0" "$QUEUE_PATH" | tr -d '\r')
+
   local note="$HANDOFF_NOTE_BASE"
+  if [ "$recovery_attempts" -gt 0 ] && { [ -n "$failure_reason" ] || [ -n "$failure_output_tail" ]; }; then
+    note=$(printf 'A previous AI tool worked on this task and could not continue (%s). Partial work may already exist - inspect `git status` and `git diff` first; continue from there, do not redo finished work.\n\nThis is why the previous attempt did not finish:\n' "$failure_reason")
+    if [ -n "$failure_reason" ]; then
+      note="${note}${failure_reason}"
+      if [[ "$failure_reason" != *$'\n' ]]; then
+        note="${note}"$'\n'
+      fi
+    fi
+    if [ -n "$failure_output_tail" ]; then
+      note="${note}${failure_output_tail}"
+      if [[ "$failure_output_tail" != *$'\n' ]]; then
+        note="${note}"$'\n'
+      fi
+    fi
+  fi
+
   if [ "$completion_check" = "true" ]; then
-    note="$note End your final response with \`$TASK_COMPLETE_MARKER\` when the task is fully done, or \`$TASK_BLOCKED_MARKER <reason>\` if it genuinely cannot be completed."
+    note="${note} End your final response with \`$TASK_COMPLETE_MARKER\` when the task is fully done, or \`$TASK_BLOCKED_MARKER <reason>\` if it genuinely cannot be completed."
   fi
   local base; base=$(get_task_prompt_with_completion_marker "$idx" "$completion_check")
   printf '%s\n\n%s' "$note" "$base"
@@ -2020,6 +2146,7 @@ build_prompt_with_handoff() {
 
 invoke_cli_task_run() {
   local idx="$1" mode="$2" session_id="$3" model_override="${4:-}" quiet="${5:-0}" runner_idx="${6:-0}" use_handoff="${7:-0}"
+  local failure_reason="${8:-}" failure_output_tail="${9:-}" recovery_reason="${10:-}"
   local name cli project_path prompt
   name=$(task_field "$idx" "name")
   cli=$(get_runner_field "$idx" "$runner_idx" "cli" | tr '[:upper:]' '[:lower:]')
@@ -2045,14 +2172,26 @@ invoke_cli_task_run() {
   local prompt_with_marker
   if [ "$mode" = "New" ]; then
     if [ "$use_handoff" -eq 1 ]; then
-      prompt_with_marker=$(build_prompt_with_handoff "$idx" "$completion_check")
+      prompt_with_marker=$(build_prompt_with_handoff "$idx" "$completion_check" "$failure_reason" "$failure_output_tail")
     elif [ "$completion_check" = "true" ]; then
       prompt_with_marker=$(printf '%s%s\n' "$prompt" "$marker_block")
     else
       prompt_with_marker=$(printf '%s' "$prompt")
     fi
   else
-    prompt_with_marker=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$prompt" "$marker_block")
+    local preamble
+    local recovery_attempts
+    recovery_attempts=$(jq -r ".tasks[$idx].recoveryAttempts // .settings.recoveryAttempts // 0" "$QUEUE_PATH" | tr -d '\r')
+    if [ "$recovery_attempts" -gt 0 ] && [ -n "$recovery_reason" ]; then
+      local nudge="$RECOVERY_NUDGE_BASE"
+      nudge="${nudge//\{0\}/$recovery_reason}"
+      nudge="${nudge//\$TASK_BLOCKED_MARKER/$TASK_BLOCKED_MARKER}"
+      nudge="${nudge//\$TASK_COMPLETE_MARKER/$TASK_COMPLETE_MARKER}"
+      preamble="$nudge"
+    else
+      preamble=$(printf 'Continue the previous task in this same session from where you stopped. Do not restart from scratch.\nIf the session has no prior progress, start the task now.')
+    fi
+    prompt_with_marker=$(printf '%s\n\nOriginal task (for reference — do not redo finished work):\n%s%s\n' "$preamble" "$prompt" "$marker_block")
   fi
 
   build_cli_args "$idx" "$mode" "$session_id" "$model_override" "$prompt_with_marker" "$runner_idx"
@@ -2330,7 +2469,7 @@ run_queue() {
     ui_color "$UI_DIM" "    log   $GLYPH_DOT ${LOG_PATH}"; printf '\n'
   fi
 
-  local doneCount=0 skippedCount=0 failedCount=0 allCompletionCheck=1
+  local doneCount=0 skippedCount=0 failedCount=0 needsHumanCount=0 allCompletionCheck=1
   local ci=0
   while [ "$ci" -lt "$TASK_COUNT" ]; do
     if [ "$(task_completion_check "$ci")" != "true" ]; then allCompletionCheck=0; fi
@@ -2341,9 +2480,12 @@ run_queue() {
   local savedSessionId sessionId result_ok result_is_limit result_text result_session_id result_error_text
   local taskCompletionCheck stallCount previousNoMarkerText hasPreviousNoMarker currentText
   local taskModels modelCount currentModelIndex currentModel nextModelIndex m
+  local recoveryReason="" recoveryOutputTail=""
 
   while [ "$i" -lt "$TASK_COUNT" ]; do
     taskNumber=$((i + 1))
+    recoveryReason=""
+    recoveryOutputTail=""
 
     if stop_requested; then
       printf '\n'
@@ -2368,6 +2510,7 @@ run_queue() {
       echo "Task $taskNumber changed since last run; previous done marker invalidated."
       rm -f "$(get_task_done_file_path "$i")"
       rm -f "$(get_task_session_file_path "$i")"
+      rm -f "$(get_task_recovery_attempts_file_path "$i")"
       rm -f "$(get_task_model_index_file_path "$i")"
       # Task 9.2: drop runner-index and per-runner model-indices (exist only for fallbacks tasks).
       rm -f "$(get_task_runner_index_file_path "$i")"
@@ -2401,9 +2544,31 @@ run_queue() {
     fi
     if [ "$currentModelIndex" -ge "$modelCount" ] 2>/dev/null; then currentModelIndex=0; fi
 
+    local effective_task_recovery_attempts task_recovery_setting
+    task_recovery_setting=$(jq -r ".tasks[$i].recoveryAttempts // \"\"" "$QUEUE_PATH" | tr -d '\r')
+    if [ -n "$task_recovery_setting" ]; then
+      effective_task_recovery_attempts="$task_recovery_setting"
+    else
+      effective_task_recovery_attempts="$GLOBAL_RECOVERY_ATTEMPTS"
+    fi
+
     while true; do
       runCount=$((runCount + 1))
       if [ "$runCount" -gt "$MAX_RUNS_PER_TASK" ]; then
+        if [ "$(get_saved_task_recovery_attempts "$i")" -gt 0 ] && [ "$effective_task_recovery_attempts" -gt 0 ]; then
+          local budget_reason="run budget exhausted during block recovery (maxRunsPerTask=$MAX_RUNS_PER_TASK)"
+          save_task_failed_marker "$i" "$budget_reason"
+          save_task_needs_human_marker "$i" "$budget_reason"
+          needsHumanCount=$((needsHumanCount + 1))
+          printf '\n'
+          ui_beat "$GLYPH_ERR" "Task $taskNumber needs human review: $budget_reason" "$UI_YELLOW"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber $budget_reason" >&2
+            exit 1
+          fi
+          failedCount=$((failedCount + 1))
+          break
+        fi
         echo "ERROR: Task $taskNumber exceeded maxRunsPerTask=$MAX_RUNS_PER_TASK" >&2
         exit 1
       fi
@@ -2429,18 +2594,21 @@ run_queue() {
       local quietHeader=0
       [ "$runCount" -gt 1 ] && quietHeader=1
 
-      local runMode
       if [ -z "$savedSessionId" ]; then
         runMode="New"
         sessionId=""
         if [ "$task_cli" = "claude" ] || [ "$task_cli" = "agy" ] || [ "$task_cli" = "copilot" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
-        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel" "$quietHeader"
+        local use_fb_handoff=0
+        if [ -n "$recoveryReason" ]; then use_fb_handoff=1; fi
+        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel" "$quietHeader" 0 "$use_fb_handoff" "$recoveryReason" "$recoveryOutputTail" ""
       else
         runMode="Resume"
-        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel" "$quietHeader"
+        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel" "$quietHeader" 0 0 "" "" "$recoveryReason"
       fi
+      recoveryReason=""
+      recoveryOutputTail=""
 
       if [ "$DRY_RUN" -eq 1 ]; then
         write_step "Dry run for task $taskNumber recorded the command only"
@@ -2537,7 +2705,69 @@ run_queue() {
         break
       fi
       if [ "$M_STATUS" = "Blocked" ]; then
+        local trimmed_reason
+        trimmed_reason=$(printf '%s' "$M_REASON" | xargs)
+        if [[ "${trimmed_reason,,}" =~ ^human: ]]; then
+          save_task_failed_marker "$i" "$M_REASON"
+          save_task_needs_human_marker "$i" "$M_REASON"
+          needsHumanCount=$((needsHumanCount + 1))
+          printf '\n'
+          ui_beat "$GLYPH_ERR" "Task $taskNumber needs human review: $M_REASON" "$UI_YELLOW"
+          ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked (HUMAN: short-circuit):"
+          printf '\n'
+          ui_reason "$M_REASON"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+            exit 1
+          fi
+          failedCount=$((failedCount + 1))
+          break
+        fi
+
+        # Recovery attempts (spec 7.1)
+        local cur_recovery
+        cur_recovery=$(get_saved_task_recovery_attempts "$i")
+        local effective_recovery_attempts
+        local task_rec_att
+        task_rec_att=$(jq -r ".tasks[$i].recoveryAttempts // \"\"" "$QUEUE_PATH" | tr -d '\r')
+        if [ -n "$task_rec_att" ] && [ "$task_rec_att" -ne 0 ] 2>/dev/null; then
+          effective_recovery_attempts="$task_rec_att"
+        else
+          effective_recovery_attempts="$GLOBAL_RECOVERY_ATTEMPTS"
+        fi
+
+        if [ "$effective_recovery_attempts" -gt 0 ] && [ "$cur_recovery" -lt "$effective_recovery_attempts" ]; then
+          cur_recovery=$((cur_recovery + 1))
+          save_task_recovery_attempts "$i" "$cur_recovery"
+          errorRetryCount=0; stallCount=0; previousNoMarkerText=""; hasPreviousNoMarker=0
+          mustWaitForFreshSession=0
+          printf '\n'
+          ui_beat "$GLYPH_RETRY" "Task $taskNumber blocked; recovery round $cur_recovery of $effective_recovery_attempts..." "$UI_YELLOW"
+          ui_reason "$M_REASON"
+          recoveryReason="$M_REASON"
+          continue
+        fi
+
+        # Recovery exhausted or off
         save_task_failed_marker "$i" "$M_REASON"
+        if [ "$effective_recovery_attempts" -gt 0 ]; then
+          save_task_needs_human_marker "$i" "$M_REASON"
+          needsHumanCount=$((needsHumanCount + 1))
+          printf '\n'
+          ui_beat "$GLYPH_ERR" "Task $taskNumber needs human review: $M_REASON" "$UI_YELLOW"
+          printf '\n'
+          ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked:"
+          printf '\n'
+          ui_reason "$M_REASON"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+            exit 1
+          fi
+          failedCount=$((failedCount + 1))
+          break
+        fi
+
+        # Default block handling (recovery off)
         printf '\n'
         ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked:"
         printf '\n'
@@ -2591,6 +2821,14 @@ run_queue() {
     currentRunnerIndex=$(get_saved_task_runner_index "$i")
     if [ "$currentRunnerIndex" -ge "$runnerCount" ] 2>/dev/null; then currentRunnerIndex=0; fi
     local pendingHandoff=0
+    local pendingHandoffReason="" pendingHandoffOutputTail=""
+    local effective_fb_recovery_attempts fb_task_recovery_setting
+    fb_task_recovery_setting=$(jq -r ".tasks[$i].recoveryAttempts // \"\"" "$QUEUE_PATH" | tr -d '\r')
+    if [ -n "$fb_task_recovery_setting" ]; then
+      effective_fb_recovery_attempts="$fb_task_recovery_setting"
+    else
+      effective_fb_recovery_attempts="$GLOBAL_RECOVERY_ATTEMPTS"
+    fi
     runCount=0; errorRetryCount=0; stallCount=0
     previousNoMarkerText=""; hasPreviousNoMarker=0; mustWaitForFreshSession=0
 
@@ -2658,6 +2896,13 @@ run_queue() {
       # Action = Run
       local fb_new_idx="$fb_index"
       if [ "$fb_new_idx" != "$currentRunnerIndex" ]; then
+        if [ "$effective_fb_recovery_attempts" -gt 0 ]; then
+          pendingHandoffReason="${runnerReasons[$currentRunnerIndex]}"
+          pendingHandoffOutputTail=$(get_task_output_tail "$(get_task_output_file_path "$i")")
+        else
+          pendingHandoffReason=""
+          pendingHandoffOutputTail=""
+        fi
         rm -f "$(get_task_session_file_path "$i")"
         errorRetryCount=0; stallCount=0
         previousNoMarkerText=""; hasPreviousNoMarker=0; mustWaitForFreshSession=0
@@ -2703,6 +2948,10 @@ run_queue() {
       if [ "$runCount" -gt "$MAX_RUNS_PER_TASK" ]; then
         local fb_budget_reason="run budget exhausted (maxRunsPerTask=$MAX_RUNS_PER_TASK)"
         save_task_failed_marker "$i" "$fb_budget_reason"
+        if [ "$(get_saved_task_recovery_attempts "$i")" -gt 0 ] && [ "$effective_fb_recovery_attempts" -gt 0 ]; then
+          save_task_needs_human_marker "$i" "$fb_budget_reason"
+          needsHumanCount=$((needsHumanCount + 1))
+        fi
         printf '\n'
         ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber failed ($fb_budget_reason)"
         printf '\n'
@@ -2718,8 +2967,6 @@ run_queue() {
       [ "$runCount" -gt 1 ] && quietHeader=1
 
       savedSessionId=$(get_saved_task_session_id "$i")
-      local fb_use_handoff=0
-      if [ "$pendingHandoff" -eq 1 ]; then fb_use_handoff=1; pendingHandoff=0; fi
 
       if [ -z "$savedSessionId" ]; then
         runMode="New"
@@ -2727,11 +2974,17 @@ run_queue() {
         if [ "$fb_active_cli" = "claude" ] || [ "$fb_active_cli" = "agy" ] || [ "$fb_active_cli" = "copilot" ]; then
           sessionId=$(new_task_session_id "$i")
         fi
-        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" "$fb_use_handoff"
+        local use_fb_handoff=0
+        if [ "$pendingHandoff" -eq 1 ]; then use_fb_handoff=1; pendingHandoff=0; fi
+        invoke_cli_task_run "$i" "New" "$sessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" "$use_fb_handoff" "$pendingHandoffReason" "$pendingHandoffOutputTail" ""
+        pendingHandoffReason=""
+        pendingHandoffOutputTail=""
       else
         runMode="Resume"
-        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" 0
+        invoke_cli_task_run "$i" "Resume" "$savedSessionId" "$currentModel" "$quietHeader" "$currentRunnerIndex" 0 "" "" "$recoveryReason"
       fi
+      recoveryReason=""
+      recoveryOutputTail=""
 
       if [ "$DRY_RUN" -eq 1 ]; then
         write_step "Dry run for task $taskNumber recorded the command only"
@@ -2823,7 +3076,69 @@ run_queue() {
         break
       fi
       if [ "$M_STATUS" = "Blocked" ]; then
+        local trimmed_reason
+        trimmed_reason=$(printf '%s' "$M_REASON" | xargs)
+        if [[ "${trimmed_reason,,}" =~ ^human: ]]; then
+          save_task_failed_marker "$i" "$M_REASON"
+          save_task_needs_human_marker "$i" "$M_REASON"
+          needsHumanCount=$((needsHumanCount + 1))
+          printf '\n'
+          ui_beat "$GLYPH_ERR" "Task $taskNumber needs human review: $M_REASON" "$UI_YELLOW"
+          ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked (HUMAN: short-circuit):"
+          printf '\n'
+          ui_reason "$M_REASON"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+            exit 1
+          fi
+          failedCount=$((failedCount + 1))
+          break
+        fi
+
+        # Recovery attempts (spec 7.1)
+        local cur_recovery
+        cur_recovery=$(get_saved_task_recovery_attempts "$i")
+        local effective_recovery_attempts
+        local task_rec_att
+        task_rec_att=$(jq -r ".tasks[$i].recoveryAttempts // \"\"" "$QUEUE_PATH" | tr -d '\r')
+        if [ -n "$task_rec_att" ] && [ "$task_rec_att" -ne 0 ] 2>/dev/null; then
+          effective_recovery_attempts="$task_rec_att"
+        else
+          effective_recovery_attempts="$GLOBAL_RECOVERY_ATTEMPTS"
+        fi
+
+        if [ "$effective_recovery_attempts" -gt 0 ] && [ "$cur_recovery" -lt "$effective_recovery_attempts" ]; then
+          cur_recovery=$((cur_recovery + 1))
+          save_task_recovery_attempts "$i" "$cur_recovery"
+          errorRetryCount=0; stallCount=0; previousNoMarkerText=""; hasPreviousNoMarker=0
+          mustWaitForFreshSession=0
+          printf '\n'
+          ui_beat "$GLYPH_RETRY" "Task $taskNumber blocked; recovery round $cur_recovery of $effective_recovery_attempts..." "$UI_YELLOW"
+          ui_reason "$M_REASON"
+          recoveryReason="$M_REASON"
+          continue
+        fi
+
+        # Recovery exhausted or off
         save_task_failed_marker "$i" "$M_REASON"
+        if [ "$effective_recovery_attempts" -gt 0 ]; then
+          save_task_needs_human_marker "$i" "$M_REASON"
+          needsHumanCount=$((needsHumanCount + 1))
+          printf '\n'
+          ui_beat "$GLYPH_ERR" "Task $taskNumber needs human review: $M_REASON" "$UI_YELLOW"
+          printf '\n'
+          ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked:"
+          printf '\n'
+          ui_reason "$M_REASON"
+          if [ "$STOP_ON_ERROR" = "true" ]; then
+            echo "ERROR: Task $taskNumber is blocked: $M_REASON" >&2
+            exit 1
+          fi
+          failedCount=$((failedCount + 1))
+          break
+        fi
+
+        # Default block handling (recovery off)
         printf '\n'
         ui_color "$UI_YELLOW" "  $GLYPH_ERR Task $taskNumber is blocked:"
         printf '\n'
@@ -2863,7 +3178,7 @@ run_queue() {
     i=$((i + 1))
   done
 
-  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$skippedCount" "$allCompletionCheck" "$LOG_PATH" "$RUNNER_STATE_PATH" "$DRY_RUN"
+  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$skippedCount" "$allCompletionCheck" "$LOG_PATH" "$RUNNER_STATE_PATH" "$DRY_RUN" "$needsHumanCount"
 }
 
 # Run the queue and tee output to the log. The spinner writes to /dev/tty so its

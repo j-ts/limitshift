@@ -14,6 +14,7 @@
       "projectPath": ".",
       "model": "gpt-5.4",
       "effort": "medium",
+      "recoveryAttempts": 2,
       "extraArgs": ["--sandbox", "workspace-write"],
       "prompt": "Implement the fixes listed in docs/audit.md, run the tests, and summarize what changed."
     },
