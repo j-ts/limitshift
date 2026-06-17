@@ -67,6 +67,19 @@ if (-not $LoadFunctionsOnly) {
     $OutputStatePath = Join-Path $RunnerStatePath "outputs"
     $StatusStatePath = Join-Path $RunnerStatePath "status"
     $LogPath = Join-Path $RunnerStatePath "limitshift-log.txt"
+    $StopFlagPath = Join-Path $RunnerStatePath 'stop-after-step.flag'
+    $script:__StopFlagPath = $StopFlagPath
+
+    # Can we read single keys? Only on an interactive console with non-redirected input.
+    $script:CanReadStopKey = $false
+    try {
+        if (-not [Console]::IsInputRedirected) { $null = [Console]::KeyAvailable; $script:CanReadStopKey = $true }
+    } catch { $script:CanReadStopKey = $false }
+
+    # A stale flag from a previous run must never auto-stop a fresh run.
+    if (Test-Path -LiteralPath $StopFlagPath) {
+        Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction SilentlyContinue
+    }
     $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
     $RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
     $StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
@@ -102,12 +115,44 @@ $script:GlyphDash    = [char]0x2014   # em dash
 $script:GlyphRetry   = [char]0x21BB   # clockwise open-circle arrow
 $script:GlyphDiamond = [char]0x25C6   # black diamond, used only on the final summary line
 
+$script:StopHintActive = 'Ctrl+C stop now ' + [char]0x00B7 + ' s stop after this task'
+$script:StopHintArmed  = 'stopping after this task' + [char]0x2026
+$script:UiSessionTotalSeconds = 0.0
+$script:UiSessionTotalPrinted = $false
+
 # Milestone lines (task done / all done) are indented farther so they read as section end-caps.
 $script:UiMilestoneIndent = '      '
 
 function Test-UiAnimatable {
     # Animate only on a real interactive console: not when stdout is redirected to a file/pipe.
     try { return -not [Console]::IsOutputRedirected } catch { return $false }
+}
+
+function Get-StopHint {
+    param([switch]$Armed)
+    if ($Armed) { return $script:StopHintArmed }
+    return $script:StopHintActive
+}
+
+function Test-StopRequested {
+    if ([string]::IsNullOrWhiteSpace($script:__StopFlagPath)) { return $false }
+    return (Test-Path -LiteralPath $script:__StopFlagPath)
+}
+
+function Request-Stop {
+    if ([string]::IsNullOrWhiteSpace($script:__StopFlagPath)) { return }
+    $null | Set-Content -LiteralPath $script:__StopFlagPath -Encoding UTF8
+}
+
+function Read-StopKey {
+    # Drain buffered keys; if any is 's'/'S', request stop. Safe to call every poll tick.
+    if (-not $script:CanReadStopKey) { return }
+    try {
+        while ([Console]::KeyAvailable) {
+            $k = [Console]::ReadKey($true)
+            if ($k.KeyChar -eq 's' -or $k.KeyChar -eq 'S') { Request-Stop }
+        }
+    } catch {}
 }
 
 function Format-UiDuration {
@@ -133,6 +178,19 @@ function Format-UiDuration {
     return "$hpart $mpart"
 }
 
+function Add-UiSessionTotalTime {
+    param([TimeSpan]$Span)
+    if ($null -eq $Span) { return }
+    $script:UiSessionTotalSeconds += $Span.TotalSeconds
+}
+
+function Write-UiSessionTotalTime {
+    if ($script:UiSessionTotalPrinted) { return }
+    $script:UiSessionTotalPrinted = $true
+    $span = [TimeSpan]::FromSeconds($script:UiSessionTotalSeconds)
+    Write-Host ("  Total time: " + (Format-UiDuration -Span $span)) -ForegroundColor DarkGray
+}
+
 function Write-Step {
     param([string]$Message)
 
@@ -149,13 +207,27 @@ function Write-UiBeat {
     Write-Host $Message -ForegroundColor Gray
 }
 
-function Write-UiBanner {
+function Write-UiHeader {
+    # The app header, printed the instant the run launches (right after Start-Transcript) so the
+    # user sees the brand before the queue is read. The queue details follow once the config loads.
+    Write-Host ""
+    Write-Host ("  " + $script:GlyphStar + " LimitShift") -ForegroundColor $script:UiAccentColor
+}
+
+function Write-UiQueueLine {
+    # The "N tasks queued · <clis>" line. Its leading dot aligns under the header's star.
     param([int]$TaskCount, [string[]]$Clis)
     $cliList = (@($Clis) | Select-Object -Unique) -join ', '
     $plural = if ($TaskCount -eq 1) { '' } else { 's' }
-    Write-Host ""
-    Write-Host ("  " + $script:GlyphStar + " LimitShift") -ForegroundColor $script:UiAccentColor -NoNewline
-    Write-Host ("   " + $script:GlyphDot + "   " + $TaskCount + " task" + $plural + " queued " + $script:GlyphDot + " " + $cliList) -ForegroundColor DarkGray
+    Write-Host ("  " + $script:GlyphDot + "   " + $TaskCount + " task" + $plural + " queued " + $script:GlyphDot + " " + $cliList) -ForegroundColor DarkGray
+}
+
+function Write-UiBannerDetails {
+    # Queue details printed once the config is read: the "N tasks queued · <clis>" line plus a
+    # "started <ddd HH:mm> · <queue path>" line stamped with the run's start time.
+    param([int]$TaskCount, [string[]]$Clis, [datetime]$StartTime = (Get-Date), [string]$QueuePath)
+    Write-UiQueueLine -TaskCount $TaskCount -Clis $Clis
+    Write-Host ("    started " + $StartTime.ToString('ddd HH:mm') + " " + $script:GlyphDot + " " + $QueuePath) -ForegroundColor DarkGray
 }
 
 function Get-UiPromptPreview {
@@ -266,6 +338,7 @@ function Write-UiSummary {
         $plural = if ($TaskCount -eq 1) { '' } else { 's' }
         Write-Host ("  " + $script:GlyphDiamond + " Dry run complete") -ForegroundColor $script:UiAccentColor -NoNewline
         Write-Host (" " + $script:GlyphDash + " recorded " + $TaskCount + " task command" + $plural + ", no CLIs were run.") -ForegroundColor Gray
+        Write-UiSessionTotalTime
         return
     }
 
@@ -279,6 +352,7 @@ function Write-UiSummary {
             Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
             Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
+        Write-UiSessionTotalTime
         return
     }
 
@@ -297,6 +371,7 @@ function Write-UiSummary {
             Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
             Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
+        Write-UiSessionTotalTime
         return
     }
 
@@ -315,6 +390,7 @@ function Write-UiSummary {
             Write-Host ("    To redo one task, delete its marker in " + $StatePath + "\status\") -ForegroundColor DarkGray
             Write-Host ("    To redo all, delete the state folder: " + $StatePath) -ForegroundColor DarkGray
         }
+        Write-UiSessionTotalTime
         return
     }
 
@@ -329,6 +405,7 @@ function Write-UiSummary {
         Write-Host (" " + $script:GlyphDash + " all " + $TaskCount + " queued task" + $plural + " were executed. Please check the work manually.") -ForegroundColor Gray
     }
     Write-Host ("    log saved to " + $LogPath) -ForegroundColor DarkGray
+    Write-UiSessionTotalTime
 }
 
 function Invoke-UiSpinner {
@@ -369,13 +446,21 @@ function Invoke-UiSpinner {
             }
             finally { [Console]::ForegroundColor = $prev }
 
+            Read-StopKey
+            $armed = Test-StopRequested
+            $hint = Get-StopHint -Armed:$armed
+            $hintColor = if ($armed) { [System.ConsoleColor]::Yellow } else { [System.ConsoleColor]::DarkGray }
+            $prevH = [Console]::ForegroundColor
+            try { [Console]::ForegroundColor = $hintColor; [Console]::Write("   " + $hint) }
+            finally { [Console]::ForegroundColor = $prevH }
+
             $pos += $dir
             if ($pos -ge ($track - 1) -or $pos -le 0) { $dir = -$dir }
             Start-Sleep -Milliseconds 140
         }
     }
     finally {
-        [Console]::Write($cr + (' ' * 44) + $cr)
+        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr)
         if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
     }
 }
@@ -479,14 +564,20 @@ function Invoke-UiRest {
                 [Console]::Write("     " + $moons[$mi % $moons.Count] + " ")
                 [Console]::ForegroundColor = [System.ConsoleColor]::DarkGray
                 [Console]::Write("resting " + [char]0x00B7 + " " + $cd + " until " + $WakeTime.ToString('h:mm tt') + "   ")
+                [Console]::Write("   " + (Get-StopHint))
             }
             finally { [Console]::ForegroundColor = $prev }
+            Read-StopKey
+            if (Test-StopRequested) { break }
+            $prevH2 = [Console]::ForegroundColor
+            try { [Console]::ForegroundColor = [System.ConsoleColor]::Yellow; [Console]::Write("   " + (Get-StopHint -Armed:$true)) }
+            finally { [Console]::ForegroundColor = $prevH2 }
             $mi++
             Start-Sleep -Milliseconds 1000
         }
     }
     finally {
-        [Console]::Write($cr + (' ' * 52) + $cr)
+        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr)
         if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
     }
 }
@@ -582,7 +673,8 @@ function Invoke-UiDemo {
         "Audited bugs.md against current src/: 6 items verified fixed, 1 still broken (src/auth/token.ts: race on expired refresh).`n[[TASK_COMPLETE]]"
     )
 
-    Write-UiBanner -TaskCount $count -Clis @($tasks | ForEach-Object { $_.cli })
+    Write-UiHeader
+    Write-UiQueueLine -TaskCount $count -Clis @($tasks | ForEach-Object { $_.cli })
     Write-Host ("    started " + (Get-Date).ToString('ddd HH:mm') + " " + $script:GlyphDot + " demo from " + (Split-Path -Leaf $workflowPath) + " (no CLIs are run)") -ForegroundColor DarkGray
 
     for ($k = 0; $k -lt $count; $k++) {
@@ -741,17 +833,38 @@ function Test-IsOllamaRunner {
     return (Test-ExtraArgsRequestOllama -ExtraArgs $Runner.ExtraArgs)
 }
 
+# Git state does not change during a single run, and a fallbacks queue probes the same projectPath
+# once per task. A direct `& git` call is ~56ms; the old Start-Process -Wait was ~1s each, so 2
+# probes per task x N tasks froze startup for many seconds (e.g. ~22s on an 11-task queue). Use a
+# direct call (stderr discarded, exit code read) and memoize per path so each probe runs once.
+$script:GitProbeCache = @{}
+
+function Invoke-GitProbe {
+    param([string]$Path, [string[]]$GitArgs, [string]$CacheKind)
+    $key = $CacheKind + [char]0x1F + $Path
+    if ($script:GitProbeCache.ContainsKey($key)) { return $script:GitProbeCache[$key] }
+    $ok = $false
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & git -C "$Path" @GitArgs 2>$null | Out-Null
+            $ok = ($LASTEXITCODE -eq 0)
+        } catch { $ok = $false }
+        finally { $ErrorActionPreference = $prevEAP }
+    }
+    $script:GitProbeCache[$key] = $ok
+    return $ok
+}
+
 function Test-IsGitRepo {
     param([string]$Path)
-    # Using Start-Process to avoid triggering $ErrorActionPreference = 'Stop' from git's stderr/exit code.
-    $p = Start-Process -FilePath git -ArgumentList "-C `"$Path`" rev-parse --is-inside-work-tree" -NoNewWindow -Wait -PassThru -RedirectStandardOutput ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())) -RedirectStandardError ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()))
-    return $p.ExitCode -eq 0
+    return (Invoke-GitProbe -Path $Path -GitArgs @('rev-parse', '--is-inside-work-tree') -CacheKind 'repo')
 }
 
 function Test-HasCommits {
     param([string]$Path)
-    $p = Start-Process -FilePath git -ArgumentList "-C `"$Path`" rev-parse HEAD" -NoNewWindow -Wait -PassThru -RedirectStandardOutput ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName())) -RedirectStandardError ([System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.IO.Path]::GetRandomFileName()))
-    return $p.ExitCode -eq 0
+    return (Invoke-GitProbe -Path $Path -GitArgs @('rev-parse', 'HEAD') -CacheKind 'head')
 }
 
 function Remove-OllamaControlArgs {
@@ -1716,6 +1829,7 @@ exit `$LASTEXITCODE
     $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stdout-" + [guid]::NewGuid() + ".txt")
     $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stderr-" + [guid]::NewGuid() + ".txt")
     $stdinPath = $null
+    $processTimer = $null
 
     try {
         # When animating the working indicator we must NOT block on Start-Process; we launch and
@@ -1749,6 +1863,7 @@ exit `$LASTEXITCODE
             Write-Host ("  " + $script:GlyphStar + " working...") -ForegroundColor $script:UiAccentColor
         }
 
+        $processTimer = [System.Diagnostics.Stopwatch]::StartNew()
         $process = Start-Process @startProcessParams
 
         if ($animate) {
@@ -1760,6 +1875,11 @@ exit `$LASTEXITCODE
         }
         # Make sure the process has fully exited and its redirected files are flushed before reading.
         try { $process.WaitForExit() } catch {}
+        if ($null -ne $processTimer) {
+            $processTimer.Stop()
+            Add-UiSessionTotalTime -Span $processTimer.Elapsed
+            $processTimer = $null
+        }
 
         $stdout = if (Test-Path -LiteralPath $stdoutPath) {
             [System.IO.File]::ReadAllText($stdoutPath)
@@ -1801,6 +1921,10 @@ exit `$LASTEXITCODE
         }
         if (-not [string]::IsNullOrWhiteSpace($stdinPath)) {
             Remove-Item -LiteralPath $stdinPath -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $processTimer) {
+            try { $processTimer.Stop() } catch {}
+            Add-UiSessionTotalTime -Span $processTimer.Elapsed
         }
     }
 }
@@ -2732,10 +2856,11 @@ try {
 
     Start-Transcript -Path $LogPath -Append
     $transcriptStarted = $true
+    $runStartTime = Get-Date
+    Write-UiHeader
 
     $script:UiTaskTotal = $Tasks.Count
-    Write-UiBanner -TaskCount $Tasks.Count -Clis @($Tasks | ForEach-Object { $_.Cli })
-    Write-Host ("    started " + (Get-Date).ToString('ddd HH:mm') + " " + $script:GlyphDot + " " + $QueuePath) -ForegroundColor DarkGray
+    Write-UiBannerDetails -TaskCount $Tasks.Count -Clis @($Tasks | ForEach-Object { $_.Cli }) -StartTime $runStartTime -QueuePath $QueuePath
     if ($ShowRawOutput) {
         Write-Host ("    state " + $script:GlyphDot + " " + $RunnerStatePath) -ForegroundColor DarkGray
         Write-Host ("    log   " + $script:GlyphDot + " " + $LogPath) -ForegroundColor DarkGray
@@ -2756,6 +2881,12 @@ try {
     for ($i = 0; $i -lt $Tasks.Count; $i++) {
         $task = $Tasks[$i]
         $taskNumber = $i + 1
+
+        if (Test-StopRequested) {
+            Write-Host ""
+            Write-UiBeat -Glyph ([string]$script:GlyphMoon) -Message ("Stopping after the current step (you pressed s). " + $doneCount + " task(s) done this run; rerun the same command to continue.") -Color Yellow
+            break
+        }
 
         # Visual separator between tasks (not before the first one).
         if ($i -gt 0) { Write-UiSeparator }
@@ -2809,6 +2940,8 @@ try {
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
                 throw "Task $taskNumber exceeded maxRunsPerTask=$($config.Settings.MaxRunsPerTask)"
             }
+
+            if (Test-StopRequested) { break }
 
             # Local Ollama claude runs never hit Anthropic usage limits, so skip the cloud /usage
             # pre-check (it would otherwise query — and consume — the cloud account).
@@ -3090,6 +3223,8 @@ try {
                 break
             }
 
+            if (Test-StopRequested) { break }
+
             $quietHeader = ($runCount -gt 1)
             $savedSessionId = Get-SavedTaskSessionId -TaskIndex $i
 
@@ -3225,7 +3360,9 @@ finally {
     if ($transcriptStarted) {
         Stop-Transcript
     }
+    Write-UiSessionTotalTime
     Remove-Item -LiteralPath $LockPath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction SilentlyContinue
 }
 
 exit $exitCode

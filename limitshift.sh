@@ -81,6 +81,10 @@ GLYPH_ARROW='→'   # rightwards arrow, prompt-saved tail
 GLYPH_DOT='·'     # middle dot
 GLYPH_DASH='—'    # em dash, summary separator
 GLYPH_RULE='─'    # box-drawing horizontal line
+STOP_HINT_ACTIVE="Ctrl+C stop now $GLYPH_DOT s stop after this task"
+STOP_HINT_ARMED="stopping after this task…"
+UI_SESSION_TOTAL_SECONDS=0
+UI_SESSION_TOTAL_PRINTED=0
 
 UI_MILESTONE_INDENT='      '
 UI_TASK_TOTAL=0
@@ -101,6 +105,9 @@ ui_color() {
     printf '%s' "$2"
   fi
 }
+
+stop_requested() { [ -n "$STOP_FLAG" ] && [ -f "$STOP_FLAG" ]; }
+request_stop()  { [ -n "$STOP_FLAG" ] && : > "$STOP_FLAG" 2>/dev/null || true; }
 
 is_git_repo() {
   local p="$1"
@@ -126,7 +133,16 @@ ui_beat() {
   printf '\n'
 }
 
-ui_banner() {
+# The app header, printed the instant the run launches (run_queue's output is tee'd to the log)
+# so the user sees the brand before the queue is read. The queue details follow once it loads.
+ui_header() {
+  printf '\n'
+  ui_color "$UI_ACCENT" "  $GLYPH_STAR LimitShift"
+  printf '\n'
+}
+
+# The "N tasks queued · <clis>" line. Its leading dot aligns under the header's star.
+ui_queue_line() {
   local task_count="$1"; shift
   local cli_list="" seen="" c
   for c in "$@"; do
@@ -136,9 +152,16 @@ ui_banner() {
     esac
   done
   local plural="s"; [ "$task_count" -eq 1 ] && plural=""
+  ui_color "$UI_DIM" "  $GLYPH_DOT   ${task_count} task${plural} queued $GLYPH_DOT $cli_list"
   printf '\n'
-  ui_color "$UI_ACCENT" "  $GLYPH_STAR LimitShift"
-  ui_color "$UI_DIM" "   $GLYPH_DOT   ${task_count} task${plural} queued $GLYPH_DOT $cli_list"
+}
+
+# Queue details printed once the config is read: the "N tasks queued · <clis>" line plus a
+# "started <%a %H:%M> · <queue path>" line stamped with the run's start time.
+ui_banner_details() {
+  local task_count="$1" started="$2" queue_path="$3"; shift 3
+  ui_queue_line "$task_count" "$@"
+  ui_color "$UI_DIM" "    started ${started} $GLYPH_DOT ${queue_path}"
   printf '\n'
 }
 
@@ -330,6 +353,18 @@ ui_format_duration() {
   printf '%s %s' "$hpart" "$mpart"
 }
 
+ui_add_session_total_time() {
+  local elapsed="$1"
+  UI_SESSION_TOTAL_SECONDS=$((UI_SESSION_TOTAL_SECONDS + elapsed))
+}
+
+ui_print_session_total_time() {
+  [ "$UI_SESSION_TOTAL_PRINTED" -eq 1 ] && return
+  UI_SESSION_TOTAL_PRINTED=1
+  ui_color "$UI_DIM" "  Total time: $(ui_format_duration "$UI_SESSION_TOTAL_SECONDS")"
+  printf '\n'
+}
+
 # Final summary. Variants:
 #   dry-run                          -> "Dry run complete"
 #   all tasks already done (skipped) -> "Nothing to do" + redo-hint
@@ -352,6 +387,7 @@ ui_summary() {
     ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND Dry run complete"
     ui_color "$UI_DIM" " $GLYPH_DASH recorded ${task_count} task command${plural}, no CLIs were run."
     printf '\n'
+    ui_print_session_total_time
     return
   fi
 
@@ -368,6 +404,7 @@ ui_summary() {
       ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
+    ui_print_session_total_time
     return
   fi
 
@@ -393,6 +430,7 @@ ui_summary() {
       ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
+    ui_print_session_total_time
     return
   fi
 
@@ -418,6 +456,7 @@ ui_summary() {
       ui_color "$UI_DIM" "    To redo all, delete the state folder: ${state_path}"
       printf '\n'
     fi
+    ui_print_session_total_time
     return
   fi
 
@@ -433,6 +472,7 @@ ui_summary() {
   printf '\n'
   ui_color "$UI_DIM" "    log saved to ${log_path}"
   printf '\n'
+  ui_print_session_total_time
 }
 
 # Animated working spinner. Writes to /dev/tty so its frames never reach a piped
@@ -471,6 +511,13 @@ ui_spinner_start() {
       printf '\r' > /dev/tty
       printf '%s  %s %s %s' "$UI_ACCENT" "$GLYPH_STAR" "$ch_buf" "$UI_RESET" > /dev/tty
       printf '%s %s %s %s     %s' "$UI_DIM" " " "$verb" "$GLYPH_DOT $mmss" "$UI_RESET" > /dev/tty
+      if [ -r /dev/tty ]; then
+        if IFS= read -rsn1 -t 0.01 _key < /dev/tty 2>/dev/null; then
+          case "$_key" in s|S) : > "$STOP_FLAG" 2>/dev/null || true ;; esac
+        fi
+      fi
+      if [ -f "$STOP_FLAG" ]; then _hint="$STOP_HINT_ARMED"; else _hint="$STOP_HINT_ACTIVE"; fi
+      printf '%s   %s%s' "$UI_DIM" "$_hint" "$UI_RESET" > /dev/tty
       pos=$((pos + dir))
       if [ "$pos" -ge $((track - 1)) ] || [ "$pos" -le 0 ]; then dir=$((-dir)); fi
       sleep 0.14 2>/dev/null || sleep 1
@@ -486,7 +533,7 @@ ui_spinner_stop() {
     wait "$UI_SPINNER_PID" 2>/dev/null
     UI_SPINNER_PID=""
     if ui_animatable && [ -w /dev/tty ]; then
-      printf '\r%s\r' "                                                  " > /dev/tty 2>/dev/null
+      printf '\r%s\r' "                                                                                " > /dev/tty 2>/dev/null
       printf '\033[?25h' > /dev/tty 2>/dev/null
     fi
   fi
@@ -527,6 +574,11 @@ ui_rest() {
     printf '\r' > /dev/tty
     printf '%s     %s %s' "$UI_BLUE" "${moons[$((mi % ${#moons[@]}))]}" "$UI_RESET" > /dev/tty
     printf '%sresting %s %s until %s   %s' "$UI_DIM" "$GLYPH_DOT" "$cd" "$wake_clock" "$UI_RESET" > /dev/tty
+    if [ -r /dev/tty ] && IFS= read -rsn1 -t 0.01 _key < /dev/tty 2>/dev/null; then
+      case "$_key" in s|S) : > "$STOP_FLAG" 2>/dev/null || true ;; esac
+    fi
+    if [ -f "$STOP_FLAG" ]; then break; fi
+    printf '%s   %s%s' "$UI_DIM" "$STOP_HINT_ACTIVE" "$UI_RESET" > /dev/tty
     mi=$((mi + 1))
     sleep 1
   done
@@ -567,6 +619,8 @@ ui_fake_work() {
 
 ui_demo() {
   local workflow_path="$SCRIPT_DIR/limitshift-queue.example-workflow.json"
+  UI_SESSION_TOTAL_SECONDS=0
+  UI_SESSION_TOTAL_PRINTED=0
   if [ ! -f "$workflow_path" ]; then
     ui_color "$UI_RED" "  $GLYPH_ERR Demo file not found: $workflow_path"
     printf '\n'
@@ -596,7 +650,8 @@ ui_demo() {
 [[TASK_COMPLETE]]"
   )
 
-  ui_banner "$count" "${clis[@]}"
+  ui_header
+  ui_queue_line "$count" "${clis[@]}"
   local started; started=$(date '+%a %H:%M' 2>/dev/null || date)
   ui_color "$UI_DIM" "    started ${started} $GLYPH_DOT demo from $(basename "$workflow_path") (no CLIs are run)"
   printf '\n'
@@ -2030,17 +2085,24 @@ invoke_cli_task_run() {
 
   local output_text exit_code agy_stdout=""
   local tmp_out tmp_err
+  local run_start run_elapsed
   tmp_out=$(mktemp)
   if [ "$cli" = "agy" ] || [ "$cli" = "copilot" ]; then
+    run_start=$(date +%s)
     tmp_err=$(mktemp)
     ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
     exit_code=$?
+    run_elapsed=$(( $(date +%s) - run_start ))
+    ui_add_session_total_time "$run_elapsed"
     if [ "$cli" = "agy" ]; then agy_stdout=$(cat "$tmp_out"); fi
     output_text=$(cat "$tmp_out"; cat "$tmp_err")
     rm -f "$tmp_out" "$tmp_err"
   else
+    run_start=$(date +%s)
     ( cd "$project_path" && printf '%s' "$prompt_with_marker" | "$CLI_EXE" "${CLI_ARGS[@]}" ) > "$tmp_out" 2>&1
     exit_code=$?
+    run_elapsed=$(( $(date +%s) - run_start ))
+    ui_add_session_total_time "$run_elapsed"
     output_text=$(cat "$tmp_out")
     rm -f "$tmp_out"
   fi
@@ -2093,6 +2155,7 @@ initialize_runner_state() {
   mkdir -p "$SESSION_STATE_PATH"
   mkdir -p "$OUTPUT_STATE_PATH"
   mkdir -p "$STATUS_STATE_PATH"
+  rm -f "$STOP_FLAG" 2>/dev/null || true
   write_state_readme
   initialize_runs_csv
 }
@@ -2199,6 +2262,7 @@ OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"
 STATUS_STATE_PATH="$RUNNER_STATE_PATH/status"
 LOG_PATH="$RUNNER_STATE_PATH/limitshift-log.txt"
 USAGE_PATH="$RUNNER_STATE_PATH/claude-usage-last.txt"
+STOP_FLAG="$RUNNER_STATE_PATH/stop-after-step.flag"
 RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
 STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
 RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status,cli,model"
@@ -2243,20 +2307,24 @@ fi
 initialize_runner_state
 
 echo $$ > "$LOCK_PATH"
-trap 'ui_spinner_stop; rm -f "$LOCK_PATH"' EXIT
+trap 'ui_print_session_total_time; exit 130' INT TERM
+trap 'ui_spinner_stop; rm -f "$LOCK_PATH" "$STOP_FLAG"; ui_print_session_total_time' EXIT
 
 run_queue() {
+  UI_SESSION_TOTAL_SECONDS=0
+  UI_SESSION_TOTAL_PRINTED=0
   UI_TASK_TOTAL=$TASK_COUNT
+
+  # Show the app header the instant the run launches, before reading the queue details below.
+  local run_started; run_started=$(date '+%a %H:%M' 2>/dev/null || date)
+  ui_header
 
   local banner_clis=() bi=0
   while [ "$bi" -lt "$TASK_COUNT" ]; do
     banner_clis+=("$(task_field "$bi" "cli")")
     bi=$((bi + 1))
   done
-  ui_banner "$TASK_COUNT" "${banner_clis[@]}"
-  local started; started=$(date '+%a %H:%M' 2>/dev/null || date)
-  ui_color "$UI_DIM" "    started ${started} $GLYPH_DOT ${QUEUE_PATH}"
-  printf '\n'
+  ui_banner_details "$TASK_COUNT" "$run_started" "$QUEUE_PATH" "${banner_clis[@]}"
   if [ "$SHOW_RAW" -eq 1 ]; then
     ui_color "$UI_DIM" "    state $GLYPH_DOT ${RUNNER_STATE_PATH}"; printf '\n'
     ui_color "$UI_DIM" "    log   $GLYPH_DOT ${LOG_PATH}"; printf '\n'
@@ -2276,6 +2344,12 @@ run_queue() {
 
   while [ "$i" -lt "$TASK_COUNT" ]; do
     taskNumber=$((i + 1))
+
+    if stop_requested; then
+      printf '\n'
+      ui_beat "$GLYPH_MOON" "Stopping after the current step (you pressed s). ${doneCount} task(s) done this run; rerun the same command to continue." "$UI_BLUE"
+      break
+    fi
 
     if [ "$i" -gt 0 ]; then ui_separator; fi
 
@@ -2333,6 +2407,8 @@ run_queue() {
         echo "ERROR: Task $taskNumber exceeded maxRunsPerTask=$MAX_RUNS_PER_TASK" >&2
         exit 1
       fi
+
+      if stop_requested; then break; fi
 
       local task_cli
       task_cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')

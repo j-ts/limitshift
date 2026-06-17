@@ -68,6 +68,126 @@ Describe 'limitshift.ps1' {
         }
     }
 
+    Context 'Graceful stop (press s) — hint text' {
+        It 'returns the active hint by default' {
+            Get-StopHint | Should -Be ('Ctrl+C stop now ' + [char]0x00B7 + ' s stop after this task')
+        }
+        It 'returns the armed hint once stop is requested' {
+            Get-StopHint -Armed | Should -Be ('stopping after this task' + [char]0x2026)
+        }
+    }
+
+    Context 'Session total time' {
+        It 'prints a total time line for a fixed number of seconds' {
+            $script:UiSessionTotalSeconds = 3661
+            $script:UiSessionTotalPrinted = $false
+
+            $output = (& {
+                Write-UiSessionTotalTime
+            } 6>&1) | Out-String
+
+            $output | Should -Match 'Total time: 1 hour 1 minute'
+        }
+    }
+
+    Context 'Banner details — queue + started lines' {
+        It 'prints the queue count and CLIs plus a started line with the queue path and a ddd HH:mm time' {
+            $startTime = [datetime]'2026-06-16 22:27:00'
+            $queuePath = 'C:\Users\JTs\Documents\pipeline-cli\limitshift-stop-dev.json'
+
+            $output = (& {
+                Write-UiBannerDetails -TaskCount 11 -Clis @('gemini', 'codex', 'claude', 'gemini') -StartTime $startTime -QueuePath $queuePath
+            } 6>&1) | Out-String
+
+            # "N tasks queued · <clis>" — duplicate CLIs collapse to the unique set.
+            $queueLine = '11 tasks queued ' + [char]0x00B7 + ' gemini, codex, claude'
+            $output | Should -Match ([regex]::Escape($queueLine))
+
+            # started line: "started <ddd HH:mm> · <queue path>"
+            $output | Should -Match ('started ' + [regex]::Escape($startTime.ToString('ddd HH:mm')))
+            $output | Should -Match 'started [A-Za-z]{3} \d{2}:\d{2}'
+            $output | Should -Match ([regex]::Escape($queuePath))
+        }
+    }
+
+    Context 'Graceful stop (press s) — end-to-end via flag file' {
+        It 'stops cleanly after the current step and does not start the next task' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            # The stub (task 1's CLI) creates the stop flag during its run - i.e. "user pressed s".
+            $flagPath = Join-Path $root 'limitshift-queue\stop-after-step.flag'
+            $callLog = Join-Path $root 'calls.txt'
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+[System.IO.File]::AppendAllText('$($callLog -replace '\\','\\')', 'call' + [Environment]::NewLine)
+New-Item -ItemType File -Path '$($flagPath -replace '\\','\\')' -Force | Out-Null
+Write-Output '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; completionCheck = $false }
+                tasks = @(
+                    @{ name = 't1'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p1'; model = 'm' }
+                    @{ name = 't2'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p2'; model = 'm' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Stopping after the current step'
+                (@(Get-Content -LiteralPath $callLog | Where-Object { $_ })).Count | Should -Be 1
+                $run.Output | Should -Not -Match 'Task 2/2'
+                Test-Path -LiteralPath (Join-Path $root 'limitshift-queue\limitshift.lock') | Should -BeFalse
+                Test-Path -LiteralPath $flagPath | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
+    Context 'Session total time — end-to-end' {
+        It 'prints a total time line on a normal run' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            $geminiPath = Join-Path $binPath 'gemini.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"session_id":"g-1","response":"done"}'
+exit 0
+"@ | Set-Content -LiteralPath $geminiPath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 5; completionCheck = $false }
+                tasks = @(
+                    @{ name = 't1'; cli = 'gemini'; projectPath = $projectPath; prompt = 'p1'; model = 'm' }
+                )
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'Total time:'
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
     Context 'Read-QueueConfig' {
         It 'loads a minimal valid config' {
             $cfg = Read-QueueConfig -Path (Join-Path $script:__limitshiftConfigFixtures 'valid-minimal.json')

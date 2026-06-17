@@ -126,6 +126,15 @@ More autonomy means more risk — run only against Git-backed folders.
 | `-QueuePath <file>` / `--queue-path <file>` | Use a named or custom queue file (bare filename resolves from script folder) |
 | `-ShowRawOutput` / `--show-raw` | Print the raw CLI output to the console |
 
+### Stopping
+
+| Action | Result |
+| --- | --- |
+| **Ctrl+C** | Stops immediately, even mid-task. Use for emergency exits. |
+| **Press `s` (or `S`)** | Stops cleanly after the current step finishes. Ensures in-flight work is not lost. |
+
+When you press `s`, the status line switches to "stopping after this task…" as a reminder. Progress is saved, and you can resume the same command later to pick up where you left off.
+
 ## Where LimitShift saves state
 
 Everything lives in `limitshift-<queue-name>/` next to your queue (for the default file, `limitshift-queue/`): session ids (to resume the same conversation), `outputs/` (raw output per run), `status/` (`.done` / `.failed` markers), `runs.csv`, and a log.

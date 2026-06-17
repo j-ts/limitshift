@@ -210,7 +210,13 @@ From the LimitShift folder:
 ./limitshift.sh                     # Mac / Linux
 ```
 
-LimitShift prints each reply under a `✦ response` header. It may sit quietly for a minute while the AI works; that's normal, not frozen. Press **Ctrl+C** to stop at any time; your progress is saved, so you can resume later and it picks up where it left off. You'll see `Task N done` when a task finishes.
+LimitShift prints each reply under a `✦ response` header. It may sit quietly for a minute while the AI works; that's normal, not frozen.
+
+**To stop:**
+- **Ctrl+C** stops immediately, even in the middle of a task.
+- **Press `s` (or `S`)** to stop cleanly after the current step finishes. This ensures you don't lose in-flight work. A reminder line shows your stop request at the bottom while it finishes.
+
+Your progress is saved, so you can resume later and it picks up where it left off. You'll see `Task N done` when a task finishes.
 
 **Didn't go how you wanted?** Edit the task's `prompt` and run again. LimitShift notices the change and re-does just that task. Add a new task to refine further; finished tasks are skipped.
 

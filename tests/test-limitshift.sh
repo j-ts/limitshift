@@ -90,6 +90,69 @@ run_dry_run_state_test() {
   fi
 }
 
+run_total_time_unit_test() {
+  local desc="session total time line formats a fixed number of seconds"
+  local root="$TMP_ROOT/total-time-unit"
+  mkdir -p "$root/project"
+  source_runner_functions "$root"
+
+  UI_SESSION_TOTAL_SECONDS=3661
+  UI_SESSION_TOTAL_PRINTED=0
+
+  local out
+  out=$(ui_print_session_total_time 2>&1)
+
+  if printf '%s' "$out" | grep -q 'Total time: 1 hour 1 minute'; then
+    pass "$desc"
+  else
+    fail "$desc" "$out"
+  fi
+}
+
+run_total_time_e2e_test() {
+  local desc="normal run prints a total time line"
+  local root="$TMP_ROOT/total-time-e2e"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_gemini_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "total time",
+      "cli": "gemini",
+      "projectPath": "$project_dir",
+      "prompt": "do it",
+      "model": "m",
+      "completionCheck": false
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Total time:'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
 write_fake_codex() {
   local bin_dir="$1" log_file="$2"
   cat > "$bin_dir/codex" <<EOF
@@ -193,6 +256,18 @@ printf '%s\n' '{"result":"done\n\n[[TASK_COMPLETE]]","session_id":"fake-claude-s
 exit 0
 EOF
   chmod +x "$bin_dir/claude"
+}
+
+write_fake_gemini_success() {
+  local bin_dir="$1"
+  cat > "$bin_dir/gemini" <<'EOF'
+#!/usr/bin/env bash
+set -u
+cat > /dev/null
+printf '%s\n' '{"session_id":"g-1","response":"done"}'
+exit 0
+EOF
+  chmod +x "$bin_dir/gemini"
 }
 
 run_duplicate_name_test() {
@@ -2886,7 +2961,95 @@ EOF
   check "$desc: no-fallbacks unaffected" 0 "Config OK" -- bash "$SCRIPT" --queue "$queue_no_fb" --validate-only
 }
 
+run_total_time_unit_test() {
+  local desc="session total time line formats a fixed number of seconds"
+  local root="$TMP_ROOT/total-time-unit"
+  mkdir -p "$root/project"
+  source_runner_functions "$root"
+
+  UI_SESSION_TOTAL_SECONDS=3661
+  UI_SESSION_TOTAL_PRINTED=0
+
+  local out
+  out=$(ui_print_session_total_time 2>&1)
+
+  if printf '%s' "$out" | grep -q 'Total time: 1 hour 1 minute'; then
+    pass "$desc"
+  else
+    fail "$desc" "$out"
+  fi
+}
+
+run_total_time_e2e_test() {
+  local desc="normal run prints a total time line"
+  local root="$TMP_ROOT/total-time-e2e"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_gemini_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "total time",
+      "cli": "gemini",
+      "projectPath": "$project_dir",
+      "prompt": "do it",
+      "model": "m",
+      "completionCheck": false
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Total time:'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_banner_details_test() {
+  local desc="banner details prints the queue count, CLIs, and a started line with the queue path"
+  local root="$TMP_ROOT/banner-details"
+  mkdir -p "$root/project"
+  source_runner_functions "$root"
+
+  local queue_path="/home/u/pipeline-cli/limitshift-stop-dev.json"
+  local out
+  # Duplicate CLI (gemini) must collapse to the unique set; started time is passed pre-formatted.
+  out=$(ui_banner_details 11 "Tue 22:27" "$queue_path" gemini codex claude gemini 2>&1)
+
+  if printf '%s' "$out" | grep -q '11 tasks queued' &&
+     printf '%s' "$out" | grep -q 'gemini, codex, claude' &&
+     printf '%s' "$out" | grep -qE 'started [A-Za-z]{3} [0-9]{2}:[0-9]{2}' &&
+     printf '%s' "$out" | grep -qF "started Tue 22:27" &&
+     printf '%s' "$out" | grep -qF "$queue_path"; then
+    pass "$desc"
+  else
+    fail "$desc" "$out"
+  fi
+}
+
 run_dry_run_state_test
+run_banner_details_test
+run_total_time_unit_test
+run_total_time_e2e_test
 run_codex_limit_resume_test
 run_duplicate_name_test
 run_stdin_prompt_roundtrip_test
@@ -3148,6 +3311,117 @@ output:
 $out
 stdin:
 $stdin_content"
+  fi
+}
+
+run_total_time_unit_test() {
+  local desc="session total time line formats a fixed number of seconds"
+  local root="$TMP_ROOT/total-time-unit"
+  mkdir -p "$root/project"
+  source_runner_functions "$root"
+
+  UI_SESSION_TOTAL_SECONDS=3661
+  UI_SESSION_TOTAL_PRINTED=0
+
+  local out
+  out=$(ui_print_session_total_time 2>&1)
+
+  if printf '%s' "$out" | grep -q 'Total time: 1 hour 1 minute'; then
+    pass "$desc"
+  else
+    fail "$desc" "$out"
+  fi
+}
+
+run_total_time_e2e_test() {
+  local desc="normal run prints a total time line"
+  local root="$TMP_ROOT/total-time-e2e"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+
+  mkdir -p "$bin_dir" "$project_dir"
+  write_fake_gemini_success "$bin_dir"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": {
+    "stopOnError": true,
+    "maxRunsPerTask": 5,
+    "maxRetriesOnError": 0,
+    "limitWaitMinutes": 1,
+    "resetBufferMinutes": 0
+  },
+  "tasks": [
+    {
+      "name": "total time",
+      "cli": "gemini",
+      "projectPath": "$project_dir",
+      "prompt": "do it",
+      "model": "m",
+      "completionCheck": false
+    }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Total time:'; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_graceful_stop_after_step_test() {
+  local desc="graceful stop: stops after current step, skips task 2, releases lock"
+  local root="$TMP_ROOT/graceful-stop"
+  local project_dir="$root/project"
+  local bin_dir="$root/bin"
+  local queue_path="$root/queue.json"
+  local call_log="$root/calls.txt"
+  local flag="$root/limitshift-queue/stop-after-step.flag"
+
+  mkdir -p "$project_dir" "$bin_dir"
+  git -C "$project_dir" init -q
+
+  cat > "$bin_dir/gemini" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null
+echo call >> "$call_log"
+mkdir -p "$(dirname "$flag")"
+: > "$flag"
+printf '%s\n' '{"session_id":"g-1","response":"done\n\n[[TASK_COMPLETE]]"}'
+EOF
+  chmod +x "$bin_dir/gemini"
+
+  cat > "$queue_path" <<EOF
+{ "settings": { "completionCheck": false },
+  "tasks": [
+    { "name":"t1","cli":"gemini","projectPath":"$project_dir","prompt":"p1","model":"m" },
+    { "name":"t2","cli":"gemini","projectPath":"$project_dir","prompt":"p2","model":"m" } ] }
+EOF
+
+  local out exit_code call_count
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+  call_count=0
+  [ -f "$call_log" ] && call_count=$(grep -c '^call$' "$call_log" 2>/dev/null || true)
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -q 'Stopping after the current step' &&
+     [ "$call_count" = "1" ] &&
+     ! printf '%s' "$out" | grep -q 'Task 2/2' &&
+     [ ! -f "$root/limitshift-queue/limitshift.lock" ] &&
+     [ ! -f "$flag" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code call_count=$call_count lock=$([ -f "$root/limitshift-queue/limitshift.lock" ] && echo yes || echo no) flag=$([ -f "$flag" ] && echo yes || echo no)
+$out"
   fi
 }
 
@@ -3840,6 +4114,7 @@ $out"
 }
 
 run_cli_rotation_limit_switch_test
+run_graceful_stop_after_step_test
 run_cli_rotation_error_switch_test
 run_cli_rotation_blocked_no_switch_test
 run_cli_rotation_no_fallbacks_backcompat_test
