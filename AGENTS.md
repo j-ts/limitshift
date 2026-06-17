@@ -60,7 +60,9 @@ Useful optional fields:
 - `model` - a string or an array in preference order for model rotation on usage limits.
 - `effort` - CLI-specific reasoning effort; omit or set `null` when unsupported.
 - `completionCheck` - `true` for multi-step work that should resume until `[[TASK_COMPLETE]]`;
-  `false` for one-shot prompts.
+  `false` for one-shot prompts. With `completionCheck: true` the runner auto-injects the
+  `[[TASK_COMPLETE]]` / `[[TASK_BLOCKED]]` instructions (via `Get-TaskPromptWithCompletionMarker`),
+  so you do **not** need to add them to the `prompt` yourself.
 - `extraArgs` - CLI flags. Use array form for reliability.
 - `fallbacks` - backup runners for CLI rotation; see [CLI rotation (fallbacks)](#cli-rotation-fallbacks) below.
 
@@ -133,8 +135,9 @@ have no Ollama path here.
 - Chain outputs intentionally, for example: write `bugs.md`, then fix entries in `bugs.md`, then
   verify and mark each entry.
 - Ask agents to summarize changed files and verification commands in their final response.
-- Use `completionCheck: true` for tasks that may need multiple resumes; prompts should end by
-  emitting `[[TASK_COMPLETE]]` or `[[TASK_BLOCKED]] <reason>`.
+- Use `completionCheck: true` for tasks that may need multiple resumes. You do **not** need to add
+  the `[[TASK_COMPLETE]]` / `[[TASK_BLOCKED]] <reason>` instructions to the prompt — with
+  `completionCheck: true` the runner auto-injects them (via `Get-TaskPromptWithCompletionMarker`).
 
 ## CLI rotation (fallbacks)
 
