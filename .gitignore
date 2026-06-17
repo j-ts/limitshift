@@ -27,6 +27,9 @@ apply-bash-changes*.ps1
 run-all.ps1
 limitshift.sh-rebuilt.sh
 
+# Local docs (superpowers plans/specs — generated, not part of the public repo)
+docs/superpowers/
+
 # OS noise
 Thumbs.db
 .DS_Store
