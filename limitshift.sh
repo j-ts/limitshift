@@ -1315,136 +1315,12 @@ epoch_from_clock() {
   printf '%s\n' "$epoch"
 }
 
-parse_claude_reset_date() {
-  local raw="$1" epoch
-  local clean
-  clean=$(printf '%s' "$raw" | tr -s ' ')
-  if date -d "$clean" +%s >/dev/null 2>&1; then
-    epoch=$(date -d "$clean" +%s)
-  elif date -j -f "%b %d, %I:%M%p" "$clean" +%s >/dev/null 2>&1; then
-    epoch=$(date -j -f "%b %d, %I:%M%p" "$clean" +%s)
-  elif date -j -f "%b %d, %I%p" "$clean" +%s >/dev/null 2>&1; then
-    epoch=$(date -j -f "%b %d, %I%p" "$clean" +%s)
-  else
-    return 1
-  fi
-  local now; now=$(date +%s)
-  if [ "$epoch" -lt "$((now - 300))" ]; then
-    if date -d "today +1 year" >/dev/null 2>&1; then
-      epoch=$(date -d "@$epoch + 1 year" +%s)
-    else
-      epoch=$((epoch + 31536000))
-    fi
-  fi
-  printf '%s\n' "$epoch"
-}
-
-get_claude_usage() {
-  write_step "Checking Claude usage"
-  local usage_out exit_code
-  usage_out=$(claude -p "/usage" 2>&1)
-  exit_code=$?
-  printf '%s\n' "$usage_out" > "$USAGE_PATH"
-  if [ "$exit_code" -ne 0 ]; then
-    echo "ERROR: Claude /usage failed with exit code $exit_code." >&2
-    echo "$usage_out" >&2
-    exit 1
-  fi
-  local session_line week_line
-  session_line=$(printf '%s\n' "$usage_out" | grep -i "Current session:")
-  week_line=$(printf '%s\n' "$usage_out" | grep -i "Current week (all models):")
-  if [ -z "$session_line" ] || [ -z "$week_line" ]; then
-    echo "ERROR: Could not parse Claude usage output." >&2
-    echo "$usage_out" >&2
-    exit 1
-  fi
-  SESSION_PERCENT=$(printf '%s\n' "$session_line" | sed -E 's/.*Current session:[[:space:]]*([0-9]+)%.*/\1/i')
-  local session_reset_raw session_tz_raw
-  SESSION_RESET=""; SESSION_TIMEZONE=""
-  if printf '%s\n' "$session_line" | grep -q -i "resets"; then
-    session_reset_raw=$(printf '%s\n' "$session_line" | sed -E 's/.*resets[[:space:]]+([^(]+).*/\1/i')
-    session_reset_raw=$(echo "$session_reset_raw" | awk '{$1=$1;print}')
-    session_tz_raw=$(printf '%s\n' "$session_line" | sed -E 's/.*resets[[:space:]]+[^(]+\(([^)]+)\).*/\1/i')
-    session_tz_raw=$(echo "$session_tz_raw" | awk '{$1=$1;print}')
-    SESSION_RESET=$(parse_claude_reset_date "$session_reset_raw")
-    SESSION_TIMEZONE="$session_tz_raw"
-  fi
-  WEEK_PERCENT=$(printf '%s\n' "$week_line" | sed -E 's/.*Current week.*:[[:space:]]*([0-9]+)%.*/\1/i')
-  local week_reset_raw week_tz_raw
-  WEEK_RESET=""; WEEK_TIMEZONE=""
-  if printf '%s\n' "$week_line" | grep -q -i "resets"; then
-    week_reset_raw=$(printf '%s\n' "$week_line" | sed -E 's/.*resets[[:space:]]+([^(]+).*/\1/i')
-    week_reset_raw=$(echo "$week_reset_raw" | awk '{$1=$1;print}')
-    week_tz_raw=$(printf '%s\n' "$week_line" | sed -E 's/.*resets[[:space:]]+[^(]+\(([^)]+)\).*/\1/i')
-    week_tz_raw=$(echo "$week_tz_raw" | awk '{$1=$1;print}')
-    WEEK_RESET=$(parse_claude_reset_date "$week_reset_raw")
-    WEEK_TIMEZONE="$week_tz_raw"
-  fi
-  if [ -z "$SESSION_RESET" ] && [ "$SESSION_PERCENT" -ge 100 ]; then
-    echo "ERROR: Could not parse Claude session reset time from /usage output." >&2
-    echo "$usage_out" >&2
-    exit 1
-  fi
-  if [ -z "$WEEK_RESET" ] && [ "$WEEK_PERCENT" -ge 100 ]; then
-    echo "ERROR: Could not parse Claude weekly reset time from /usage output." >&2
-    echo "$usage_out" >&2
-    exit 1
-  fi
-  echo "Claude usage command exit code: $exit_code"
-  echo "Session usage: $SESSION_PERCENT%"
-  if [ -n "$SESSION_RESET" ]; then
-    echo "Session reset: $SESSION_RESET ($SESSION_TIMEZONE)"
-  else
-    echo "Session reset: N/A"
-  fi
-  echo "Week usage: $WEEK_PERCENT%"
-  if [ -n "$WEEK_RESET" ]; then
-    echo "Week reset: $WEEK_RESET ($WEEK_TIMEZONE)"
-  else
-    echo "Week reset: N/A"
-  fi
-}
-
-wait_until_claude_ready() {
-  local require_fresh="$1"
-  while true; do
-    get_claude_usage
-    local session_ready=0
-    if [ "$require_fresh" -eq 1 ]; then
-      if [ "$SESSION_PERCENT" -le "$FRESH_SESSION_THRESHOLD_PERCENT" ]; then session_ready=1; fi
-    else
-      if [ "$SESSION_PERCENT" -lt 100 ]; then session_ready=1; fi
-    fi
-    local week_ready=0
-    if [ "$WEEK_PERCENT" -lt 100 ]; then week_ready=1; fi
-    if [ "$session_ready" -eq 1 ] && [ "$week_ready" -eq 1 ]; then
-      write_step "Claude usage is available"
-      echo "Current session usage: $SESSION_PERCENT%"
-      echo "Current weekly usage: $WEEK_PERCENT%"
-      return
-    fi
-    local reset_to_wait=""
-    if [ "$WEEK_PERCENT" -ge 100 ]; then
-      reset_to_wait="$WEEK_RESET"
-    elif [ "$SESSION_PERCENT" -ge 100 ] || { [ "$require_fresh" -eq 1 ] && [ "$SESSION_PERCENT" -gt "$FRESH_SESSION_THRESHOLD_PERCENT" ]; }; then
-      reset_to_wait="$SESSION_RESET"
-    fi
-    if [ -z "$reset_to_wait" ]; then
-      echo "ERROR: Claude usage is not ready, but no reset time could be determined." >&2
-      exit 1
-    fi
-    local wake_time=$((reset_to_wait + RESET_BUFFER_MINUTES * 60))
-    local now; now=$(date +%s)
-    local sleep_seconds=$((wake_time - now))
-    if [ "$sleep_seconds" -gt 0 ]; then
-      ui_rest_with_summary "claude" "$wake_time"
-    else
-      ui_color "$UI_DIM" "  $GLYPH_DOT reset time already passed; re-checking in ${POLL_SECONDS_AFTER_RESET_PASSED}s"
-      printf '\n'
-      sleep "$POLL_SECONDS_AFTER_RESET_PASSED"
-    fi
-  done
-}
+# NOTE: As of 1.2.x the bash runner mirrors limitshift.ps1 and no longer calls `claude -p "/usage"`
+# as a pre-check. Anthropic's `/usage` output changed for subscription accounts (a one-line notice
+# instead of percentages) and is going to bifurcate further when the Agent-SDK / `claude -p` credit
+# pool ships separately. Limit handling is now entirely reactive: classify the CLI's response via
+# `$LimitPatterns`, then rotate / wait. Reset times come from the limit-error text via
+# `parse_reset_from_error`, falling back to `settings.limitWaitMinutes`.
 
 parse_reset_from_error() {
   local error_text="$1" match
@@ -1492,15 +1368,11 @@ parse_reset_from_error() {
 }
 
 get_runner_reset_epoch() {
-  local cli="$1" error_text="$2" wait_mins="$3" claude_usage="$4"
-  if [ "$cli" = "claude" ] && [ -n "$claude_usage" ]; then
-    local wr
-    wr=$(printf '%s' "$claude_usage" | grep -o 'WeekReset:[^|]*' | cut -d: -f2)
-    if [ -n "$wr" ]; then printf '%s\n' "$wr"; return; fi
-    local sr
-    sr=$(printf '%s' "$claude_usage" | grep -o 'SessionReset:[^|]*' | cut -d: -f2)
-    if [ -n "$sr" ]; then printf '%s\n' "$sr"; return; fi
-  fi
+  # $cli is kept on the signature for future CLI-specific reset extractors; today every CLI
+  # follows the same shape: try to parse a reset hint out of the error text, otherwise wait the
+  # configured limitWaitMinutes. The 4th arg (formerly claude_usage) is no longer consulted.
+  local cli="$1" error_text="$2" wait_mins="$3"
+  : "$cli"
   parse_reset_from_error "$error_text"
   if [ -n "$R_RESET" ]; then printf '%s\n' "$R_RESET"; return; fi
   local now
@@ -1530,11 +1402,10 @@ select_next_runner() {
 }
 
 wait_for_limit_reset() {
+  # Single code path for every CLI as of 1.2.x: parse a reset hint from the error text, otherwise
+  # wait the configured limitWaitMinutes. Previously claude went through a separate `/usage` poll
+  # that no longer returns parseable data on subscription accounts.
   local cli="$1" error_text="$2" settings_wait="$3"
-  if [ "$cli" = "claude" ]; then
-    wait_until_claude_ready 1
-    return
-  fi
   parse_reset_from_error "$error_text"
   local reset_time="$R_RESET"
   if [ -z "$reset_time" ]; then
@@ -1971,15 +1842,25 @@ parse_cli_output() {
   local cli="$1" output="$2" exit_code="$3"
   local combined="${4:-$output}"
   R_OK=1; R_IS_LIMIT=0; R_TEXT=""; R_SESSION_ID=""; R_ERROR_TEXT=""
+  # Claude-only recoverable signals (see run-loop handling).
+  R_SESSION_LOST=0; R_SLASH_REJECTED=0
 
   local limit_regex=""
   case "$cli" in
-    claude) limit_regex='(you'\''ve hit your .{0,40}limit|usage limit)' ;;
+    # Anthropic's interactive-subscription limit wording, plus credit-pool wording that is likely
+    # to appear when `claude -p` / Agent-SDK moves to a separate monthly credit. Permissive on
+    # purpose — only consulted when the run already failed.
+    claude) limit_regex='(you'\''ve hit your .{0,40}limit|usage limit|out of credits?|credits? (exceeded|exhausted|remaining)|monthly credit|insufficient credits|agent sdk.{0,30}limit|429|too many requests)' ;;
     codex)  limit_regex='(usage limit|rate limit|too many requests|try again (at|in)|quota)' ;;
     gemini) limit_regex='(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)' ;;
     agy)    limit_regex='(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))' ;;
     copilot) limit_regex='(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)' ;;
   esac
+
+  # Claude-specific patterns for state-file drift (recoverable) and slash-command rejection
+  # (non-retriable). Match both R_TEXT (the JSON `result` field) and the raw output below.
+  local claude_session_lost_regex='No conversation found with session ID'
+  local claude_slash_rejected_regex='Unknown command:[[:space:]]*/'
 
   case "$cli" in
     claude)
@@ -1988,6 +1869,8 @@ parse_cli_output() {
       if [ -z "$clean_json" ] || ! printf '%s' "$clean_json" | jq empty >/dev/null 2>&1; then
         R_OK=0
         if printf '%s' "$output" | grep -qiE "$limit_regex" >/dev/null 2>&1; then R_IS_LIMIT=1; fi
+        if printf '%s' "$output" | grep -qiE "$claude_session_lost_regex" >/dev/null 2>&1; then R_SESSION_LOST=1; fi
+        if printf '%s' "$output" | grep -qiE "$claude_slash_rejected_regex" >/dev/null 2>&1; then R_SLASH_REJECTED=1; fi
         R_TEXT="$output"; R_ERROR_TEXT="$output"; return
       fi
       R_TEXT=$(printf '%s' "$clean_json" | jq -r '.result // empty')
@@ -1999,6 +1882,12 @@ parse_cli_output() {
         if printf '%s' "$R_TEXT" | grep -qiE "$limit_regex" >/dev/null 2>&1; then R_IS_LIMIT=1; fi
         R_ERROR_TEXT="$R_TEXT"
       fi
+      # The two recoverable signals may surface in either the JSON `result` field or in raw output
+      # that bypassed the JSON envelope (claude failed before producing JSON).
+      if printf '%s' "$R_TEXT" | grep -qiE "$claude_session_lost_regex" >/dev/null 2>&1 \
+        || printf '%s' "$output" | grep -qiE "$claude_session_lost_regex" >/dev/null 2>&1; then R_SESSION_LOST=1; fi
+      if printf '%s' "$R_TEXT" | grep -qiE "$claude_slash_rejected_regex" >/dev/null 2>&1 \
+        || printf '%s' "$output" | grep -qiE "$claude_slash_rejected_regex" >/dev/null 2>&1; then R_SLASH_REJECTED=1; fi
       ;;
     codex)
       local clean_jsonl
@@ -2310,7 +2199,6 @@ What is in here:
   status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
   runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
   limitshift-log.txt    The full runner transcript.
-  claude-usage-last.txt The last Claude /usage report.
 
 Re-running:
   Delete this whole folder to start completely from scratch.
@@ -2400,14 +2288,10 @@ SESSION_STATE_PATH="$RUNNER_STATE_PATH/sessions"
 OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"
 STATUS_STATE_PATH="$RUNNER_STATE_PATH/status"
 LOG_PATH="$RUNNER_STATE_PATH/limitshift-log.txt"
-USAGE_PATH="$RUNNER_STATE_PATH/claude-usage-last.txt"
 STOP_FLAG="$RUNNER_STATE_PATH/stop-after-step.flag"
 RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
 STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
 RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status,cli,model"
-
-FRESH_SESSION_THRESHOLD_PERCENT=0
-POLL_SECONDS_AFTER_RESET_PASSED=60
 
 read_queue_config
 
@@ -2477,7 +2361,7 @@ run_queue() {
   done
 
   local i=0 taskNumber runCount errorRetryCount mustWaitForFreshSession=0
-  local savedSessionId sessionId result_ok result_is_limit result_text result_session_id result_error_text
+  local savedSessionId sessionId result_ok result_is_limit result_text result_session_id result_error_text result_session_lost result_slash_rejected
   local taskCompletionCheck stallCount previousNoMarkerText hasPreviousNoMarker currentText
   local taskModels modelCount currentModelIndex currentModel nextModelIndex m
   local recoveryReason="" recoveryOutputTail=""
@@ -2575,11 +2459,13 @@ run_queue() {
 
       if stop_requested; then break; fi
 
+      # As of 1.2.x the runner no longer pre-checks `claude -p "/usage"` — Anthropic changed the
+      # subscription output and the credit pool is moving. Limits are detected reactively from
+      # the CLI's response. mustWaitForFreshSession is kept on the state machine for symmetry but
+      # is now a no-op for cloud claude too.
       local task_cli
       task_cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
-      if [ "$task_cli" = "claude" ] && ! is_ollama_task "$i" && [ "$DRY_RUN" -eq 0 ]; then
-        wait_until_claude_ready "$mustWaitForFreshSession"
-      fi
+      : "$task_cli" "$mustWaitForFreshSession"
 
       if [ "$modelCount" -gt 0 ]; then
         currentModel="${taskModels[$currentModelIndex]}"
@@ -2620,6 +2506,8 @@ run_queue() {
       result_text="$R_TEXT"
       result_session_id="$R_SESSION_ID"
       result_error_text="$R_ERROR_TEXT"
+      result_session_lost="${R_SESSION_LOST:-0}"
+      result_slash_rejected="${R_SLASH_REJECTED:-0}"
 
       local runStatus runExit
       if [ "$result_is_limit" -eq 1 ]; then
@@ -2647,6 +2535,34 @@ run_queue() {
         rm -f "$(get_task_session_file_path "$i")"
         write_step "Task $taskNumber: installed gemini rejects --resume; retrying with continuation prompt only"
         continue
+      fi
+
+      # Claude-only: state-file drift — the saved session id is no longer in claude's local
+      # conversation store ("No conversation found with session ID: ..."). Drop the id, refund
+      # the run-budget tick, and let the next iteration start fresh on the same runner.
+      if [ "$task_cli" = "claude" ] && [ "$result_session_lost" -eq 1 ]; then
+        rm -f "$(get_task_session_file_path "$i")"
+        write_step "Task $taskNumber: claude's saved session id is no longer in claude's conversation store; starting a fresh session"
+        if [ "$runCount" -gt 0 ]; then runCount=$((runCount - 1)); fi
+        continue
+      fi
+
+      # Claude-only: `claude -p` rejected the prompt as a slash command. Flag for human;
+      # never retry — the same prompt would just fail the same way.
+      if [ "$task_cli" = "claude" ] && [ "$result_slash_rejected" -eq 1 ]; then
+        local block_reason="claude -p rejected the prompt as a slash command (Unknown command in output). Edit the task prompt so it does not begin with a leading slash word; claude -p interprets that as a slash command, not as plain text."
+        save_task_failed_marker "$i" "$block_reason"
+        save_task_needs_human_marker "$i" "$block_reason"
+        needsHumanCount=$((needsHumanCount + 1))
+        printf '\n'
+        ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber needs human review: $block_reason"
+        printf '\n'
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber blocked: $block_reason" >&2
+          exit 1
+        fi
+        failedCount=$((failedCount + 1))
+        break
       fi
 
       if [ "$result_is_limit" -eq 1 ]; then
@@ -2927,22 +2843,9 @@ run_queue() {
         currentModel=""
       fi
 
-      # Runner-scoped claude pre-check (spec 8). For a cloud-claude runner WITH fallbacks we must
-      # never block: query usage, and if this runner is capped, record it as limited and re-select
-      # (the next pass rotates to a fallback instead of waiting/aborting). A local-Ollama claude
-      # runner never queries the cloud /usage endpoint. This runs before the run-budget increment
-      # because a pre-check rotation is not a CLI invocation (spec 5.8: waits/probes do not count).
-      if [ "$fb_active_cli" = "claude" ] && ! is_ollama_runner "$i" "$currentRunnerIndex" && [ "$DRY_RUN" -eq 0 ]; then
-        get_claude_usage
-        if [ "$SESSION_PERCENT" -ge 100 ] || [ "$WEEK_PERCENT" -ge 100 ]; then
-          local fb_pc_usage="WeekReset:${WEEK_RESET}|SessionReset:${SESSION_RESET}"
-          limitedUntil[$currentRunnerIndex]=$(get_runner_reset_epoch "claude" "" "$LIMIT_WAIT_MINUTES" "$fb_pc_usage")
-          runnerReasons[$currentRunnerIndex]="limited"
-          write_step "Task ${taskNumber}: claude usage is capped (pre-check); rotating to the next runner"
-          continue
-        fi
-        mustWaitForFreshSession=0
-      fi
+      # The cloud-claude `/usage` pre-check was removed in 1.2.x — see top-of-file note.
+      # Rotation on cap now happens reactively from the limit signal in the CLI's response.
+      mustWaitForFreshSession=0
 
       runCount=$((runCount + 1))
       if [ "$runCount" -gt "$MAX_RUNS_PER_TASK" ]; then
@@ -2996,6 +2899,8 @@ run_queue() {
       result_text="$R_TEXT"
       result_session_id="$R_SESSION_ID"
       result_error_text="$R_ERROR_TEXT"
+      result_session_lost="${R_SESSION_LOST:-0}"
+      result_slash_rejected="${R_SLASH_REJECTED:-0}"
 
       local runStatus runExit
       if [ "$result_is_limit" -eq 1 ]; then runStatus="Limit"
@@ -3022,6 +2927,34 @@ run_queue() {
         continue
       fi
 
+      # Claude-only: state-file drift on the active runner. Drop the id, refund the budget tick,
+      # retry on the same runner. Never rotate to a fallback — it's not a CLI failure.
+      if [ "$fb_active_cli" = "claude" ] && [ "$result_session_lost" -eq 1 ]; then
+        rm -f "$(get_task_session_file_path "$i")"
+        write_step "Task $taskNumber: claude's saved session id is no longer in claude's conversation store; starting a fresh session"
+        if [ "$runCount" -gt 0 ]; then runCount=$((runCount - 1)); fi
+        continue
+      fi
+
+      # Claude-only: `claude -p` rejected the prompt as a slash command. Flag for human;
+      # never rotate to a fallback (the same prompt would just fail on the next tool too if it
+      # peeks at the leading slash).
+      if [ "$fb_active_cli" = "claude" ] && [ "$result_slash_rejected" -eq 1 ]; then
+        local block_reason="claude -p rejected the prompt as a slash command (Unknown command in output). Edit the task prompt so it does not begin with a leading slash word; claude -p interprets that as a slash command, not as plain text."
+        save_task_failed_marker "$i" "$block_reason"
+        save_task_needs_human_marker "$i" "$block_reason"
+        needsHumanCount=$((needsHumanCount + 1))
+        printf '\n'
+        ui_color "$UI_RED" "  $GLYPH_ERR Task $taskNumber needs human review: $block_reason"
+        printf '\n'
+        if [ "$STOP_ON_ERROR" = "true" ]; then
+          echo "ERROR: Task $taskNumber blocked: $block_reason" >&2
+          exit 1
+        fi
+        failedCount=$((failedCount + 1))
+        break
+      fi
+
       if [ "$result_is_limit" -eq 1 ]; then
         if [ "$fb_runner_model_count" -gt 1 ] && [ "$fb_cur_model_idx" -lt "$((fb_runner_model_count - 1))" ]; then
           local fb_next_model_idx=$((fb_cur_model_idx + 1))
@@ -3034,11 +2967,7 @@ run_queue() {
           runnerModelIndices[$currentRunnerIndex]=0
           save_task_runner_model_index "$i" "$currentRunnerIndex" "0"
         fi
-        local fb_claude_usage=""
-        if [ "$fb_active_cli" = "claude" ]; then
-          fb_claude_usage=$(cat "$USAGE_PATH" 2>/dev/null || true)
-        fi
-        limitedUntil[$currentRunnerIndex]=$(get_runner_reset_epoch "$fb_active_cli" "$result_error_text" "$LIMIT_WAIT_MINUTES" "$fb_claude_usage")
+        limitedUntil[$currentRunnerIndex]=$(get_runner_reset_epoch "$fb_active_cli" "$result_error_text" "$LIMIT_WAIT_MINUTES")
         runnerReasons[$currentRunnerIndex]="limited"
         continue
       fi

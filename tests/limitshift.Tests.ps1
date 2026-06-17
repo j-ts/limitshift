@@ -618,18 +618,6 @@ exit 0
             ($r - (Get-Date)).TotalMinutes | Should -BeGreaterThan 25
             ($r - (Get-Date)).TotalMinutes | Should -BeLessThan 35
         }
-        It 'uses SessionReset for Claude when present' {
-            $now = Get-Date
-            $usage = @{ SessionReset = $now.AddMinutes(45) }
-            $r = Get-RunnerResetTime -Cli 'claude' -ErrorText 'rate limit' -LimitWaitMinutes 30 -ClaudeUsage $usage
-            $r | Should -Be $usage.SessionReset
-        }
-        It 'uses WeekReset for Claude when present' {
-            $now = Get-Date
-            $usage = @{ WeekReset = $now.AddDays(1) }
-            $r = Get-RunnerResetTime -Cli 'claude' -ErrorText 'rate limit' -LimitWaitMinutes 30 -ClaudeUsage $usage
-            $r | Should -Be $usage.WeekReset
-        }
     }
 
     Context 'CLI rotation (fallbacks) — runner selection' {
@@ -1728,7 +1716,7 @@ exit 0
             finally { $env:PATH = $oldPath }
         }
 
-        It 'a capped cloud-claude runner rotates to a fallback at the pre-check instead of waiting/aborting (spec 8)' {
+        It 'a capped cloud-claude runner rotates to a fallback reactively when claude returns a limit signal' {
             $root = New-TestRoot
             $projectPath = Join-Path $root 'project'
             $binPath = Join-Path $root 'bin'
@@ -1736,22 +1724,14 @@ exit 0
             New-Item -ItemType Directory -Path $binPath -Force | Out-Null
             git -C $projectPath init -q
 
-            # Week is capped with a reset more than 24h out. The OLD blocking pre-check would
-            # refuse to wait (>24h) and abort the run; the spec 8 pre-check must instead mark the
-            # claude runner limited and rotate to the codex fallback without waiting.
-            $weekReset = (Get-Date).AddHours(48).ToString('MMM d, h:mmtt', [System.Globalization.CultureInfo]::InvariantCulture)
-            $claudeRan = Join-Path $root 'claude-ran.txt'
+            # 1.2.x: the `/usage` pre-check is gone. The runner instead lets claude run, and when
+            # claude returns a limit signal in its response, rotates to the fallback. Reset comes
+            # from a `try again at` hint in the error text (or settings.limitWaitMinutes).
             $claudePath = Join-Path $binPath 'claude.ps1'
             @"
-if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
-    Write-Output 'Current session: 20% used'
-    Write-Output 'Current week (all models): 100% used, resets $weekReset (UTC)'
-    exit 0
-}
 `$null = [Console]::In.ReadToEnd()
-[System.IO.File]::AppendAllText('$($claudeRan -replace '\\','\\')', 'ran' + [Environment]::NewLine)
-Write-Output '{"result":"claude should not have run","session_id":"s-1","is_error":false}'
-exit 0
+Write-Output '{"result":"You''ve hit your usage limit. Try again in 5s.","session_id":"s-1","is_error":true}'
+exit 1
 "@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
 
             $codexPath = Join-Path $binPath 'codex.ps1'
@@ -1768,7 +1748,7 @@ exit 0
             Write-TestQueue -Path $queuePath -Config @{
                 settings = @{ stopOnError = $true; maxRunsPerTask = 5; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
                 tasks = @(
-                    @{ name = 'claude-precheck-switch'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'
+                    @{ name = 'claude-limit-rotate'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'
                        fallbacks = @(@{ cli = 'codex'; model = 'c-1' }) }
                 )
             }
@@ -1780,8 +1760,100 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'switching to codex'
                 $run.Output | Should -Match 'Task 1 done'
-                # The capped claude runner must never have executed the task.
-                Test-Path -LiteralPath $claudeRan | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'claude session-lost: drops the stale session id, retries as New on the same runner, does not rotate' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            # claude call 1: succeeds, registers session id "s-stale".
+            # claude call 2 (Resume): returns the "No conversation found with session ID" error
+            #                        — runner deletes the saved id, refunds the run-budget tick,
+            #                        and the next iteration starts a New session.
+            # claude call 3 (New, fresh GUID): succeeds with [[TASK_COMPLETE]].
+            $counterFile = Join-Path $root 'claude-counter.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+`$counterPath = '$($counterFile -replace '\\','\\')'
+`$n = 0
+if (Test-Path -LiteralPath `$counterPath) { `$n = [int](Get-Content -LiteralPath `$counterPath -Raw) }
+`$n++
+Set-Content -LiteralPath `$counterPath -Value `$n
+if (`$n -eq 1) {
+    Write-Output '{"result":"started","session_id":"s-stale","is_error":false}'
+    exit 0
+}
+if (`$n -eq 2) {
+    Write-Output '{"result":"No conversation found with session ID: s-stale","session_id":null,"is_error":true}'
+    exit 1
+}
+Write-Output '{"result":"done\n[[TASK_COMPLETE]]","session_id":"s-fresh","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 4; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'session-lost'; cli = 'claude'; model = 'sonnet'; projectPath = $projectPath; prompt = 'do it'; completionCheck = $true })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'no longer in claude'
+                $run.Output | Should -Match 'Task 1 done'
+                # Did NOT need to be flagged for a human review.
+                $needsHumanMarker = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                Test-Path -LiteralPath $needsHumanMarker | Should -BeFalse
+            }
+            finally { $env:PATH = $oldPath }
+        }
+
+        It 'claude slash-command rejection: flags the task for a human and stops, never retries' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binPath = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binPath -Force | Out-Null
+
+            # claude returns the "Unknown command: /goal" rejection that claude -p emits when the
+            # prompt starts with a slash word. The runner must stop the task with a human-review
+            # marker on the FIRST occurrence — no retries.
+            $callCounter = Join-Path $root 'claude-calls.txt'
+            $claudePath = Join-Path $binPath 'claude.ps1'
+            @"
+`$null = [Console]::In.ReadToEnd()
+[System.IO.File]::AppendAllText('$($callCounter -replace '\\','\\')', 'ran' + [Environment]::NewLine)
+Write-Output '{"result":"Unknown command: /goal, did you mean /goal?","session_id":"s-1","is_error":true}'
+exit 1
+"@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
+
+            $queuePath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $queuePath -Config @{
+                settings = @{ stopOnError = $false; maxRunsPerTask = 5; maxRetriesOnError = 3; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'slash-rejected'; cli = 'claude'; model = 'sonnet'; projectPath = $projectPath; prompt = '/goal: do the thing'; completionCheck = $true })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binPath;$oldPath"
+                $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
+                $run.ExitCode | Should -Be 0
+                $run.Output | Should -Match 'needs human review'
+                $run.Output | Should -Match 'slash command'
+                # Exactly ONE claude invocation — no retries, no rotation.
+                $calls = @(if (Test-Path -LiteralPath $callCounter) { Get-Content -LiteralPath $callCounter })
+                $calls.Count | Should -Be 1
+                $needsHumanMarker = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                Test-Path -LiteralPath $needsHumanMarker | Should -BeTrue
             }
             finally { $env:PATH = $oldPath }
         }

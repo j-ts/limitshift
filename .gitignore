@@ -11,12 +11,21 @@ limitshift-queue*.json
 ai-run-queue*.json
 !limitshift-queue.example*.json
 !limitshift-queue.schema.json
+# Non-standard queue filenames (project-specific, contain local paths and private prompts)
+limitshift-surgmesh*.json
+limitshift-surgmesh*.tasklist.md
+limitshift-surgmesh*.plan.md
+career-ops_*.json
 
 # Private local planning and predecessor scripts
 run-gemini-phase1.ps1
 phase1-automation-tasks.ps1
 RELEASE-PLAN.md
 copilot-integration-verify.md
+# Working / scratch scripts not for the repo
+apply-bash-changes*.ps1
+run-all.ps1
+limitshift.sh-rebuilt.sh
 
 # OS noise
 Thumbs.db

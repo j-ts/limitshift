@@ -80,16 +80,12 @@ if (-not $LoadFunctionsOnly) {
     if (Test-Path -LiteralPath $StopFlagPath) {
         Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction SilentlyContinue
     }
-    $UsagePath = Join-Path $RunnerStatePath "claude-usage-last.txt"
     $RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
     $StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
     $LockPath = Join-Path $RunnerStatePath 'limitshift.lock'
 }
 
 $RunsCsvHeader = "timestamp,task,run,mode,exit,status,cli,model"
-
-$FreshSessionThresholdPercent = 0
-$PollSecondsAfterResetPassed = 60
 
 $TaskCompleteMarker = "[[TASK_COMPLETE]]"
 $TaskBlockedMarker  = "[[TASK_BLOCKED]]"
@@ -763,7 +759,6 @@ What is in here:
   status/     Per-task markers: task-NN.done (finished) and task-NN.failed (blocked/failed).
   runs.csv    One line per CLI run: timestamp, task, run, mode (New/Resume), exit, status.
   limitshift-log.txt    The full runner transcript.
-  claude-usage-last.txt The last Claude /usage report.
 
 Re-running:
   Delete this whole folder to start completely from scratch.
@@ -1508,182 +1503,14 @@ function Save-TaskDoneMarker {
     Clear-TaskRecoveryAttempts -TaskIndex $TaskIndex
 }
 
-function Convert-ClaudeResetTextToDateTime {
-    param([string]$ResetText)
-
-    $clean = ($ResetText -replace "\s+", " ").Trim()
-    $year = (Get-Date).Year
-    $withYear = "$clean $year"
-    $culture = [System.Globalization.CultureInfo]::InvariantCulture
-
-    $formats = @(
-        "MMM d, htt yyyy",
-        "MMM d, h:mmtt yyyy",
-        "MMM dd, htt yyyy",
-        "MMM dd, h:mmtt yyyy"
-    )
-
-    foreach ($format in $formats) {
-        try {
-            $parsed = [datetime]::ParseExact(
-                $withYear,
-                $format,
-                $culture,
-                [System.Globalization.DateTimeStyles]::None
-            )
-
-            if ($parsed -lt (Get-Date).AddMinutes(-5)) {
-                $parsed = $parsed.AddYears(1)
-            }
-
-            return $parsed
-        }
-        catch {
-        }
-    }
-
-    return $null
-}
-
-function Get-ClaudeUsage {
-    Write-Step "Checking Claude usage"
-
-    $usageOutput = & claude -p "/usage" 2>&1
-    $usageExitCode = $LASTEXITCODE
-    $usageText = $usageOutput | Out-String
-
-    [System.IO.File]::WriteAllText($UsagePath, $usageText, [System.Text.UTF8Encoding]::new($false))
-
-    if ($usageExitCode -ne 0) {
-        throw "Claude /usage failed with exit code $usageExitCode.`n$usageText"
-    }
-
-    $sessionMatch = [regex]::Match(
-        $usageText,
-        'Current session:\s*(\d+)% used(?:[^\r\n]*?resets\s*([^\r\n(]+)\s*\(([^)]+)\))?',
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    )
-
-    if (-not $sessionMatch.Success) {
-        throw "Could not parse Claude session usage from /usage output.`n$usageText"
-    }
-
-    $weekMatch = [regex]::Match(
-        $usageText,
-        'Current week \(all models\):\s*(\d+)% used(?:[^\r\n]*?resets\s*([^\r\n(]+)\s*\(([^)]+)\))?',
-        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
-    )
-
-    if (-not $weekMatch.Success) {
-        throw "Could not parse Claude weekly usage from /usage output.`n$usageText"
-    }
-
-    $sessionPercent = [int]$sessionMatch.Groups[1].Value
-    $sessionResetText = if ($sessionMatch.Groups[2].Success) { $sessionMatch.Groups[2].Value.Trim() } else { $null }
-    $sessionTimezone = if ($sessionMatch.Groups[3].Success) { $sessionMatch.Groups[3].Value.Trim() } else { $null }
-    $sessionReset = if ($null -ne $sessionResetText) { Convert-ClaudeResetTextToDateTime -ResetText $sessionResetText } else { $null }
-
-    $weekPercent = [int]$weekMatch.Groups[1].Value
-    $weekResetText = if ($weekMatch.Groups[2].Success) { $weekMatch.Groups[2].Value.Trim() } else { $null }
-    $weekTimezone = if ($weekMatch.Groups[3].Success) { $weekMatch.Groups[3].Value.Trim() } else { $null }
-    $weekReset = if ($null -ne $weekResetText) { Convert-ClaudeResetTextToDateTime -ResetText $weekResetText } else { $null }
-
-    if ($null -eq $sessionReset -and $sessionPercent -ge 100) {
-        throw "Could not parse Claude session reset time from /usage output.`n$usageText"
-    }
-
-    if ($null -eq $weekReset -and $weekPercent -ge 100) {
-        throw "Could not parse Claude weekly reset time from /usage output.`n$usageText"
-    }
-
-    return @{
-        Text            = $usageText
-        ExitCode        = $usageExitCode
-        SessionPercent  = $sessionPercent
-        SessionReset    = $sessionReset
-        SessionTimezone = $sessionTimezone
-        WeekPercent     = $weekPercent
-        WeekReset       = $weekReset
-        WeekTimezone    = $weekTimezone
-    }
-}
-
-function Test-ClaudeSessionExhausted {
-    param($Usage)
-
-    return ($null -ne $Usage.SessionPercent -and $Usage.SessionPercent -ge 100)
-}
-
-function Test-ClaudeWeekExhausted {
-    param($Usage)
-
-    return ($null -ne $Usage.WeekPercent -and $Usage.WeekPercent -ge 100)
-}
-
-function Get-ClaudeResetToWaitFor {
-    param(
-        $Usage,
-        [switch]$RequireFreshSession
-    )
-
-    if (Test-ClaudeWeekExhausted -Usage $Usage) {
-        return $Usage.WeekReset
-    }
-
-    if (Test-ClaudeSessionExhausted -Usage $Usage) {
-        return $Usage.SessionReset
-    }
-
-    if ($RequireFreshSession -and $Usage.SessionPercent -gt $FreshSessionThresholdPercent) {
-        return $Usage.SessionReset
-    }
-
-    return $null
-}
-
-function Wait-UntilClaudeUsageReady {
-    param([switch]$RequireFreshSession)
-
-    while ($true) {
-        $usage = Get-ClaudeUsage
-
-        if ($RequireFreshSession) {
-            $sessionReady = ($usage.SessionPercent -le $FreshSessionThresholdPercent)
-        }
-        else {
-            $sessionReady = ($usage.SessionPercent -lt 100)
-        }
-
-        $weekReady = ($usage.WeekPercent -lt 100)
-
-        if ($sessionReady -and $weekReady) {
-            Write-Step "Claude usage is available"
-            $sessionResetStr = if ($null -ne $usage.SessionReset) { "  resets $($usage.SessionReset) ($($usage.SessionTimezone))" } else { "" }
-            $weekResetStr    = if ($null -ne $usage.WeekReset)    { "  resets $($usage.WeekReset) ($($usage.WeekTimezone))" }    else { "" }
-            Write-Host "Session: $($usage.SessionPercent)%$sessionResetStr"
-            Write-Host "Week:    $($usage.WeekPercent)%$weekResetStr"
-            return
-        }
-
-        $resetToWaitFor = Get-ClaudeResetToWaitFor -Usage $usage -RequireFreshSession:$RequireFreshSession
-
-        if ($null -eq $resetToWaitFor) {
-            throw "Claude usage is not ready, but no reset time could be determined."
-        }
-
-        $wakeTime = $resetToWaitFor.AddMinutes($ResetBufferMinutes)
-        $sleepSeconds = [int]($wakeTime - (Get-Date)).TotalSeconds
-
-        if ($sleepSeconds -gt 0) {
-            Invoke-UiRestWithSummary -Cli 'claude' -WakeTime $wakeTime
-        }
-        else {
-            Write-Host ("  " + $script:GlyphDot + " reset time already passed; re-checking in " + $PollSecondsAfterResetPassed + "s") -ForegroundColor DarkGray
-            Start-Sleep -Seconds $PollSecondsAfterResetPassed
-        }
-    }
-}
-
+# NOTE: As of 1.2.x the runner no longer calls `claude -p "/usage"` as a pre-check. Anthropic's
+# `/usage` output changed for subscription accounts (a one-line notice instead of percentages) and
+# is going to bifurcate further when the Agent-SDK / `claude -p` credit pool ships separately from
+# the interactive subscription. The pre-check was speculative and tied to a parser we no longer
+# control. Limit handling is now entirely reactive: classify the CLI's response (Anthropic's limit
+# wording in stderr/stdout) via `ConvertFrom-CliOutput` and the per-CLI `$LimitPatterns`, then
+# rotate / wait. Reset times come from the limit-error text via `Get-ResetTimeFromErrorText`,
+# falling back to `settings.limitWaitMinutes`.
 $script:HandoffNoteBase = "A previous AI tool started this task and was interrupted (usage limit or failure). Partial work may already exist in the working tree. Before doing anything, inspect both ``git status`` (for new/untracked files) and ``git diff`` (for changes to tracked files) to see what has already been done. Continue from there; do not redo finished work."
 
 $script:RecoveryNudgeBase = @"
@@ -2182,8 +2009,31 @@ function Get-CliArguments {
 }
 
 function New-CliResult {
-    param([bool]$Ok, [bool]$IsLimit, [string]$Text, [string]$SessionId, [string]$ErrorText)
-    return @{ Ok = $Ok; IsLimit = $IsLimit; Text = $Text; SessionId = $SessionId; ErrorText = $ErrorText }
+    param(
+        [bool]$Ok,
+        [bool]$IsLimit,
+        [string]$Text,
+        [string]$SessionId,
+        [string]$ErrorText,
+        [bool]$SessionLost = $false,
+        [bool]$SlashRejected = $false
+    )
+    return @{
+        Ok            = $Ok
+        IsLimit       = $IsLimit
+        Text          = $Text
+        SessionId     = $SessionId
+        ErrorText     = $ErrorText
+        # SessionLost: claude returned 'No conversation found with session ID' (or equivalent).
+        # The runner deletes the saved session id and re-runs as Mode=New on the SAME runner;
+        # the attempt does not count against recoveryAttempts (the state file drifted from claude's
+        # local conversation store — not the agent's fault).
+        SessionLost   = $SessionLost
+        # SlashRejected: claude returned 'Unknown command: /xxx' because the prompt began with a
+        # slash and `-p` parsed it as a slash command. The task is flagged for a human; retrying
+        # cannot fix it without editing the prompt.
+        SlashRejected = $SlashRejected
+    }
 }
 
 # Decide what to show on the console for a run (Task 2b). The full raw output still goes to
@@ -2295,12 +2145,19 @@ function ConvertFrom-CliOutput {
     )
 
     $LimitPatterns = @{
-        claude = '(?i)(you''ve hit your .{0,40}limit|usage limit)'
+        # Anthropic's interactive-subscription limit wording, plus the credit-pool wording that is
+        # likely to appear when `claude -p` / Agent-SDK moves to a separate monthly credit. The
+        # regex stays permissive on purpose — it only matters when the run already failed.
+        claude = '(?i)(you''ve hit your .{0,40}limit|usage limit|out of credits?|credits? (exceeded|exhausted|remaining)|monthly credit|insufficient credits|agent sdk.{0,30}limit|429|too many requests)'
         codex  = '(?i)(usage limit|rate limit|too many requests|try again (at|in)|quota)'
         gemini = '(?i)(quota exceeded|resource_exhausted|ratelimitexceeded|model_capacity_exhausted|no capacity available|daily quota|usage limit reached|rate limit|429|too many requests)'
         agy    = '(?i)(quota exceeded|resource_exhausted|model_capacity_exhausted|no capacity available|insufficient quota|out of quota|daily quota|usage limit|rate ?limit|429|too many requests|try again (at|in))'
         copilot = '(?i)(usage limit|rate limit|too many requests|quota|premium requests|billing|try again at|try again in|429)'
     }
+
+    # Claude-specific recoverable signals (see New-CliResult notes for handling).
+    $ClaudeSessionLostPattern = '(?i)No conversation found with session ID'
+    $ClaudeSlashRejectedPattern = '(?i)Unknown command:\s*/'
 
     $limitRegex = $LimitPatterns[$Cli]
 
@@ -2309,14 +2166,23 @@ function ConvertFrom-CliOutput {
             $json = ConvertFrom-JsonTolerant -Text $OutputText
             if ($null -eq $json) {
                 $isLimit = ($OutputText -match $limitRegex)
-                return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null -ErrorText $OutputText
+                $sessionLost = ($OutputText -match $ClaudeSessionLostPattern)
+                $slashRejected = ($OutputText -match $ClaudeSlashRejectedPattern)
+                return New-CliResult -Ok $false -IsLimit $isLimit -Text $OutputText -SessionId $null `
+                    -ErrorText $OutputText -SessionLost $sessionLost -SlashRejected $slashRejected
             }
             $text = [string](Get-ObjectPropertyValue -Object $json -Name 'result' -Default '')
             $sessionId = [string](Get-ObjectPropertyValue -Object $json -Name 'session_id' -Default $null)
             $isError = [bool](Get-ObjectPropertyValue -Object $json -Name 'is_error' -Default $false) -or ($ExitCode -ne 0)
             $isLimit = $isError -and ($text -match $limitRegex)
+            # The session-lost / slash-rejected messages may surface either in the JSON `result`
+            # field (claude returned a JSON envelope with the error inside) or in raw stderr that
+            # bypassed JSON parsing (claude failed before producing JSON). Check both surfaces.
+            $sessionLost = ($text -match $ClaudeSessionLostPattern) -or ($OutputText -match $ClaudeSessionLostPattern)
+            $slashRejected = ($text -match $ClaudeSlashRejectedPattern) -or ($OutputText -match $ClaudeSlashRejectedPattern)
             return New-CliResult -Ok (-not $isError) -IsLimit $isLimit -Text $text `
-                -SessionId $sessionId -ErrorText $(if ($isError) { $text } else { $null })
+                -SessionId $sessionId -ErrorText $(if ($isError) { $text } else { $null }) `
+                -SessionLost $sessionLost -SlashRejected $slashRejected
         }
         'codex' {
             $text = $null; $threadId = $null; $errorText = $null
@@ -2646,12 +2512,12 @@ function Get-ResetTimeFromErrorText {
 }
 
 function Get-RunnerResetTime {
-    param([string]$Cli, [string]$ErrorText, [int]$LimitWaitMinutes, $ClaudeUsage)
+    param([string]$Cli, [string]$ErrorText, [int]$LimitWaitMinutes)
 
-    if ($Cli -eq 'claude' -and $null -ne $ClaudeUsage) {
-        if ($ClaudeUsage['WeekReset'])    { return $ClaudeUsage['WeekReset'] }
-        if ($ClaudeUsage['SessionReset']) { return $ClaudeUsage['SessionReset'] }
-    }
+    # $Cli is kept on the signature so future CLI-specific reset extractors can hook in here
+    # without rippling every call site; today every CLI follows the same shape: try to parse a
+    # reset timestamp out of the error text, otherwise wait the configured $LimitWaitMinutes.
+    $null = $Cli
     $parsed = Get-ResetTimeFromErrorText -ErrorText $ErrorText
     if ($null -ne $parsed) { return $parsed }
     return (Get-Date).AddMinutes($LimitWaitMinutes)
@@ -2683,11 +2549,9 @@ function Select-NextRunner {
 function Wait-ForLimitReset {
     param($Task, $Result, $Settings)
 
-    if ($Task.Cli -eq 'claude') {
-        Wait-UntilClaudeUsageReady -RequireFreshSession
-        return
-    }
-
+    # Single code path for every CLI as of 1.2.x: parse a reset hint out of the limit error text,
+    # otherwise wait the configured limitWaitMinutes. Previously claude went through a separate
+    # `/usage` poll that no longer returns parseable data on subscription accounts.
     $resetTime = Get-ResetTimeFromErrorText -ErrorText $Result.ErrorText
     if ($null -eq $resetTime) {
         $resetTime = (Get-Date).AddMinutes($Settings.LimitWaitMinutes)
@@ -3079,11 +2943,12 @@ try {
 
             if (Test-StopRequested) { break }
 
-            # Local Ollama claude runs never hit Anthropic usage limits, so skip the cloud /usage
-            # pre-check (it would otherwise query — and consume — the cloud account).
-            if ($task.Cli -eq 'claude' -and -not (Test-IsOllamaTask -Task $task) -and -not $DryRun) {
-                Wait-UntilClaudeUsageReady -RequireFreshSession:$mustWaitForFreshSession
-            }
+            # As of 1.2.x the runner no longer pre-checks `claude -p "/usage"` — Anthropic changed
+            # the output format for subscription accounts and a separate credit pool for the Agent
+            # SDK / `claude -p` is incoming. Limits are detected reactively from the CLI's response
+            # via `$LimitPatterns` and rotated/waited on from there. $mustWaitForFreshSession is
+            # kept on the state machine for symmetry but is now a no-op for cloud claude too.
+            $null = $mustWaitForFreshSession
 
             # Task 6: the model used for THIS run is Models[currentModelIndex]. Empty when the task
             # set no model at all (then Get-CliArguments emits no -m/--model, exactly as before).
@@ -3148,6 +3013,32 @@ try {
                 Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
                 Write-Step "Task $taskNumber`: installed gemini rejects --resume; retrying with continuation prompt only"
                 continue
+            }
+
+            # Claude-only: the saved session id is no longer in claude's local conversation store
+            # ("No conversation found with session ID: ..."). State-file drift, not an agent failure.
+            # Drop the session id, refund the run-budget tick, and let the next iteration start fresh.
+            if ($task.Cli -eq 'claude' -and $result.SessionLost) {
+                Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+                Write-Step "Task $taskNumber`: claude's saved session id is no longer in claude's conversation store; starting a fresh session"
+                if ($runCount -gt 0) { $runCount-- }
+                continue
+            }
+
+            # Claude-only: `claude -p` rejected the prompt as a slash command (e.g. the prompt
+            # begins with `/goal:` and claude parses it as `/goal`). Retrying cannot fix this
+            # without editing the prompt, so flag for human and stop the task — never burn
+            # recoveryAttempts or rotate to a fallback on a prompt-authoring mistake.
+            if ($task.Cli -eq 'claude' -and $result.SlashRejected) {
+                $blockReason = "claude -p rejected the prompt as a slash command (Unknown command in output). Edit the task prompt so it does not begin with a leading slash word; claude -p interprets that as a slash command, not as plain text."
+                Save-TaskFailedMarker -TaskIndex $i -Reason $blockReason -Task $task
+                Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $blockReason
+                $needsHumanCount++
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " needs human review: " + $blockReason) -ForegroundColor Red
+                if ($config.Settings.StopOnError) { throw "Task $taskNumber blocked: $blockReason" }
+                $failedCount++
+                break
             }
 
             # A usage limit pauses and resumes, in both simple and completion-check modes.
@@ -3386,22 +3277,9 @@ try {
                 RecoveryAttempts = $task.RecoveryAttempts
             }
 
-            # Runner-scoped claude pre-check (spec 8). For a cloud-claude runner WITH fallbacks we
-            # must never block: query usage, and if this runner is capped, record it as limited and
-            # re-select (the next pass rotates to a fallback instead of waiting/aborting). A
-            # local-Ollama claude runner never queries the cloud /usage endpoint. This runs before
-            # the run-budget increment because a pre-check rotation is not a CLI invocation (spec 5.8:
-            # waits/probes do not count toward maxRunsPerTask).
-            if ($activeRunner.Cli -eq 'claude' -and -not (Test-IsOllamaRunner -Runner $activeRunner) -and -not $DryRun) {
-                $preUsage = Get-ClaudeUsage
-                if ($preUsage.SessionPercent -ge 100 -or $preUsage.WeekPercent -ge 100) {
-                    $limitedUntil[$currentRunnerIndex] = Get-RunnerResetTime -Cli 'claude' -ErrorText '' -LimitWaitMinutes $config.Settings.LimitWaitMinutes -ClaudeUsage $preUsage
-                    $runnerReasons[$currentRunnerIndex] = 'limited'
-                    Write-Step "Task ${taskNumber}: claude usage is capped (pre-check); rotating to the next runner"
-                    continue
-                }
-                $mustWaitForFreshSession = $false
-            }
+            # The cloud-claude `/usage` pre-check was removed in 1.2.x — see top-of-file note.
+            # Rotation on cap now happens reactively from the limit signal in the CLI's response.
+            $mustWaitForFreshSession = $false
 
             $runCount++
             if ($runCount -gt $config.Settings.MaxRunsPerTask) {
@@ -3466,6 +3344,31 @@ try {
                 Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
                 Write-Step "Task ${taskNumber}: installed gemini rejects --resume; retrying with continuation prompt only"
                 continue
+            }
+
+            # Claude-only: state-file drift — the saved session id is no longer in claude's local
+            # conversation store. Drop the id, refund the run-budget tick, retry on the same runner
+            # as Mode=New. Never rotate to a fallback for this — it's not a CLI failure.
+            if ($activeRunner.Cli -eq 'claude' -and $result.SessionLost) {
+                Remove-Item -LiteralPath (Get-TaskSessionFilePath -TaskIndex $i) -Force -ErrorAction SilentlyContinue
+                Write-Step "Task ${taskNumber}: claude's saved session id is no longer in claude's conversation store; starting a fresh session"
+                if ($runCount -gt 0) { $runCount-- }
+                continue
+            }
+
+            # Claude-only: `claude -p` rejected the prompt as a slash command. Flag for human;
+            # never rotate to a fallback (the same prompt would just fail the same way on the next
+            # tool too if anything peeked at the leading `/`).
+            if ($activeRunner.Cli -eq 'claude' -and $result.SlashRejected) {
+                $blockReason = "claude -p rejected the prompt as a slash command (Unknown command in output). Edit the task prompt so it does not begin with a leading slash word; claude -p interprets that as a slash command, not as plain text."
+                Save-TaskFailedMarker -TaskIndex $i -Reason $blockReason -Task $task
+                Save-TaskNeedsHumanMarker -TaskIndex $i -Reason $blockReason
+                $needsHumanCount++
+                Write-Host ""
+                Write-Host ("  " + $script:GlyphErr + " Task " + $taskNumber + " needs human review: " + $blockReason) -ForegroundColor Red
+                if ($config.Settings.StopOnError) { throw "Task $taskNumber blocked: $blockReason" }
+                $failedCount++
+                break
             }
 
             if ($result.IsLimit) {

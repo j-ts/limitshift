@@ -1263,33 +1263,24 @@ run_reset_time_test() {
   local r now
   now=$(date +%s)
 
-  # Non-claude: parse from error
-  r=$(get_runner_reset_epoch "gemini" "Quota exceeded. Try again in 2h 0m." 30 "")
+  # Parse "try again in" from error text — works the same for every CLI as of 1.2.x.
+  r=$(get_runner_reset_epoch "gemini" "Quota exceeded. Try again in 2h 0m." 30)
   if (( r < now + 7000 )); then
-    fail "$desc (non-claude parsed)" "Expected reset > 2h from now, got $r (now=$now)"
+    fail "$desc (parsed from error)" "Expected reset > 2h from now, got $r (now=$now)"
     return 1
   fi
 
-  # Non-claude: fallback to limitWaitMinutes
-  r=$(get_runner_reset_epoch "codex" "rate limit, no time here" 30 "")
+  # Fallback to limitWaitMinutes when the error text has no reset hint.
+  r=$(get_runner_reset_epoch "codex" "rate limit, no time here" 30)
   if (( r < now + 1700 || r > now + 1900 )); then
-    fail "$desc (non-claude fallback)" "Expected reset ~30m (1800s) from now, got $r (now=$now)"
+    fail "$desc (limitWaitMinutes fallback)" "Expected reset ~30m (1800s) from now, got $r (now=$now)"
     return 1
   fi
 
-  # Claude: from usage (SessionReset)
-  local usage_session="SessionReset:$((now + 2700))|WeekReset:"
-  r=$(get_runner_reset_epoch "claude" "limit" 30 "$usage_session")
-  if [[ "$r" != "$((now + 2700))" ]]; then
-    fail "$desc (claude session)" "Expected $((now + 2700)), got $r"
-    return 1
-  fi
-
-  # Claude: from usage (WeekReset)
-  local usage_week="SessionReset:|WeekReset:$((now + 86400))"
-  r=$(get_runner_reset_epoch "claude" "limit" 30 "$usage_week")
-  if [[ "$r" != "$((now + 86400))" ]]; then
-    fail "$desc (claude week)" "Expected $((now + 86400)), got $r"
+  # Claude uses the same path as every other CLI (the legacy `/usage`-driven branch was removed in 1.2.x).
+  r=$(get_runner_reset_epoch "claude" "You've hit your usage limit. Try again in 5s." 30)
+  if (( r < now + 3 || r > now + 30 )); then
+    fail "$desc (claude reset parsed from error)" "Expected reset ~5s from now, got $r (now=$now)"
     return 1
   fi
 
@@ -3671,34 +3662,24 @@ $out"
   fi
 }
 
-run_cli_rotation_claude_precheck_switch_test() {
-  local desc="CLI rotation — capped cloud-claude runner rotates to a fallback at the pre-check (spec 8)"
-  local root="$TMP_ROOT/cli-rot-claude-precheck"
+run_cli_rotation_claude_reactive_limit_test() {
+  local desc="CLI rotation — claude limit signal triggers reactive rotation to the codex fallback"
+  local root="$TMP_ROOT/cli-rot-claude-reactive"
   local bin_dir="$root/bin"
   local project_dir="$root/project"
   local queue_path="$root/queue.json"
-  local claude_ran="$root/claude-ran.txt"
 
   mkdir -p "$bin_dir" "$project_dir"
   git -C "$project_dir" init -q
 
-  # Week is capped with a reset more than 24h out. The OLD blocking pre-check would wait (or, on
-  # ps1, abort); the spec 8 pre-check must instead mark the claude runner limited and rotate to the
-  # codex fallback without waiting.
-  local week_reset
-  week_reset=$(date -d '+48 hours' '+%b %d %Y %I:%M%p' 2>/dev/null || date -v+48H '+%b %d %Y %I:%M%p')
-
-  cat > "$bin_dir/claude" <<STUBEOF
+  # 1.2.x: the `/usage` pre-check is gone. Claude is allowed to run, and when it returns a limit
+  # signal in its response, the runner rotates to the codex fallback. Reset is parsed from the
+  # `try again in 5s` hint in the error text.
+  cat > "$bin_dir/claude" <<'STUBEOF'
 #!/usr/bin/env bash
-if [ "\${1:-}" = "-p" ] && [ "\${2:-}" = "/usage" ]; then
-  printf '%s\n' 'Current session: 20% used'
-  printf '%s\n' 'Current week (all models): 100% used, resets $week_reset (UTC)'
-  exit 0
-fi
 cat > /dev/null
-printf 'ran\n' >> "$claude_ran"
-printf '%s\n' '{"result":"claude should not run","session_id":"s-1","is_error":false}'
-exit 0
+printf '%s\n' '{"result":"You'\''ve hit your usage limit. Try again in 5s.","session_id":"s-1","is_error":true}'
+exit 1
 STUBEOF
   chmod +x "$bin_dir/claude"
 
@@ -3717,7 +3698,7 @@ STUBEOF
 {
   "settings": { "stopOnError": true, "maxRunsPerTask": 5, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
   "tasks": [
-    { "name": "claude-precheck-switch", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it",
+    { "name": "claude-limit-rotate", "cli": "claude", "projectPath": "$project_dir", "prompt": "do it",
       "fallbacks": [ { "cli": "codex", "model": "c-1" } ] }
   ]
 }
@@ -3729,11 +3710,113 @@ EOF
 
   if [ "$exit_code" -eq 0 ] &&
      printf '%s' "$out" | grep -qi 'switching to codex' &&
-     printf '%s' "$out" | grep -q 'Task 1 done' &&
-     [ ! -f "$claude_ran" ]; then
+     printf '%s' "$out" | grep -q 'Task 1 done'; then
     pass "$desc"
   else
-    fail "$desc" "exit=$exit_code claude_ran=$([ -f "$claude_ran" ] && echo yes || echo no)
+    fail "$desc" "exit=$exit_code
+$out"
+  fi
+}
+
+run_claude_session_lost_recovery_test() {
+  local desc="Claude session-lost: drops stale session id, retries as New, does not flag for human"
+  local root="$TMP_ROOT/claude-session-lost"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local counter="$root/claude-counter.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n + 1))
+printf '%s' "\$n" > "$counter"
+if [ "\$n" -eq 1 ]; then
+  printf '%s\n' '{"result":"started","session_id":"s-stale","is_error":false}'
+  exit 0
+fi
+if [ "\$n" -eq 2 ]; then
+  printf '%s\n' '{"result":"No conversation found with session ID: s-stale","session_id":null,"is_error":true}'
+  exit 1
+fi
+printf '%s\n' '{"result":"done\n[[TASK_COMPLETE]]","session_id":"s-fresh","is_error":false}'
+exit 0
+STUBEOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": true, "maxRunsPerTask": 4, "maxRetriesOnError": 0, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "session-lost", "cli": "claude", "model": "sonnet", "projectPath": "$project_dir", "prompt": "do it", "completionCheck": true }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  local needs_human="$root/limitshift-queue/status/task-01.needs-human"
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'no longer in claude' &&
+     printf '%s' "$out" | grep -q 'Task 1 done' &&
+     [ ! -f "$needs_human" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code needs_human=$([ -f "$needs_human" ] && echo yes || echo no)
+$out"
+  fi
+}
+
+run_claude_slash_rejected_flags_human_test() {
+  local desc="Claude slash-command rejection: flags for a human, single invocation, no retries"
+  local root="$TMP_ROOT/claude-slash-rejected"
+  local bin_dir="$root/bin"
+  local project_dir="$root/project"
+  local queue_path="$root/queue.json"
+  local calls="$root/claude-calls.txt"
+
+  mkdir -p "$bin_dir" "$project_dir"
+
+  cat > "$bin_dir/claude" <<STUBEOF
+#!/usr/bin/env bash
+cat > /dev/null
+printf 'ran\n' >> "$calls"
+printf '%s\n' '{"result":"Unknown command: /goal, did you mean /goal?","session_id":"s-1","is_error":true}'
+exit 1
+STUBEOF
+  chmod +x "$bin_dir/claude"
+
+  cat > "$queue_path" <<EOF
+{
+  "settings": { "stopOnError": false, "maxRunsPerTask": 5, "maxRetriesOnError": 3, "limitWaitMinutes": 1, "resetBufferMinutes": 0 },
+  "tasks": [
+    { "name": "slash-rejected", "cli": "claude", "model": "sonnet", "projectPath": "$project_dir", "prompt": "/goal: do it", "completionCheck": true }
+  ]
+}
+EOF
+
+  local out exit_code
+  out=$(PATH="$bin_dir:$PATH" bash "$SCRIPT" --queue "$queue_path" 2>&1)
+  exit_code=$?
+
+  local call_count=0
+  [ -f "$calls" ] && call_count=$(wc -l < "$calls" | tr -d ' ')
+  local needs_human="$root/limitshift-queue/status/task-01.needs-human"
+
+  if [ "$exit_code" -eq 0 ] &&
+     printf '%s' "$out" | grep -qi 'needs human review' &&
+     printf '%s' "$out" | grep -qi 'slash command' &&
+     [ "$call_count" -eq 1 ] &&
+     [ -f "$needs_human" ]; then
+    pass "$desc"
+  else
+    fail "$desc" "exit=$exit_code calls=$call_count needs_human=$([ -f "$needs_human" ] && echo yes || echo no)
 $out"
   fi
 }
@@ -4385,7 +4468,9 @@ run_cli_rotation_error_switch_test
 run_cli_rotation_blocked_no_switch_test
 run_cli_rotation_no_fallbacks_backcompat_test
 run_cli_rotation_all_limited_wait_test
-run_cli_rotation_claude_precheck_switch_test
+run_cli_rotation_claude_reactive_limit_test
+run_claude_session_lost_recovery_test
+run_claude_slash_rejected_flags_human_test
 run_cli_rotation_handoff_after_wait_test
 run_runs_csv_columns_test
 run_runner_index_switch_test
