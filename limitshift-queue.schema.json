@@ -123,7 +123,7 @@
                   "then": { "properties": { "effort": { "enum": [null, "low", "medium", "high", "xhigh", "max"] } } } },
                 { "if": { "properties": { "cli": { "const": "claude" } }, "required": ["cli"] },
                   "then": { "properties": { "effort": { "enum": [null, "low", "medium", "high", "xhigh", "max"] } } } },
-                { "if": { "properties": { "cli": { "const": "claude" }, "model": { "pattern": "(?i)haiku" } }, "required": ["cli", "model"] },
+                { "if": { "properties": { "cli": { "const": "claude" }, "model": { "anyOf": [ { "type": "string", "pattern": "(?i)haiku" }, { "type": "array", "contains": { "type": "string", "pattern": "(?i)haiku" } } ] } }, "required": ["cli", "model"] },
                   "then": { "properties": { "effort": { "enum": [null] } } } },
                 { "if": { "properties": { "cli": { "const": "codex" } }, "required": ["cli"] },
                   "then": { "properties": { "effort": { "enum": [null, "minimal", "low", "medium", "high", "xhigh"] } } } }
@@ -192,7 +192,12 @@
             "if": {
               "properties": {
                 "cli": { "const": "claude" },
-                "model": { "pattern": "(?i)haiku" }
+                "model": {
+                  "anyOf": [
+                    { "type": "string", "pattern": "(?i)haiku" },
+                    { "type": "array", "contains": { "type": "string", "pattern": "(?i)haiku" } }
+                  ]
+                }
               },
               "required": ["cli", "model"]
             },
