@@ -45,9 +45,9 @@ the `cli`. (The user must have agy installed and signed in, same as any other CL
    - Windows: `.\limitshift.ps1 -ValidateOnly`
    - macOS/Linux: `./limitshift.sh --validate-only`
 
-### Model and Budget Profile (`limitshift-profile.json`)
+### Model and routing profile (`limitshift-profile.json`)
 
-When present, `limitshift-profile.json` at the repository root serves as the authoritative source for an agent's preferred LLM models, budget allocations, and routing logic. It overrides the generic Model-and-Effort guidance for `limitshift-queue.json` construction. Agents should read this file FIRST. If this file exists, ensure that the `model` and `extraArgs.budgetBucket` fields in the generated `limitshift-queue.json` entries reflect the choices defined here. For example, if `limitshift-profile.json` specifies `agy` should use `claude-3-opus-20240229` with `claude-5h-shared` bucket, the agent **must** use those values for `agy` tasks, regardless of generic instructions.
+When `limitshift-profile.json` is present next to the runner (the repo root), read it **first** and treat it as authoritative for which CLIs and models to use, how to rotate, and which task types go to which model — it overrides the generic Model-and-Effort guidance below when building `limitshift-queue.json`. It is **agent-facing**: the runner itself only consults it during `--validate-only`, where it cross-checks each task's `model` against the per-CLI `clis.<cli>.models` lists (a misspelled or undeclared model is flagged before any CLI runs). The `limitBuckets` tell you which `(cli, model)` pairs share one usage limit, so you can avoid useless same-bucket `model` rotation arrays (e.g. all codex models share one pool) and rotate across buckets where it actually helps; `routing` captures the user's task-type → model preferences. Set each task's `model` and pick its CLI/rotation to match the profile. See `limitshift-profile.example.json` for the shape. (There is no `budgetBucket` field — the buckets are guidance for **you**, not a queue field.)
 
 
 ## Queue Schema Essentials
@@ -242,13 +242,13 @@ Avoid:
 
 ## Agent Onboarding & Profile Initialization
 
-To ensure optimal LLM utilization and budget adherence, new agents (or users setting up their local agent environment) should follow this protocol to initialize their `limitshift-profile.json`:
+When the user asks to "onboard" or set up their profile, help them create `limitshift-profile.json` (at the repo root, next to the runner) by walking through:
 
-1.  **CLI Selection:** Identify which LLM CLIs the agent will primarily use (e.g., `agy`, `claude`, `gemini`, `codex`, `ollama`).
-2.  **Budget Allocation:** For each active CLI, determine the appropriate budget buckets and reset dimensions based on allocated project resources and expected usage patterns. Refer to `limitBuckets` in `limitshift-profile.example.json` for common patterns (e.g., `claude-5h-shared`, `claude-weekly-sonnet`, `agy-gemini-bucket`).
-3.  **Routing Preferences:** Define a `modelPreference` array for each CLI, listing models in descending order of preference.
-4.  **Local Model Integration (Optional):** If using local LLMs (e.g., via Ollama), configure their details under `localModels`. For Antigravity CLI (`agy`), use `agy models` to discover available models and pre-fill this section where applicable.
-5.  **Profile Generation:** Based on the above, create or update `limitshift-profile.json` at the repository root, mirroring the structure of `limitshift-profile.example.json`. This file is personal to the agent's environment and should not typically be committed to version control.
+1.  **CLIs in use:** which LLM CLIs they run (`claude`, `codex`, `gemini`, `agy`, `copilot`) and any local-model (Ollama) use.
+2.  **Available models per CLI:** list the models for each under `clis.<cli>.models`. For `agy` — the only CLI with a model-list command — run `agy models` to discover them; the others must be listed by hand.
+3.  **Limit buckets:** group `(cli, model)` pairs that share a usage limit into `limitBuckets` (with the reset dimension), so config-building avoids useless same-bucket rotation. See the example's patterns (`claude-5h-shared`, `claude-weekly-sonnet`, `codex-shared`, `agy-gemini`, `agy-claude`).
+4.  **Routing preferences:** capture which task types prefer which model in `routing` (e.g. bulk work → gemini, decision-heavy → claude sonnet).
+5.  **Write the file:** create or update `limitshift-profile.json`, mirroring `limitshift-profile.example.json`. It is personal to the user's environment and should not be committed.
 
 
 ## Security and Safety
