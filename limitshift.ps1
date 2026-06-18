@@ -52,17 +52,12 @@ if (-not $LoadFunctionsOnly) {
     $QueueRootPath = Split-Path -Parent $QueuePath
     $QueueName = [System.IO.Path]::GetFileNameWithoutExtension($QueuePath)
     $RunnerName = $QueueName -replace '[^A-Za-z0-9._-]', '-'
-    # Strip the "limitshift-" prefix to avoid stutter (limitshift-limitshift-queue -> limitshift-queue).
-    $StateName = $RunnerName
-    if ($StateName -like 'limitshift-*') {
-        $StateName = $StateName.Substring('limitshift-'.Length)
-    }
-    # State folder is limitshift-<name> (visible, no dot prefix). Legacy folders are migrated on startup.
-    $RunnerStatePath = Join-Path $QueueRootPath "limitshift-$StateName"
-    # Pre-dedup stuttered name (limitshift-limitshift-<name>) for migration.
-    $StutteredStatePath = if ($StateName -ne $RunnerName) { Join-Path $QueueRootPath "limitshift-$RunnerName" } else { $null }
-    $LegacyDotStatePath = Join-Path $QueueRootPath ".limitshift-$RunnerName"
-    $LegacyRunnerStatePath = Join-Path $QueueRootPath ".ai-runner-$RunnerName"
+    # State folder is named exactly after the queue file (sanitized) — no "limitshift-" prefix added.
+    # The default queue limitshift-queue.json keeps its limitshift-queue/ folder (its name already
+    # starts with limitshift-); every other queue gets a folder matching its own name
+    # (career-ops_01.json -> career-ops_01/). Folder naming is forward-only: existing limitshift-<name>
+    # folders from older versions are left untouched, not migrated.
+    $RunnerStatePath = Join-Path $QueueRootPath $RunnerName
     $SessionStatePath = Join-Path $RunnerStatePath "sessions"
     $OutputStatePath = Join-Path $RunnerStatePath "outputs"
     $StatusStatePath = Join-Path $RunnerStatePath "status"
@@ -82,6 +77,7 @@ if (-not $LoadFunctionsOnly) {
     }
     $RunsCsvPath = Join-Path $RunnerStatePath "runs.csv"
     $StateReadmePath = Join-Path $RunnerStatePath "_README.txt"
+    $StateGitignorePath = Join-Path $RunnerStatePath '.gitignore'
     $LockPath = Join-Path $RunnerStatePath 'limitshift.lock'
 }
 
@@ -324,12 +320,23 @@ function Write-UiSummary {
         [bool]$AllCompletionCheck,
         [string]$LogPath,
         [string]$StatePath,
-        [switch]$DryRun
+        [switch]$DryRun,
+        [switch]$StoppedEarly,
+        [int]$NotReachedCount = 0
     )
+    
 
     Write-Host ""
     Write-UiSeparator
     Write-Host ""
+
+    if ($StoppedEarly) {
+        $ranCount = $DoneCount + $FailedCount
+        Write-Host ("  " + $script:GlyphDiamond + " Stopped early - " + $ranCount + " of " + $TaskCount + " ran (" + $NotReachedCount + " not reached). Rerun the same command to continue.") -ForegroundColor $script:UiAccentColor
+        Write-Host ("    log saved to " + $LogPath) -ForegroundColor DarkGray
+        Write-UiSessionTotalTime
+        return
+    }
 
     if ($DryRun) {
         $plural = if ($TaskCount -eq 1) { '' } else { 's' }
@@ -453,9 +460,7 @@ function Invoke-UiSpinner {
             $armed = Test-StopRequested
             $hint = Get-StopHint -Armed:$armed
             $hintColor = if ($armed) { [System.ConsoleColor]::Yellow } else { [System.ConsoleColor]::DarkGray }
-            $prevH = [Console]::ForegroundColor
-            try { [Console]::ForegroundColor = $hintColor; [Console]::Write("   " + $hint) }
-            finally { [Console]::ForegroundColor = $prevH }
+            Write-EphemeralFooter -Text ("   " + $hint) -ForegroundColor $hintColor
 
             $pos += $dir
             if ($pos -ge ($track - 1) -or $pos -le 0) { $dir = -$dir }
@@ -463,10 +468,83 @@ function Invoke-UiSpinner {
         }
     }
     finally {
-        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr)
+        Clear-EphemeralFooter
+        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr) # This line was originally clearing the spinner. I'll keep it as a double clear for safety for the existing spinner animation
         if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
     }
 }
+
+function Write-EphemeralFooter {
+    param(
+        [string]$Text,
+        [ConsoleColor]$ForegroundColor = 'DarkGray',
+        [ConsoleColor]$BackgroundColor = 'Black'
+    )
+    if (-not (Test-UiAnimatable)) {
+        return
+    }
+
+    if (-not $script:ForceColor -and $Host.UI.RawUI.BackgroundColor -eq $BackgroundColor) {
+        # Avoid explicit background color when it's the system default to let `term-background` rules apply.
+        $BackgroundColor = $null
+    }
+
+    $originalCursorLeft = [Console]::CursorLeft
+    $originalCursorTop = [Console]::CursorTop
+
+    $footerLine = [Console]::WindowHeight - 1
+    if ($footerLine -lt 0) { $footerLine = 0 } # Handle very small windows
+
+    # Move cursor to the footer line, clear it, write text, then restore cursor.
+    try {
+        [Console]::CursorVisible = $false
+        [Console]::SetCursorPosition(0, $footerLine)
+        [Console]::Write(' ' * [Console]::WindowWidth) # Clear the line
+        [Console]::SetCursorPosition(0, $footerLine) # Move back to start of line
+
+        # Store original colors to restore later
+        $originalFg = [Console]::ForegroundColor
+        $originalBg = [Console]::BackgroundColor
+
+        [Console]::ForegroundColor = $ForegroundColor
+        if ($null -ne $BackgroundColor) {
+            [Console]::BackgroundColor = $BackgroundColor
+        }
+        [Console]::Write($Text)
+
+        # Restore original colors and cursor position
+        [Console]::ForegroundColor = $originalFg
+        [Console]::BackgroundColor = $originalBg
+    }
+    finally {
+        [Console]::SetCursorPosition($originalCursorLeft, $originalCursorTop)
+        [Console]::CursorVisible = $true
+    }
+}
+
+function Clear-EphemeralFooter {
+    if (-not (Test-UiAnimatable)) {
+        return
+    }
+
+    # Clear the footer line by overwriting it with spaces.
+    $originalCursorLeft = [Console]::CursorLeft
+    $originalCursorTop = [Console]::CursorTop
+
+    $footerLine = [Console]::WindowHeight - 1
+    if ($footerLine -lt 0) { $footerLine = 0 } # Handle very small windows
+
+    try {
+        [Console]::CursorVisible = $false
+        [Console]::SetCursorPosition(0, $footerLine)
+        [Console]::Write(' ' * [Console]::WindowWidth) # Clear the line
+    }
+    finally {
+        [Console]::SetCursorPosition($originalCursorLeft, $originalCursorTop)
+        [Console]::CursorVisible = $true
+    }
+}
+Register-EngineEvent -SourceIdentifier 'PowerShell.Exiting' -Action { Clear-EphemeralFooter }
 
 function Invoke-UiRestWithSummary {
     # Show 'Hit a usage limit on <cli>, resting now till <when>' with a live countdown directly
@@ -567,20 +645,25 @@ function Invoke-UiRest {
                 [Console]::Write("     " + $moons[$mi % $moons.Count] + " ")
                 [Console]::ForegroundColor = [System.ConsoleColor]::DarkGray
                 [Console]::Write("resting " + [char]0x00B7 + " " + $cd + " until " + $WakeTime.ToString('h:mm tt') + "   ")
-                [Console]::Write("   " + (Get-StopHint))
             }
             finally { [Console]::ForegroundColor = $prev }
+
             Read-StopKey
+            $armed = Test-StopRequested
+            $hint = Get-StopHint -Armed:$armed
+            $hintColor = if ($armed) { [System.ConsoleColor]::Yellow } else { [System.ConsoleColor]::DarkGray }
+            Write-EphemeralFooter -Text ("   " + $hint) -ForegroundColor $hintColor
+            if ($armed) { # Clear the active hint when armed - this is probably redundant, as the Write-EphemeralFooter should overwrite it.
+                # I'll keep it as a safeguard, it won't hurt.
+            }
             if (Test-StopRequested) { break }
-            $prevH2 = [Console]::ForegroundColor
-            try { [Console]::ForegroundColor = [System.ConsoleColor]::Yellow; [Console]::Write("   " + (Get-StopHint -Armed:$true)) }
-            finally { [Console]::ForegroundColor = $prevH2 }
             $mi++
             Start-Sleep -Milliseconds 1000
         }
     }
     finally {
-        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr)
+        Clear-EphemeralFooter
+        [Console]::Write($cr + (' ' * ([Math]::Max(60, [Console]::WindowWidth - 1))) + $cr) # Keep for safety
         if ($null -ne $cursorRestore) { try { [Console]::CursorVisible = $cursorRestore } catch {} }
     }
 }
@@ -721,30 +804,15 @@ function New-DirectoryIfMissing {
 }
 
 function Initialize-RunnerState {
-    # Migrate legacy state folders to the current name.
-    if (-not (Test-Path -LiteralPath $RunnerStatePath)) {
-        if ($null -ne $StutteredStatePath -and (Test-Path -LiteralPath $StutteredStatePath)) {
-            Move-Item -LiteralPath $StutteredStatePath -Destination $RunnerStatePath
-            Write-Host "Migrated state folder limitshift-$RunnerName -> limitshift-$StateName"
-        }
-        elseif (Test-Path -LiteralPath $LegacyDotStatePath) {
-            Move-Item -LiteralPath $LegacyDotStatePath -Destination $RunnerStatePath
-            Write-Host "Migrated state folder .limitshift-$RunnerName -> limitshift-$StateName"
-        }
-        elseif (Test-Path -LiteralPath $LegacyRunnerStatePath) {
-            Move-Item -LiteralPath $LegacyRunnerStatePath -Destination $RunnerStatePath
-            Write-Host "Migrated state folder .ai-runner-$RunnerName -> limitshift-$StateName"
-        }
-    }
-
     New-DirectoryIfMissing -Path $RunnerStatePath
     New-DirectoryIfMissing -Path $SessionStatePath
     New-DirectoryIfMissing -Path $OutputStatePath
     New-DirectoryIfMissing -Path $StatusStatePath
 
-    # Task 4: drop a self-explaining README inside the state folder (overwritten every init),
-    # and make sure runs.csv has its header row.
+    # Drop a self-explaining README inside the state folder (overwritten every init), keep the folder
+    # out of git regardless of its name, and make sure runs.csv has its header row.
     Write-StateReadme
+    Write-StateGitignore
     Initialize-RunsCsv
 }
 
@@ -767,6 +835,15 @@ Re-running:
   its done marker: the runner notices the change and re-runs that task with a fresh session.
 "@
     Set-Content -LiteralPath $StateReadmePath -Value $readme -Encoding UTF8
+}
+
+function Write-StateGitignore {
+    # Keep the state folder out of git no matter what it is named. The repo's global "limitshift-*/"
+    # ignore rule only matches the default queue's folder; a queue named e.g. career-ops_01.json now
+    # produces a career-ops_01/ folder that rule would miss. A self-ignoring ".gitignore" (excludes
+    # everything, including itself) makes the folder invisible to git regardless of its name, so
+    # private transcripts/prompts never get committed.
+    Set-Content -LiteralPath $StateGitignorePath -Value '*' -Encoding UTF8
 }
 
 function Initialize-RunsCsv {
@@ -1700,6 +1777,7 @@ function Invoke-NativeProcess {
         [string[]]$Arguments,
         [string]$WorkingDirectory,
         [string]$StdinText,
+        [string]$Cli,
         [switch]$Spinner
     )
 
@@ -1789,6 +1867,9 @@ exit `$LASTEXITCODE
             PassThru               = $true
             RedirectStandardOutput = $stdoutPath
             RedirectStandardError  = $stderrPath
+        }
+        if ((Get-Command Start-Process).Parameters.ContainsKey('CreateNoWindow')) {
+            $startProcessParams['CreateNoWindow'] = ($Cli -eq 'agy')
         }
         if (-not $animate) { $startProcessParams['Wait'] = $true }
 
@@ -2366,8 +2447,18 @@ function Invoke-CliTaskRun {
     # agy and copilot still need a CLOSED/EOF stdin: under Start-Process an inherited (unredirected) stdin
     # handle makes them block reading it indefinitely. Hand them an empty stdin so they get immediate
     # EOF — this mirrors limitshift.sh, which runs them with `</dev/null`.
-    $invokeParams = @{ Command = $exe; Arguments = $arguments; WorkingDirectory = $Task.ProjectPath; Spinner = $true }
+    $invokeParams = @{
+        Command = $exe;
+        Arguments = $arguments;
+        WorkingDirectory = $Task.ProjectPath;
+        Spinner = if ($Task.Cli -eq 'agy') { $false } else { $true } # Disable spinner for agy
+    }
     $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { '' } else { $prompt }
+
+    # If agy, show a static "agy working..." message instead of the animated spinner.
+    if ($Task.Cli -eq 'agy' -and -not $Quiet) {
+        Write-Host ("  " + $script:GlyphStar + " agy working...") -ForegroundColor $script:UiAccentColor
+    }
     $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
@@ -2695,11 +2786,20 @@ function Invoke-ModelValidation {
     param(
         $Config,
         [string]$CapsDir,
-        [switch]$Refresh
+        [switch]$Refresh,
+        [switch]$ValidateOnly
     )
     $policy = $Config.Settings.ModelValidation
     $cacheHours = $Config.Settings.CapabilityCacheHours
     if ($policy -eq 'off') { return $true }
+
+    $profile = $null
+    if ($ValidateOnly) {
+        $profilePath = Join-Path $PSScriptRoot "limitshift-profile.json"
+        if (Test-Path $profilePath) {
+            $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+        }
+    }
 
     $hadError = $false
     $capsCache = @{}
@@ -2733,7 +2833,28 @@ function Invoke-ModelValidation {
             }
         }
         else {
-            Write-Host "  INFO: Task ${n}: model validation skipped for $($task.Cli) ($($caps.Error))" -ForegroundColor DarkGray
+            $validated = $false
+            if ($profile -ne $null -and $profile.clis.PSObject.Properties[$task.Cli] -ne $null) {
+                $declaredModels = $profile.clis.($task.Cli).models
+                foreach ($model in $task.Models) {
+                    if ($declaredModels -notcontains $model) {
+                         switch ($policy) {
+                            'strictWhenDiscoverable' {
+                                [Console]::Error.WriteLine("ERROR: Task ${n}: model `"$model`" is not available for $($task.Cli) in profile")
+                                $hadError = $true
+                            }
+                            'warn' {
+                                Write-Warning "Task ${n}: model `"$model`" not found in profile for $($task.Cli) (continuing)"
+                            }
+                        }
+                        $validated = $true
+                    }
+                }
+            }
+            
+            if (-not $validated) {
+                Write-Host "  INFO: Task ${n}: model validation skipped for $($task.Cli) ($($caps.Error))" -ForegroundColor DarkGray
+            }
         }
     }
     return (-not $hadError)
@@ -2806,7 +2927,7 @@ catch {
 
 if ($ValidateOnly) {
     $capsDir = Join-Path $RunnerStatePath 'capabilities'
-    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities
+    $modelValidationPassed = Invoke-ModelValidation -Config $config -CapsDir $capsDir -Refresh:$RefreshCapabilities -ValidateOnly:$ValidateOnly
     if (-not $modelValidationPassed) { exit 2 }
     if ($ProbeModels -or $config.Settings.ProbeModels) { Invoke-ModelProbe -Config $config }
     Write-Host "Config OK: $QueuePath"
@@ -2863,12 +2984,21 @@ try {
     $skippedCount = 0
     $failedCount = 0
     $needsHumanCount = 0
+    $stoppedEarly = $false
+    $notReachedCount = 0
 
     for ($i = 0; $i -lt $Tasks.Count; $i++) {
         $task = $Tasks[$i]
         $taskNumber = $i + 1
 
         if (Test-StopRequested) {
+            $stoppedEarly = $true
+            # Count tasks that haven't been done yet (not reached).
+            for ($j = $i; $j -lt $Tasks.Count; $j++) {
+                if (-not (Test-TaskAlreadyDone -TaskIndex $j)) {
+                    $notReachedCount++
+                }
+            }
             Write-Host ""
             Write-UiBeat -Glyph ([string]$script:GlyphMoon) -Message ("Stopping after the current step (you pressed s). " + $doneCount + " task(s) done this run; rerun the same command to continue.") -Color Yellow
             break
@@ -3503,7 +3633,8 @@ try {
     Write-UiSummary -TaskCount $Tasks.Count -DoneCount $doneCount -SkippedCount $skippedCount -FailedCount $failedCount `
         -NeedsHumanCount $needsHumanCount `
         -AllCompletionCheck (-not ($Tasks | Where-Object { -not $_.CompletionCheck })) `
-        -LogPath $LogPath -StatePath $RunnerStatePath -DryRun:$DryRun
+        -LogPath $LogPath -StatePath $RunnerStatePath -DryRun:$DryRun `
+        -StoppedEarly:$stoppedEarly -NotReachedCount:$notReachedCount
 }
 catch {
     [Console]::Error.WriteLine($_.Exception.Message)
@@ -3516,6 +3647,7 @@ finally {
     Write-UiSessionTotalTime
     Remove-Item -LiteralPath $LockPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction SilentlyContinue
+    Clear-EphemeralFooter
 }
 
 exit $exitCode

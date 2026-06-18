@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "clis": {
+    "gemini": { "models": ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview"], "notes": "default / bulk workers" },
+    "claude": { "models": ["opus", "sonnet", "haiku"], "notes": "decision-heavy work" },
+    "codex":  { "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"], "notes": "very decision-heavy / fallback" },
+    "agy":    { "models": ["<gemini-model>", "<claude-model>"] }
+  },
+  "limitBuckets": [
+    { "id": "claude-5h-shared", "dimension": "5h",     "members": [{ "cli": "claude", "model": "*" }], "notes": "5-hour window is shared across ALL claude models." },
+    { "id": "claude-weekly-heavy", "dimension": "weekly", "members": [{ "cli": "claude", "model": "opus" }, { "cli": "claude", "model": "haiku" }], "notes": "Opus + Haiku draw down the weekly limit." },
+    { "id": "claude-weekly-sonnet", "dimension": "weekly", "members": [{ "cli": "claude", "model": "sonnet" }], "notes": "Sonnet is a SEPARATE weekly category — prefer it to spare the heavy bucket." },
+    { "id": "codex-shared", "dimension": "all", "members": [{ "cli": "codex", "model": "*" }], "notes": "One shared pool across all codex models — same-CLI arrays are useless." },
+    { "id": "agy-gemini", "dimension": "all", "members": [{ "cli": "agy", "model": "<gemini-models>" }], "notes": "Separate limit from agy's claude models; no shared 5h window." },
+    { "id": "agy-claude", "dimension": "all", "members": [{ "cli": "agy", "model": "<claude-models>" }] }
+  ],
+  "routing": [
+    { "when": "default / bulk work",            "prefer": "gemini" },
+    { "when": "decision-heavy / intellectual",  "prefer": "claude sonnet" },
+    { "when": "very decision-heavy",            "prefer": ["claude opus", "codex gpt-5.5"] },
+    { "when": "explicitly local",               "prefer": "ollama via codex/claude --oss" }
+  ],
+  "localModels": { "enabled": true, "examples": ["qwen3.5:9b", "nemotron-3-nano:4b"], "notes": "use --oss --local-provider ollama (see AGENTS.md)." },
+  "notes": "Free-form extra rules the agent must honor."
+}

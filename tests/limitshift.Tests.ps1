@@ -1,5 +1,6 @@
 Describe 'limitshift.ps1' {
     BeforeAll {
+        $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*\agy\*' }) -join ';'
         $repoRoot = Split-Path -Parent $PSScriptRoot
         $scriptPath = Join-Path $repoRoot 'limitshift.ps1'
         $configFixtures = Join-Path $PSScriptRoot 'fixtures\configs'
@@ -51,6 +52,33 @@ Describe 'limitshift.ps1' {
                 ExitCode = $process.ExitCode
                 Output   = ($combined -join [Environment]::NewLine)
             }
+        }
+
+        function Invoke-ValidateOnly {
+            param([string]$QueuePath, [switch]$RefreshCapabilities, [switch]$ProbeModels, [string]$ExtraPath = '')
+            $scriptArgs = @('-NoProfile', '-File', $script:__limitshiftScriptPath,
+                            '-QueuePath', $QueuePath, '-ValidateOnly')
+            if ($RefreshCapabilities) { $scriptArgs += '-RefreshCapabilities' }
+            if ($ProbeModels)          { $scriptArgs += '-ProbeModels' }
+            $oldPath = $env:PATH
+            if ($ExtraPath) { $env:PATH = "$ExtraPath;$oldPath" }
+            try { return Invoke-RunnerProcess -Arguments $scriptArgs }
+            finally { $env:PATH = $oldPath }
+        }
+
+        function Write-FakeClaudeSuccess {
+            param([string]$BinDir)
+            $stub = Join-Path $BinDir 'claude.ps1'
+            @"
+if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
+    Write-Output 'Current session: 0% used'
+    Write-Output 'Current week (all models): 0% used'
+    exit 0
+}
+`$null = [Console]::In.ReadToEnd()
+Write-Output '{"result":"done\n[[TASK_COMPLETE]]","session_id":"fake-session","is_error":false}'
+exit 0
+"@ | Set-Content -LiteralPath $stub -Encoding UTF8
         }
 
         $script:__limitshiftScriptPath = $scriptPath
@@ -119,7 +147,7 @@ Describe 'limitshift.ps1' {
             New-Item -ItemType Directory -Path $binPath -Force | Out-Null
 
             # The stub (task 1's CLI) creates the stop flag during its run - i.e. "user pressed s".
-            $flagPath = Join-Path $root 'limitshift-queue\stop-after-step.flag'
+            $flagPath = Join-Path $root 'queue\stop-after-step.flag'
             $callLog = Join-Path $root 'calls.txt'
             $geminiPath = Join-Path $binPath 'gemini.ps1'
             @"
@@ -145,9 +173,10 @@ exit 0
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Stopping after the current step'
+                $run.Output | Should -Match 'Stopped early - 1 of 2 ran \(1 not reached\)\. Rerun the same command to continue\.'
                 (@(Get-Content -LiteralPath $callLog | Where-Object { $_ })).Count | Should -Be 1
                 $run.Output | Should -Not -Match 'Task 2/2'
-                Test-Path -LiteralPath (Join-Path $root 'limitshift-queue\limitshift.lock') | Should -BeFalse
+                Test-Path -LiteralPath (Join-Path $root 'queue\limitshift.lock') | Should -BeFalse
                 Test-Path -LiteralPath $flagPath | Should -BeFalse
             }
             finally { $env:PATH = $oldPath }
@@ -958,7 +987,7 @@ exit 0
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
 
-                $csvPath = Join-Path $root 'limitshift-queue\runs.csv'
+                $csvPath = Join-Path $root 'queue\runs.csv'
                 $csvLines = @(Get-Content -LiteralPath $csvPath)
                 $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status,cli,model'
                 $dataRow = $csvLines | Where-Object { $_ -match 'Done' } | Select-Object -First 1
@@ -1322,7 +1351,7 @@ exit 0
                 $models[0] | Should -Be 'm-first'
                 $models[1] | Should -Be 'm-second'
 
-                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-model-index.txt'
+                $idxPath = Join-Path $root 'queue\sessions\task-01-model-index.txt'
                 Test-Path -LiteralPath $idxPath | Should -BeTrue
                 (Get-Content -LiteralPath $idxPath -Raw).Trim() | Should -Be '1'
             }
@@ -1595,7 +1624,7 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Not -Match 'switching to'
 
-                $failedPath = Join-Path $root 'limitshift-queue\status\task-01.failed'
+                $failedPath = Join-Path $root 'queue\status\task-01.failed'
                 Test-Path -LiteralPath $failedPath | Should -BeTrue
                 Test-Path -LiteralPath $codexCounter | Should -BeFalse
             }
@@ -1811,7 +1840,7 @@ exit 0
                 $run.Output | Should -Match 'no longer in claude'
                 $run.Output | Should -Match 'Task 1 done'
                 # Did NOT need to be flagged for a human review.
-                $needsHumanMarker = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                $needsHumanMarker = Join-Path $root 'queue\status\task-01.needs-human'
                 Test-Path -LiteralPath $needsHumanMarker | Should -BeFalse
             }
             finally { $env:PATH = $oldPath }
@@ -1852,7 +1881,7 @@ exit 1
                 # Exactly ONE claude invocation — no retries, no rotation.
                 $calls = @(if (Test-Path -LiteralPath $callCounter) { Get-Content -LiteralPath $callCounter })
                 $calls.Count | Should -Be 1
-                $needsHumanMarker = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                $needsHumanMarker = Join-Path $root 'queue\status\task-01.needs-human'
                 Test-Path -LiteralPath $needsHumanMarker | Should -BeTrue
             }
             finally { $env:PATH = $oldPath }
@@ -1978,7 +2007,7 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'switching to codex'
 
-                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
+                $idxPath = Join-Path $root 'queue\sessions\task-01-runner-index.txt'
                 Test-Path -LiteralPath $idxPath | Should -BeTrue
                 (Get-Content -LiteralPath $idxPath -Raw).Trim() | Should -Be '1'
             }
@@ -2037,12 +2066,12 @@ exit 0
                 $run.Output | Should -Match 'switching to m-second'
 
                 # Runner-scoped model-index file must exist for runner 0 (the gemini runner)
-                $modelIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-0-model-index.txt'
+                $modelIdxPath = Join-Path $root 'queue\sessions\task-01-runner-0-model-index.txt'
                 Test-Path -LiteralPath $modelIdxPath | Should -BeTrue
                 (Get-Content -LiteralPath $modelIdxPath -Raw).Trim() | Should -Be '1'
 
                 # The old flat model-index file must NOT exist (this is a fallbacks task)
-                $flatIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-model-index.txt'
+                $flatIdxPath = Join-Path $root 'queue\sessions\task-01-model-index.txt'
                 Test-Path -LiteralPath $flatIdxPath | Should -BeFalse
             }
             finally { $env:PATH = $oldPath }
@@ -2103,8 +2132,8 @@ exit 0
                 $run1 = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run1.ExitCode | Should -Be 0
 
-                $idxPath  = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
-                $mIdxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-1-model-index.txt'
+                $idxPath  = Join-Path $root 'queue\sessions\task-01-runner-index.txt'
+                $mIdxPath = Join-Path $root 'queue\sessions\task-01-runner-1-model-index.txt'
                 Test-Path -LiteralPath $idxPath | Should -BeTrue
 
                 # Manually plant a per-runner model-index so we can verify it gets deleted.
@@ -2163,7 +2192,7 @@ exit 0
                 $run = Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath)
                 $run.ExitCode | Should -Be 0
 
-                $idxPath = Join-Path $root 'limitshift-queue\sessions\task-01-runner-index.txt'
+                $idxPath = Join-Path $root 'queue\sessions\task-01-runner-index.txt'
                 Test-Path -LiteralPath $idxPath | Should -BeFalse
             }
             finally { $env:PATH = $oldPath }
@@ -2570,7 +2599,7 @@ Ripgrep is not available. Falling back to GrepTool.
             $run.ExitCode | Should -Be 0
             $run.Output | Should -Match 'Command: claude'
 
-            $statusPath = Join-Path $root 'limitshift-queue\status'
+            $statusPath = Join-Path $root 'queue\status'
             $doneFiles = Get-ChildItem -LiteralPath $statusPath -Filter '*.done' -ErrorAction SilentlyContinue
             $doneFiles | Should -BeNullOrEmpty
         }
@@ -2667,10 +2696,10 @@ exit 0
                 $run.Output | Should -Match 'Task 1 done'
                 $run.Output | Should -Match 'full prompt saved to the output file'
 
-                $statusPath = Join-Path $root 'limitshift-queue\status\task-01.done'
+                $statusPath = Join-Path $root 'queue\status\task-01.done'
                 Test-Path -LiteralPath $statusPath | Should -BeTrue
 
-                $outputFilePath = Join-Path $root 'limitshift-queue\outputs\task-01-gemini-warning-output.txt'
+                $outputFilePath = Join-Path $root 'queue\outputs\task-01-gemini-warning-output.txt'
                 Test-Path -LiteralPath $outputFilePath | Should -BeTrue
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match 'say hi'
@@ -2840,7 +2869,7 @@ exit 0
                 $run.ExitCode | Should -Be 0
                 $run.Output | Should -Match 'Task 1 done'
 
-                $donePath = Join-Path $root 'limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $root 'queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
 
                 $received = [System.IO.File]::ReadAllText($receivedFile)
@@ -2910,7 +2939,7 @@ exit 0
                 $run.Output | Should -Match 'Hit a usage limit'
                 $run.Output | Should -Match 'Task 1 done'
 
-                $donePath = Join-Path $root 'limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $root 'queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
             }
             finally {
@@ -2969,7 +2998,7 @@ exit 0
                 $run.ExitCode | Should -Be 1
                 $run.Output | Should -Match 'no progress'
 
-                $failedPath = Join-Path $root 'limitshift-queue\status\task-01.failed'
+                $failedPath = Join-Path $root 'queue\status\task-01.failed'
                 Test-Path -LiteralPath $failedPath | Should -BeTrue
                 $failedText = [System.IO.File]::ReadAllText($failedPath)
                 $failedText | Should -Match 'no progress: agent repeated the same response without a completion marker'
@@ -3033,7 +3062,7 @@ exit 0
                 $run.Output | Should -Not -Match '"result"'
 
                 # The raw JSON still lands in the per-task output file.
-                $outputFilePath = Join-Path $root 'limitshift-queue\outputs\task-01-clean-output-task-output.txt'
+                $outputFilePath = Join-Path $root 'queue\outputs\task-01-clean-output-task-output.txt'
                 $outputFileText = [System.IO.File]::ReadAllText($outputFilePath)
                 $outputFileText | Should -Match '"session_id"'
             }
@@ -3150,18 +3179,18 @@ exit 0
                 )
                 $run.ExitCode | Should -Be 0
 
-                $donePath = Join-Path $fx.Root 'limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root 'queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
                 $doneLines = @(Get-Content -LiteralPath $donePath)
                 # Two lines: timestamp then a 64-hex fingerprint.
                 $doneLines.Count | Should -Be 2
                 $doneLines[1] | Should -Match '^[0-9a-f]{64}$'
 
-                $readmePath = Join-Path $fx.Root 'limitshift-queue\_README.txt'
+                $readmePath = Join-Path $fx.Root 'queue\_README.txt'
                 Test-Path -LiteralPath $readmePath | Should -BeTrue
                 (Get-Content -LiteralPath $readmePath -Raw) | Should -Match 'delete this whole folder'
 
-                $csvPath = Join-Path $fx.Root 'limitshift-queue\runs.csv'
+                $csvPath = Join-Path $fx.Root 'queue\runs.csv'
                 Test-Path -LiteralPath $csvPath | Should -BeTrue
                 $csvLines = @(Get-Content -LiteralPath $csvPath)
                 $csvLines[0] | Should -Be 'timestamp,task,run,mode,exit,status,cli,model'
@@ -3181,9 +3210,9 @@ exit 0
                     '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $fx.QueuePath
                 )
                 $first.ExitCode | Should -Be 0
-                $donePath = Join-Path $fx.Root 'limitshift-queue\status\task-01.done'
+                $donePath = Join-Path $fx.Root 'queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
-                $sessionPath = Join-Path $fx.Root 'limitshift-queue\sessions\task-01-session-id.txt'
+                $sessionPath = Join-Path $fx.Root 'queue\sessions\task-01-session-id.txt'
                 Test-Path -LiteralPath $sessionPath | Should -BeTrue
 
                 # Change the prompt in the queue, then re-run.
@@ -3213,7 +3242,7 @@ exit 0
                 $env:PATH = "$($fx.BinPath);$oldPath"
 
                 # Seed a legacy single-line .done marker for an otherwise-unchanged queue task.
-                $statusPath = Join-Path $fx.Root 'limitshift-queue\status'
+                $statusPath = Join-Path $fx.Root 'queue\status'
                 New-Item -ItemType Directory -Path $statusPath -Force | Out-Null
                 $donePath = Join-Path $statusPath 'task-01.done'
                 (Get-Date).ToString("s") | Set-Content -LiteralPath $donePath -Encoding UTF8
@@ -3293,8 +3322,8 @@ exit 0
         }
     }
 
-    Context 'State-folder migration (Task 5.3)' {
-        It 'migrates an old .ai-runner state folder to the .limitshift name, preserving contents' {
+    Context 'State-folder naming (no limitshift- prefix)' {
+        It 'names the state folder exactly after the queue file and leaves old limitshift- folders untouched' {
             $root = New-TestRoot
             $projectPath = Join-Path $root 'project'
             $binPath = Join-Path $root 'bin'
@@ -3303,18 +3332,12 @@ exit 0
 
             $claudePath = Join-Path $binPath 'claude.ps1'
             @"
-if (`$args.Count -ge 2 -and `$args[0] -eq '-p' -and `$args[1] -eq '/usage') {
-    Write-Output 'Current session: 0% used'
-    Write-Output 'Current week (all models): 0% used'
-    exit 0
-}
 `$null = [Console]::In.ReadToEnd()
 Write-Output '{"result":"did it\n[[TASK_COMPLETE]]","session_id":"s-1","is_error":false}'
 exit 0
 "@ | Set-Content -LiteralPath $claudePath -Encoding UTF8
 
-            # The queue file is queue.json, so RunnerName = 'queue' and the legacy state folder the
-            # runner migrates is .ai-runner-queue (next to the queue file).
+            # Queue file is queue.json, so the state folder must be queue/ (NOT limitshift-queue/).
             $queuePath = Join-Path $root 'queue.json'
             Write-TestQueue -Path $queuePath -Config @{
                 settings = @{
@@ -3325,16 +3348,15 @@ exit 0
                     resetBufferMinutes = 0
                 }
                 tasks = @(
-                    @{ name = 'migrate task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it' }
+                    @{ name = 'naming task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it' }
                 )
             }
 
-            # Seed an OLD-named state folder with a marker file whose contents must survive.
-            $legacyStatePath = Join-Path $root '.ai-runner-queue'
-            New-Item -ItemType Directory -Path $legacyStatePath -Force | Out-Null
-            $markerPath = Join-Path $legacyStatePath 'marker.txt'
-            $markerContents = 'preserve me 123'
-            Set-Content -LiteralPath $markerPath -Value $markerContents -Encoding UTF8
+            # Forward-only: seed the OLD prefixed folder; the runner must NOT touch or migrate it.
+            $oldPrefixedPath = Join-Path $root 'limitshift-queue'
+            New-Item -ItemType Directory -Path $oldPrefixedPath -Force | Out-Null
+            $oldMarkerPath = Join-Path $oldPrefixedPath 'marker.txt'
+            Set-Content -LiteralPath $oldMarkerPath -Value 'leave me alone' -Encoding UTF8
 
             $oldPath = $env:PATH
             try {
@@ -3343,15 +3365,19 @@ exit 0
                     '-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $queuePath
                 )
                 $run.ExitCode | Should -Be 0
-                $run.Output | Should -Match 'Migrated state folder \.ai-runner-queue -> limitshift-queue'
 
-                $newStatePath = Join-Path $root 'limitshift-queue'
-                Test-Path -LiteralPath $newStatePath | Should -BeTrue
-                Test-Path -LiteralPath $legacyStatePath | Should -BeFalse
+                # New, un-prefixed folder is used.
+                $newStatePath = Join-Path $root 'queue'
+                Test-Path -LiteralPath (Join-Path $newStatePath 'status\task-01.done') | Should -BeTrue
 
-                $migratedMarkerPath = Join-Path $newStatePath 'marker.txt'
-                Test-Path -LiteralPath $migratedMarkerPath | Should -BeTrue
-                (Get-Content -LiteralPath $migratedMarkerPath -Raw).TrimEnd("`r", "`n") | Should -Be $markerContents
+                # A self-ignoring .gitignore keeps the folder out of git regardless of its name.
+                $gitignorePath = Join-Path $newStatePath '.gitignore'
+                Test-Path -LiteralPath $gitignorePath | Should -BeTrue
+                (Get-Content -LiteralPath $gitignorePath -Raw).Trim() | Should -Be '*'
+
+                # Forward-only: the old prefixed folder and its contents are left untouched.
+                (Get-Content -LiteralPath $oldMarkerPath -Raw).TrimEnd("`r", "`n") | Should -Be 'leave me alone'
+                Test-Path -LiteralPath (Join-Path $oldPrefixedPath 'status\task-01.done') | Should -BeFalse
             }
             finally {
                 $env:PATH = $oldPath
@@ -3410,8 +3436,8 @@ exit 0
                 $run.Output | Should -Match 'Using legacy queue filename ai-run-queue.json'
                 $run.Output | Should -Match 'Task 1 done'
 
-                # The legacy queue was actually used: its state folder (.ai-run-queue) was created.
-                $donePath = Join-Path $root 'limitshift-ai-run-queue\status\task-01.done'
+                # The legacy queue was actually used: its state folder (ai-run-queue/) was created.
+                $donePath = Join-Path $root 'ai-run-queue\status\task-01.done'
                 Test-Path -LiteralPath $donePath | Should -BeTrue
             }
             finally {
@@ -3569,7 +3595,7 @@ exit 0
             New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
             $binDir = New-AgyStub -Root $root -Models @('fresh-model')
             $qPath = Join-Path $root 'q.json'
-            $capsDir = Join-Path $root 'limitshift-q\capabilities'
+            $capsDir = Join-Path $root 'q\capabilities'
             New-Item -ItemType Directory -Path $capsDir -Force | Out-Null
             $stale = '{"Cli":"agy","SupportsModelDiscovery":true,"Models":["stale-model"],"Source":"agy models","DiscoveredAt":"2000-01-01T00:00:00Z","Error":""}'
             Set-Content (Join-Path $capsDir 'agy.json') $stale -Encoding UTF8
@@ -3691,7 +3717,7 @@ exit 0
             } finally {
                 $env:PATH = $oldPath
             }
-            $stateDir = Join-Path $root 'limitshift-myproject-queue'
+            $stateDir = Join-Path $root 'myproject-queue'
 
             $run.ExitCode | Should -Be 0
             $run.Output   | Should -Match 'Task 1 done'
@@ -3739,8 +3765,8 @@ exit 0
             Invoke-RunQueue -QueuePath (Join-Path $root 'alpha-queue.json') -ExtraPath $binDir | Out-Null
             Invoke-RunQueue -QueuePath (Join-Path $root 'beta-queue.json')  -ExtraPath $binDir | Out-Null
 
-            $alphaState = Join-Path $root 'limitshift-alpha-queue'
-            $betaState  = Join-Path $root 'limitshift-beta-queue'
+            $alphaState = Join-Path $root 'alpha-queue'
+            $betaState  = Join-Path $root 'beta-queue'
 
             Test-Path (Join-Path $alphaState 'status\task-01.done') | Should -BeTrue
             Test-Path (Join-Path $betaState  'status\task-01.done') | Should -BeTrue
@@ -3761,7 +3787,7 @@ exit 0
                 tasks    = @(@{ name = 'stale lock task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
             }
 
-            $stateDir = Join-Path $root 'limitshift-q'
+            $stateDir = Join-Path $root 'q'
             New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
             $lockPath = Join-Path $stateDir 'limitshift.lock'
             '99999999' | Set-Content -LiteralPath $lockPath -Encoding UTF8 -NoNewline
@@ -3786,7 +3812,7 @@ exit 0
                 tasks    = @(@{ name = 'lock live task'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it'; extraArgs = @('--permission-mode', 'acceptEdits') })
             }
 
-            $stateDir = Join-Path $root 'limitshift-q'
+            $stateDir = Join-Path $root 'q'
             New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
             $lockPath = Join-Path $stateDir 'limitshift.lock'
 
@@ -3898,7 +3924,7 @@ exit 0
                 $run.Output | Should -Not -Match 'recovery round'
                 [int](Get-Content -LiteralPath $counterFile -Raw) | Should -Be 1
 
-                $needsHumanPath = Join-Path $root 'limitshift-queue\status\task-01.needs-human'
+                $needsHumanPath = Join-Path $root 'queue\status\task-01.needs-human'
                 Test-Path -LiteralPath $needsHumanPath | Should -BeTrue
                 (Get-Content -LiteralPath $needsHumanPath -Raw) | Should -Match 'HUMAN: need keys'
             }
@@ -3938,9 +3964,78 @@ exit 0
                 $run.Output | Should -Match 'needs human review: still stuck'
                 $run.Output | Should -Match '1 need human review'
 
-                Test-Path -LiteralPath (Join-Path $root 'limitshift-queue\status\task-01.needs-human') | Should -BeTrue
+                Test-Path -LiteralPath (Join-Path $root 'queue\status\task-01.needs-human') | Should -BeTrue
             }
             finally { $env:PATH = $oldPath }
+        }
+
+        It 'ephemeral footer strings are not in the log' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            $binDir = Join-Path $root 'bin'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+            Write-FakeClaudeSuccess -BinDir $binDir
+
+            $qPath = Join-Path $root 'queue.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ stopOnError = $true; maxRunsPerTask = 1; maxRetriesOnError = 0; limitWaitMinutes = 1; resetBufferMinutes = 0 }
+                tasks    = @(@{ name = 'footer test'; cli = 'claude'; projectPath = $projectPath; prompt = 'do it' })
+            }
+
+            $oldPath = $env:PATH
+            try {
+                $env:PATH = "$binDir;$oldPath"
+                Invoke-RunnerProcess -Arguments @('-NoProfile', '-File', $script:__limitshiftScriptPath, '-QueuePath', $qPath) | Out-Null
+                $logPath = Join-Path $root 'queue\limitshift-log.txt'
+                
+                $logContent = Get-Content -LiteralPath $logPath -Raw
+                $logContent | Should -Not -Match "Ctrl\+C stop now"
+                $logContent | Should -Not -Match "stopping after this task"
+            }
+            finally { $env:PATH = $oldPath }
+        }
+    }
+
+    Describe 'profile-based model validation' {
+        BeforeAll {
+            $profilePath = Join-Path $repoRoot 'limitshift-profile.json'
+            if (Test-Path $profilePath) { Remove-Item $profilePath -Force }
+            Set-Content $profilePath '{"clis": {"claude": {"models": ["valid-model"]}}}' -Encoding UTF8
+        }
+        AfterAll {
+            $profilePath = Join-Path $repoRoot 'limitshift-profile.json'
+            if (Test-Path $profilePath) { Remove-Item $profilePath -Force }
+        }
+
+        It 'flags typo model when in profile (strict)' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $qPath = Join-Path $root 'q.json'
+            
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'strictWhenDiscoverable' }
+                tasks    = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='typo-model'; prompt='p' })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath
+            $result.ExitCode | Should -Be 2
+            $result.Output | Should -Match 'not available'
+        }
+        
+        It 'passes valid model in profile' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $qPath = Join-Path $root 'q.json'
+            
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'strictWhenDiscoverable' }
+                tasks    = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='valid-model'; prompt='p' })
+            }
+            $result = Invoke-ValidateOnly -QueuePath $qPath
+            $result.ExitCode | Should -Be 0
+            $result.Output | Should -Match 'Config OK'
         }
     }
 }

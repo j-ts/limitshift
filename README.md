@@ -370,9 +370,9 @@ Each queue file gets its own isolated state folder. The recommended workflow for
 
 **Name resolution:** a bare filename (no path separators) is looked up next to the script, so `-QueuePath project-a-queue.json` and `-QueuePath C:\path\to\project-a-queue.json` are both valid.
 
-**State isolation:** each queue's sessions, outputs, status markers, and log live in `limitshift-<queue-name>/` next to its JSON file. Two queues never share state, even when run side by side.
+**State isolation:** each queue's sessions, outputs, status markers, and log live in a folder named after the queue file (`<queue-name>/`) next to its JSON file — e.g. `career-ops.json` → `career-ops/`; the default `limitshift-queue.json` → `limitshift-queue/`. Two queues never share state, even when run side by side.
 
-**Concurrency lock:** if you accidentally start the same queue twice, the second run detects the lock file left by the first and exits immediately with an error naming the queue and the running PID. Once the first run finishes (or is killed), the lock is released and you can start again. To force-unlock a stale lock after an unexpected crash, delete `limitshift-<queue-name>/limitshift.lock`.
+**Concurrency lock:** if you accidentally start the same queue twice, the second run detects the lock file left by the first and exits immediately with an error naming the queue and the running PID. Once the first run finishes (or is killed), the lock is released and you can start again. To force-unlock a stale lock after an unexpected crash, delete `<queue-name>/limitshift.lock`.
 
 **Mixed-project queues:** you can still put tasks for multiple projects inside one queue using per-task `projectPath` values; this remains fully supported. Separate queue files are recommended when you want parallel execution or clearer state separation.
 

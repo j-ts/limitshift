@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Personal agent preference profile.** Added agent-facing `limitshift-profile.json` support for local model and budget preferences, shipped a committed `limitshift-profile.example.json`, documented the onboarding protocol in `AGENTS.md`, and taught `--validate-only` to perform an offline cross-check of queue model choices against the profile.
+
+### Changed
+- **State folders are named exactly after the queue file — the `limitshift-` prefix is gone (breaking).** A queue `career-ops_01.json` now keeps its state in `career-ops_01/` instead of `limitshift-career-ops_01/`. The default `limitshift-queue.json` is unchanged (`limitshift-queue/`), since its name already starts with `limitshift-`. This is **forward-only**: existing `limitshift-<name>/` folders are left untouched (not migrated), so a queue that had prior state starts fresh under the new folder name — delete the old folder once you've confirmed the new run, or rename it yourself to carry state over. Because the new folder names are arbitrary, the runner now writes a self-ignoring `.gitignore` (`*`) inside each state folder so private transcripts/prompts stay out of git regardless of the folder's name (the repo's global `limitshift-*/` rule still covers the default). Applied identically to `limitshift.ps1` and `limitshift.sh`; the old state-folder migration code is removed, and tests/docs are updated.
+- **Graceful-stop summaries now report partial progress clearly.** Early stops print a `Stopped early - K of N ran (M not reached)` summary so users can tell how many tasks actually ran and which target count was not reached.
+- **The FYI footer is ephemeral and agy live chatter is silenced.** The reminder footer is never written to the log and is wiped on every exit path, while Antigravity (`agy`) runs now suppress live terminal chatter so only the recovered final answer is shown.
+
+### Fixed
+- **Graceful stop no longer implies a full queue run.** Partial stop output now distinguishes an intentional early stop from all-done or failure summaries.
+
 ## [1.2.0] - 2026-06-18
 
 ### Added

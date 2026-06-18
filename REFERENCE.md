@@ -77,7 +77,7 @@ LimitShift validates model names at runtime against each CLI's own model list du
 
 **Typo detection:** if a model is missing, LimitShift suggests the nearest known model names (edit distance ≤ 4).
 
-**Cache location:** `limitshift-<queue>/capabilities/<cli>.json` next to the queue file.
+**Cache location:** `<queue>/capabilities/<cli>.json` — in the queue's state folder (named after the queue file), next to the queue file.
 
 ## CLI rotation
 
@@ -154,7 +154,7 @@ When you press `s`, the status line switches to "stopping after this task…" as
 
 ## Where LimitShift saves state
 
-Everything lives in `limitshift-<queue-name>/` next to your queue (for the default file, `limitshift-queue/`): session ids (to resume the same conversation), `outputs/` (raw output per run), `status/` (`.done` / `.failed` markers), `runs.csv`, and a log.
+Everything lives in a folder named after your queue file, next to it (`<queue-name>/` — e.g. `myproj.json` → `myproj/`; the default `limitshift-queue.json` → `limitshift-queue/`): session ids (to resume the same conversation), `outputs/` (raw output per run), `status/` (`.done` / `.failed` markers), `runs.csv`, and a log.
 
 Editing a task's `name`, `prompt`, `cli`, `projectPath`, `model`, `effort`, or `extraArgs` auto-invalidates its `.done` marker and re-runs it with a fresh session; untouched tasks stay skipped. Delete a single `status/task-NN.done` to re-run one task, or delete the whole folder to start over — it's rebuilt on the next run.
 

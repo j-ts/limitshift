@@ -71,4 +71,4 @@ Create one queue JSON per project, then open a separate terminal for each:
 ./limitshift.sh --queue-path project-b-queue.json
 ```
 
-Each queue keeps its state in its own `limitshift-<name>/` folder. If you accidentally start the same queue twice, the second run exits immediately with an error — you'll see the PID of the first run in the message.
+Each queue keeps its state in its own folder, named after the queue file (`<name>/`). If you accidentally start the same queue twice, the second run exits immediately with an error — you'll see the PID of the first run in the message.

@@ -383,13 +383,24 @@ ui_print_session_total_time() {
 #   all new + any completionCheck off-> "executed. Please check the work manually"
 #
 # Args: task_count, done_count, failed_count, skipped_count, all_completion_check,
-#       log_path, state_path, dry_run
+#       log_path, state_path, dry_run, needs_human_count, stopped_early, not_reached_count
 ui_summary() {
   local task_count="$1" done_count="$2" failed_count="$3" skipped_count="$4"
   local all_completion_check="$5" log_path="$6" state_path="$7" dry_run="${8:-0}" needs_human_count="${9:-0}"
+  local stopped_early="${10:-0}" not_reached_count="${11:-0}"
   printf '\n'
   ui_separator
   printf '\n'
+
+  if [ "$stopped_early" -eq 1 ]; then
+    local ran_count=$((done_count + failed_count))
+    ui_color "$UI_ACCENT" "  $GLYPH_DIAMOND Stopped early - ${ran_count} of ${task_count} ran (${not_reached_count} not reached). Rerun the same command to continue."
+    printf '\n'
+    ui_color "$UI_DIM" "    log saved to ${log_path}"
+    printf '\n'
+    ui_print_session_total_time
+    return
+  fi
 
   if [ "$dry_run" -eq 1 ]; then
     local plural="s"; [ "$task_count" -eq 1 ] && plural=""
@@ -554,6 +565,13 @@ ui_spinner_stop() {
     fi
   fi
 }
+# Clear the ephemeral footer (hint) on script exit to ensure it doesn't linger in scrollback or logs.
+ui_clear_ephemeral_footer() {
+  # Move cursor to the hint line (same as spinner line) and clear it.
+  printf '\r%s\r' "$(printf ' %.0s' $(seq 1 $(tput cols)))"
+}
+# Register EXIT trap to clear the footer.
+trap 'ui_clear_ephemeral_footer' EXIT
 
 # Calm "resting" countdown to the given wake-time epoch. Falls back to plain sleep
 # off a TTY.
@@ -1188,6 +1206,12 @@ validate_model_availability() {
   local caps_dir="$1" refresh="$2" policy="$3" cache_hours="$4"
   local had_error=0 i=0 cli model_type
   [ "$policy" = "off" ] && return 0
+  
+  local profile_json=""
+  if [ -f "limitshift-profile.json" ]; then
+    profile_json=$(cat limitshift-profile.json)
+  fi
+
   while [ "$i" -lt "$TASK_COUNT" ]; do
     local n=$((i + 1))
     cli=$(task_field "$i" "cli" | tr '[:upper:]' '[:lower:]')
@@ -1217,8 +1241,31 @@ validate_model_availability() {
         fi
       done <<< "$models_to_check"
     else
-      local err_msg; err_msg=$(printf '%s' "$caps" | jq -r '.error // ""')
-      echo "  INFO: Task $n: model validation skipped for $cli ($err_msg)" >&2
+      local validated=0
+      if [ -n "$profile_json" ]; then
+        local declared_models; declared_models=$(printf '%s' "$profile_json" | jq -r ".clis[\"$cli\"].models[]? // empty" 2>/dev/null)
+        local models_to_check; models_to_check=$(get_task_models "$i")
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            if ! printf '%s\n' "$declared_models" | grep -qxF "$m"; then
+              case "$policy" in
+                strictWhenDiscoverable)
+                  echo "ERROR: Task $n: model \"$m\" is not available for $cli in profile" >&2
+                  had_error=1
+                  ;;
+                warn)
+                  echo "WARNING: Task $n: model \"$m\" not found in profile for $cli (continuing)" >&2
+                  ;;
+              esac
+              validated=1
+            fi
+        done <<< "$models_to_check"
+      fi
+      
+      if [ "$validated" -eq 0 ]; then
+        local err_msg; err_msg=$(printf '%s' "$caps" | jq -r '.error // ""')
+        echo "  INFO: Task $n: model validation skipped for $cli ($err_msg)" >&2
+      fi
     fi
     i=$((i + 1))
   done
@@ -2118,7 +2165,15 @@ invoke_cli_task_run() {
   if [ "$cli" = "agy" ] || [ "$cli" = "copilot" ]; then
     run_start=$(date +%s)
     tmp_err=$(mktemp)
-    ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
+    if [ "$cli" = "agy" ]; then
+      if command -v setsid >/dev/null 2>&1; then
+        ( cd "$project_path" && setsid "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
+      else
+        ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
+      fi
+    else
+      ( cd "$project_path" && "$CLI_EXE" "${CLI_ARGS[@]}" </dev/null ) > "$tmp_out" 2> "$tmp_err"
+    fi
     exit_code=$?
     run_elapsed=$(( $(date +%s) - run_start ))
     ui_add_session_total_time "$run_elapsed"
@@ -2166,25 +2221,13 @@ invoke_cli_task_run() {
 }
 
 initialize_runner_state() {
-  # Migrate legacy state folders to the current name.
-  if [ ! -d "$RUNNER_STATE_PATH" ]; then
-    if [ "$STUTTERED_STATE_PATH" != "$RUNNER_STATE_PATH" ] && [ -d "$STUTTERED_STATE_PATH" ]; then
-      mv "$STUTTERED_STATE_PATH" "$RUNNER_STATE_PATH"
-      echo "Migrated state folder limitshift-$RUNNER_NAME -> limitshift-$STATE_NAME"
-    elif [ -d "$LEGACY_DOT_STATE_PATH" ]; then
-      mv "$LEGACY_DOT_STATE_PATH" "$RUNNER_STATE_PATH"
-      echo "Migrated state folder .limitshift-$RUNNER_NAME -> limitshift-$STATE_NAME"
-    elif [ -d "$LEGACY_RUNNER_STATE_PATH" ]; then
-      mv "$LEGACY_RUNNER_STATE_PATH" "$RUNNER_STATE_PATH"
-      echo "Migrated state folder .ai-runner-$RUNNER_NAME -> limitshift-$STATE_NAME"
-    fi
-  fi
   mkdir -p "$RUNNER_STATE_PATH"
   mkdir -p "$SESSION_STATE_PATH"
   mkdir -p "$OUTPUT_STATE_PATH"
   mkdir -p "$STATUS_STATE_PATH"
   rm -f "$STOP_FLAG" 2>/dev/null || true
   write_state_readme
+  write_state_gitignore
   initialize_runs_csv
 }
 
@@ -2206,6 +2249,13 @@ Re-running:
   Editing a task's name, prompt, cli, projectPath, model, effort, or extraArgs now AUTO-INVALIDATES
   its done marker: the runner notices the change and re-runs that task with a fresh session.
 EOF
+}
+
+write_state_gitignore() {
+  # Keep the state folder out of git no matter what it is named (the repo's global "limitshift-*/"
+  # rule only matches the default queue's folder). A self-ignoring ".gitignore" excludes everything,
+  # including itself, so private transcripts/prompts never get committed.
+  printf '%s\n' '*' > "$STATE_GITIGNORE_PATH"
 }
 
 initialize_runs_csv() {
@@ -2277,13 +2327,11 @@ QUEUE_DIR="$(cd "$(dirname "$QUEUE_PATH")" && pwd)"
 QUEUE_FILE_NAME="$(basename "$QUEUE_PATH")"
 QUEUE_PATH="$QUEUE_DIR/$QUEUE_FILE_NAME"
 RUNNER_NAME="${QUEUE_FILE_NAME%.*}"
-# Strip "limitshift-" prefix to avoid stutter (limitshift-limitshift-queue -> limitshift-queue).
-STATE_NAME="$RUNNER_NAME"
-case "$STATE_NAME" in limitshift-*) STATE_NAME="${STATE_NAME#limitshift-}" ;; esac
-RUNNER_STATE_PATH="$QUEUE_DIR/limitshift-$STATE_NAME"
-STUTTERED_STATE_PATH="$QUEUE_DIR/limitshift-$RUNNER_NAME"
-LEGACY_DOT_STATE_PATH="$QUEUE_DIR/.limitshift-$RUNNER_NAME"
-LEGACY_RUNNER_STATE_PATH="$QUEUE_DIR/.ai-runner-$RUNNER_NAME"
+# State folder is named exactly after the queue file — no "limitshift-" prefix added. The default
+# queue limitshift-queue.json keeps its limitshift-queue/ folder (its name already starts with
+# limitshift-); every other queue gets a folder matching its own name (career-ops_01.json ->
+# career-ops_01/). Forward-only: pre-existing limitshift-<name> folders are left untouched, not migrated.
+RUNNER_STATE_PATH="$QUEUE_DIR/$RUNNER_NAME"
 SESSION_STATE_PATH="$RUNNER_STATE_PATH/sessions"
 OUTPUT_STATE_PATH="$RUNNER_STATE_PATH/outputs"
 STATUS_STATE_PATH="$RUNNER_STATE_PATH/status"
@@ -2291,6 +2339,7 @@ LOG_PATH="$RUNNER_STATE_PATH/limitshift-log.txt"
 STOP_FLAG="$RUNNER_STATE_PATH/stop-after-step.flag"
 RUNS_CSV_PATH="$RUNNER_STATE_PATH/runs.csv"
 STATE_README_PATH="$RUNNER_STATE_PATH/_README.txt"
+STATE_GITIGNORE_PATH="$RUNNER_STATE_PATH/.gitignore"
 RUNS_CSV_HEADER="timestamp,task,run,mode,exit,status,cli,model"
 
 read_queue_config
@@ -2331,7 +2380,13 @@ initialize_runner_state
 
 echo $$ > "$LOCK_PATH"
 trap 'ui_print_session_total_time; exit 130' INT TERM
-trap 'ui_spinner_stop; rm -f "$LOCK_PATH" "$STOP_FLAG"; ui_print_session_total_time' EXIT
+ui_clear_ephemeral_footer() {
+  if ! ui_animatable; then return; fi
+  if [ ! -w /dev/tty ]; then return; fi
+  printf '\r\033[K' > /dev/tty
+}
+
+trap 'ui_spinner_stop; ui_clear_ephemeral_footer; rm -f "$LOCK_PATH" "$STOP_FLAG"; ui_print_session_total_time' EXIT
 
 run_queue() {
   UI_SESSION_TOTAL_SECONDS=0
@@ -2354,6 +2409,7 @@ run_queue() {
   fi
 
   local doneCount=0 skippedCount=0 failedCount=0 needsHumanCount=0 allCompletionCheck=1
+  local stopped_early=0 not_reached_count=0
   local ci=0
   while [ "$ci" -lt "$TASK_COUNT" ]; do
     if [ "$(task_completion_check "$ci")" != "true" ]; then allCompletionCheck=0; fi
@@ -2372,6 +2428,13 @@ run_queue() {
     recoveryOutputTail=""
 
     if stop_requested; then
+      stopped_early=1
+      # Count tasks that haven't been done yet (not reached).
+      for ((j=i; j<TASK_COUNT; j++)); do
+        if ! test_task_already_done "$j"; then
+          not_reached_count=$((not_reached_count + 1))
+        fi
+      done
       printf '\n'
       ui_beat "$GLYPH_MOON" "Stopping after the current step (you pressed s). ${doneCount} task(s) done this run; rerun the same command to continue." "$UI_BLUE"
       break
@@ -3107,7 +3170,7 @@ run_queue() {
     i=$((i + 1))
   done
 
-  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$skippedCount" "$allCompletionCheck" "$LOG_PATH" "$RUNNER_STATE_PATH" "$DRY_RUN" "$needsHumanCount"
+  ui_summary "$TASK_COUNT" "$doneCount" "$failedCount" "$skippedCount" "$allCompletionCheck" "$LOG_PATH" "$RUNNER_STATE_PATH" "$DRY_RUN" "$needsHumanCount" "$stopped_early" "$not_reached_count"
 }
 
 # Run the queue and tee output to the log. The spinner writes to /dev/tty so its

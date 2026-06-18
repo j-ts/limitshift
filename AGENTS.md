@@ -45,6 +45,11 @@ the `cli`. (The user must have agy installed and signed in, same as any other CL
    - Windows: `.\limitshift.ps1 -ValidateOnly`
    - macOS/Linux: `./limitshift.sh --validate-only`
 
+### Model and Budget Profile (`limitshift-profile.json`)
+
+When present, `limitshift-profile.json` at the repository root serves as the authoritative source for an agent's preferred LLM models, budget allocations, and routing logic. It overrides the generic Model-and-Effort guidance for `limitshift-queue.json` construction. Agents should read this file FIRST. If this file exists, ensure that the `model` and `extraArgs.budgetBucket` fields in the generated `limitshift-queue.json` entries reflect the choices defined here. For example, if `limitshift-profile.json` specifies `agy` should use `claude-3-opus-20240229` with `claude-5h-shared` bucket, the agent **must** use those values for `agy` tasks, regardless of generic instructions.
+
+
 ## Queue Schema Essentials
 
 Each task must include:
@@ -209,7 +214,7 @@ for why and for the commit-before-rotation guidance.
 
 ## Multiple Queues
 
-The recommended workflow when a user wants to work on two or more projects at the same time is **one queue file per project**, named after the project (e.g. `project-a-queue.json`, `project-b-queue.json`). Each queue gets its own isolated state folder automatically (`limitshift-project-a-queue/`, etc.).
+The recommended workflow when a user wants to work on two or more projects at the same time is **one queue file per project**, named after the project (e.g. `project-a-queue.json`, `project-b-queue.json`). Each queue gets its own isolated state folder automatically, named after the queue file (`project-a-queue/`, etc.).
 
 To run multiple queues in parallel the user opens separate terminals:
 ```powershell
@@ -234,6 +239,17 @@ Avoid:
 - Using unescaped Windows backslashes in JSON.
 - Choosing a model/effort combination that validation rejects.
 - Omitting `extraArgs` on tasks expected to modify files.
+
+## Agent Onboarding & Profile Initialization
+
+To ensure optimal LLM utilization and budget adherence, new agents (or users setting up their local agent environment) should follow this protocol to initialize their `limitshift-profile.json`:
+
+1.  **CLI Selection:** Identify which LLM CLIs the agent will primarily use (e.g., `agy`, `claude`, `gemini`, `codex`, `ollama`).
+2.  **Budget Allocation:** For each active CLI, determine the appropriate budget buckets and reset dimensions based on allocated project resources and expected usage patterns. Refer to `limitBuckets` in `limitshift-profile.example.json` for common patterns (e.g., `claude-5h-shared`, `claude-weekly-sonnet`, `agy-gemini-bucket`).
+3.  **Routing Preferences:** Define a `modelPreference` array for each CLI, listing models in descending order of preference.
+4.  **Local Model Integration (Optional):** If using local LLMs (e.g., via Ollama), configure their details under `localModels`. For Antigravity CLI (`agy`), use `agy models` to discover available models and pre-fill this section where applicable.
+5.  **Profile Generation:** Based on the above, create or update `limitshift-profile.json` at the repository root, mirroring the structure of `limitshift-profile.example.json`. This file is personal to the agent's environment and should not typically be committed to version control.
+
 
 ## Security and Safety
 
