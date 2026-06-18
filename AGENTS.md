@@ -4,6 +4,18 @@ This repository contains **LimitShift**, a small cross-platform queue runner for
 (`claude`, `codex`, `gemini`, `agy`, and `copilot`). Your most common task is to convert a user's rough draft into a
 valid `limitshift-queue.json` that LimitShift can run.
 
+> ## "init" / "onboard" / "set up" means *create the user's config* — NOT document the codebase
+>
+> If the user says **init**, **initialize**, **onboard**, **set up**, or "**set up this folder**", do
+> **NOT** analyze the repository and write or expand `CLAUDE.md`, `README.md`, `GEMINI.md`, or any
+> other docs — that is the generic meaning of "init", and it is wrong here. In this repo it means
+> **help the user build their personal LimitShift config**:
+> 1. their model/routing **profile** — `limitshift-profile.json` (see
+>    [Agent Onboarding & Profile Initialization](#agent-onboarding--profile-initialization)); and/or
+> 2. their **queue** — `limitshift-queue.json` (see [Queue-Building Workflow](#queue-building-workflow)).
+>
+> Interview the user and write those files. Only edit docs when the user explicitly asks you to.
+
 `agy` is the **Antigravity CLI**, Google's official successor to Gemini CLI for individual Google AI
 Pro/Ultra accounts (Gemini CLI stays for enterprise). It is fully supported, with two caveats baked
 into the runner: it has **no headless output mode** — in `-p` print mode it renders the reply to a
@@ -242,7 +254,7 @@ Avoid:
 
 ## Agent Onboarding & Profile Initialization
 
-When the user asks to "onboard" or set up their profile, help them create `limitshift-profile.json` (at the repo root, next to the runner) by walking through:
+When the user asks to **"init"**, **"initialize"**, **"onboard"**, or **"set up"** (their profile, or "this folder"), help them create `limitshift-profile.json` (at the repo root, next to the runner) by walking through:
 
 1.  **CLIs in use:** which LLM CLIs they run (`claude`, `codex`, `gemini`, `agy`, `copilot`) and any local-model (Ollama) use.
 2.  **Available models per CLI:** list the models for each under `clis.<cli>.models`. For `agy` — the only CLI with a model-list command — run `agy models` to discover them; the others must be listed by hand.

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Graceful stop no longer implies a full queue run.** Partial stop output now distinguishes an intentional early stop from all-done or failure summaries.
+- **Agent onboarding (`init` / `onboard`) no longer rewrites `CLAUDE.md`.** `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` now state up front that "init", "initialize", "onboard", or "set up" means *help the user create their LimitShift config* (`limitshift-profile.json` and/or `limitshift-queue.json`) — **not** analyze the repo and (re)generate `CLAUDE.md` / `README.md` / other docs. The onboarding trigger words were broadened from just "onboard" to also include "init" / "initialize" / "set up", and `CLAUDE.md` was returned to a thin shim after a generic `/init` had bloated it.
 
 ## [1.2.0] - 2026-06-18
 
