@@ -2759,11 +2759,14 @@ function Invoke-ModelValidation {
     $cacheHours = $Config.Settings.CapabilityCacheHours
     if ($policy -eq 'off') { return $true }
 
-    $profile = $null
+    $userProfile = $null
     if ($ValidateOnly) {
-        $profilePath = Join-Path $PSScriptRoot "limitshift-profile.json"
-        if (Test-Path $profilePath) {
-            $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+        # Profile location: $env:LIMITSHIFT_PROFILE_PATH wins when set (tests point this at a temp file so
+        # they never read or clobber a real limitshift-profile.json in the repo); otherwise the file next
+        # to the script. Named $userProfile, not $profile, to avoid shadowing PowerShell's automatic var.
+        $profilePath = if (-not [string]::IsNullOrWhiteSpace($env:LIMITSHIFT_PROFILE_PATH)) { $env:LIMITSHIFT_PROFILE_PATH } else { Join-Path $PSScriptRoot "limitshift-profile.json" }
+        if (Test-Path -LiteralPath $profilePath) {
+            $userProfile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
         }
     }
 
@@ -2800,11 +2803,15 @@ function Invoke-ModelValidation {
         }
         else {
             $validated = $false
-            if ($profile -ne $null -and $profile.clis.PSObject.Properties[$task.Cli] -ne $null) {
-                $declaredModels = $profile.clis.($task.Cli).models
+            if ($null -ne $userProfile -and $null -ne $userProfile.clis -and $null -ne $userProfile.clis.PSObject.Properties[$task.Cli]) {
+                # The profile declares models for this CLI, so it IS the validation source for this task -
+                # mark it validated whether or not each model matches, so a declared (valid) model does
+                # NOT fall through to the misleading "validation skipped" INFO below.
+                $validated = $true
+                $declaredModels = @($userProfile.clis.($task.Cli).models)
                 foreach ($model in $task.Models) {
                     if ($declaredModels -notcontains $model) {
-                         switch ($policy) {
+                        switch ($policy) {
                             'strictWhenDiscoverable' {
                                 [Console]::Error.WriteLine("ERROR: Task ${n}: model `"$model`" is not available for $($task.Cli) in profile")
                                 $hadError = $true
@@ -2813,11 +2820,10 @@ function Invoke-ModelValidation {
                                 Write-Warning "Task ${n}: model `"$model`" not found in profile for $($task.Cli) (continuing)"
                             }
                         }
-                        $validated = $true
                     }
                 }
             }
-            
+
             if (-not $validated) {
                 Write-Host "  INFO: Task ${n}: model validation skipped for $($task.Cli) ($($caps.Error))" -ForegroundColor DarkGray
             }

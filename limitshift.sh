@@ -1207,9 +1207,17 @@ validate_model_availability() {
   local had_error=0 i=0 cli model_type
   [ "$policy" = "off" ] && return 0
   
-  local profile_json=""
-  if [ -f "limitshift-profile.json" ]; then
-    profile_json=$(cat limitshift-profile.json)
+  # Profile location: $LIMITSHIFT_PROFILE_PATH wins when set (tests point this at a temp file so they
+  # never read or clobber a real profile in the repo); otherwise limitshift-profile.json next to the
+  # script. Mirrors limitshift.ps1.
+  local profile_path profile_json=""
+  if [ -n "${LIMITSHIFT_PROFILE_PATH:-}" ]; then
+    profile_path="$LIMITSHIFT_PROFILE_PATH"
+  else
+    profile_path="$SCRIPT_DIR/limitshift-profile.json"
+  fi
+  if [ -f "$profile_path" ]; then
+    profile_json=$(cat "$profile_path")
   fi
 
   while [ "$i" -lt "$TASK_COUNT" ]; do
@@ -1241,9 +1249,16 @@ validate_model_availability() {
         fi
       done <<< "$models_to_check"
     else
-      local validated=0
+      local validated=0 has_cli="false"
       if [ -n "$profile_json" ]; then
-        local declared_models; declared_models=$(printf '%s' "$profile_json" | jq -r ".clis[\"$cli\"].models[]? // empty" 2>/dev/null)
+        has_cli=$(printf '%s' "$profile_json" | jq -r --arg c "$cli" '((.clis // {}) | has($c))' 2>/dev/null)
+      fi
+      if [ "$has_cli" = "true" ]; then
+        # The profile declares models for this CLI, so it IS the validation source - mark validated
+        # whether or not each model matches, so a declared (valid) model does not fall through to the
+        # misleading "validation skipped" INFO below. Mirrors limitshift.ps1.
+        validated=1
+        local declared_models; declared_models=$(printf '%s' "$profile_json" | jq -r --arg c "$cli" '.clis[$c].models[]? // empty' 2>/dev/null)
         local models_to_check; models_to_check=$(get_task_models "$i")
         while IFS= read -r m; do
             [ -z "$m" ] && continue
@@ -1257,11 +1272,10 @@ validate_model_availability() {
                   echo "WARNING: Task $n: model \"$m\" not found in profile for $cli (continuing)" >&2
                   ;;
               esac
-              validated=1
             fi
         done <<< "$models_to_check"
       fi
-      
+
       if [ "$validated" -eq 0 ]; then
         local err_msg; err_msg=$(printf '%s' "$caps" | jq -r '.error // ""')
         echo "  INFO: Task $n: model validation skipped for $cli ($err_msg)" >&2

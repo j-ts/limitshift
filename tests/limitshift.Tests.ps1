@@ -4014,44 +4014,73 @@ exit 0
     }
 
     Describe 'profile-based model validation' {
-        BeforeAll {
-            $profilePath = Join-Path $repoRoot 'limitshift-profile.json'
-            if (Test-Path $profilePath) { Remove-Item $profilePath -Force }
-            Set-Content $profilePath '{"clis": {"claude": {"models": ["valid-model"]}}}' -Encoding UTF8
-        }
-        AfterAll {
-            $profilePath = Join-Path $repoRoot 'limitshift-profile.json'
-            if (Test-Path $profilePath) { Remove-Item $profilePath -Force }
-        }
-
-        It 'flags typo model when in profile (strict)' {
+        # Each test points $env:LIMITSHIFT_PROFILE_PATH at a temp profile, so the suite never reads or
+        # clobbers a real limitshift-profile.json in the repo. (The runner subprocess inherits the env.)
+        It 'flags a model not in the profile (strict) and exits 2' {
             $root = New-TestRoot
             $projectPath = Join-Path $root 'project'
             New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $profilePath = Join-Path $root 'limitshift-profile.json'
+            Set-Content -LiteralPath $profilePath '{"clis": {"claude": {"models": ["valid-model"]}}}' -Encoding UTF8
             $qPath = Join-Path $root 'q.json'
-            
             Write-TestQueue -Path $qPath -Config @{
                 settings = @{ modelValidation = 'strictWhenDiscoverable' }
                 tasks    = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='typo-model'; prompt='p' })
             }
-            $result = Invoke-ValidateOnly -QueuePath $qPath
-            $result.ExitCode | Should -Be 2
-            $result.Output | Should -Match 'not available'
+            $old = $env:LIMITSHIFT_PROFILE_PATH
+            try {
+                $env:LIMITSHIFT_PROFILE_PATH = $profilePath
+                $result = Invoke-ValidateOnly -QueuePath $qPath
+                $result.ExitCode | Should -Be 2
+                $result.Output | Should -Match 'not available for claude in profile'
+            }
+            finally { $env:LIMITSHIFT_PROFILE_PATH = $old }
         }
-        
-        It 'passes valid model in profile' {
+
+        It 'accepts a declared model and reports it validated (not skipped)' {
             $root = New-TestRoot
             $projectPath = Join-Path $root 'project'
             New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $profilePath = Join-Path $root 'limitshift-profile.json'
+            Set-Content -LiteralPath $profilePath '{"clis": {"claude": {"models": ["valid-model"]}}}' -Encoding UTF8
             $qPath = Join-Path $root 'q.json'
-            
             Write-TestQueue -Path $qPath -Config @{
                 settings = @{ modelValidation = 'strictWhenDiscoverable' }
                 tasks    = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='valid-model'; prompt='p' })
             }
-            $result = Invoke-ValidateOnly -QueuePath $qPath
-            $result.ExitCode | Should -Be 0
-            $result.Output | Should -Match 'Config OK'
+            $old = $env:LIMITSHIFT_PROFILE_PATH
+            try {
+                $env:LIMITSHIFT_PROFILE_PATH = $profilePath
+                $result = Invoke-ValidateOnly -QueuePath $qPath
+                $result.ExitCode | Should -Be 0
+                $result.Output | Should -Match 'Config OK'
+                # The profile was actually consulted: a declared model must NOT fall through to the
+                # "validation skipped" INFO. This is what distinguishes the feature from the default no-op.
+                $result.Output | Should -Not -Match 'validation skipped'
+            }
+            finally { $env:LIMITSHIFT_PROFILE_PATH = $old }
+        }
+
+        It 'leaves validation unchanged when no profile is configured' {
+            $root = New-TestRoot
+            $projectPath = Join-Path $root 'project'
+            New-Item -ItemType Directory -Path $projectPath -Force | Out-Null
+            $qPath = Join-Path $root 'q.json'
+            Write-TestQueue -Path $qPath -Config @{
+                settings = @{ modelValidation = 'strictWhenDiscoverable' }
+                tasks    = @(@{ name='t'; cli='claude'; projectPath=$projectPath; model='anything'; prompt='p' })
+            }
+            $old = $env:LIMITSHIFT_PROFILE_PATH
+            try {
+                # Point at a non-existent file: no profile is consulted, so behavior matches 1.2.0 -
+                # claude is non-discoverable, so the model is skipped (INFO) and the config still validates.
+                $env:LIMITSHIFT_PROFILE_PATH = (Join-Path $root 'no-such-profile.json')
+                $result = Invoke-ValidateOnly -QueuePath $qPath
+                $result.ExitCode | Should -Be 0
+                $result.Output | Should -Match 'Config OK'
+                $result.Output | Should -Match 'validation skipped'
+            }
+            finally { $env:LIMITSHIFT_PROFILE_PATH = $old }
         }
     }
 }

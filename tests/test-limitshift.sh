@@ -4535,54 +4535,54 @@ $out"
 
 run_profile_model_validation_test() {
   local desc="profile-based model validation"
-  
-  # Create a profile
-  echo '{"clis": {"claude": {"models": ["valid-model"]}}}' > limitshift-profile.json
-  
-  # Create a queue with typo model
   local root="$TMP_ROOT/profile-test"
   mkdir -p "$root/project"
+  # Profile and queue live under TMP_ROOT; LIMITSHIFT_PROFILE_PATH points the runner at the temp
+  # profile so the suite never reads or clobbers a real limitshift-profile.json in the repo.
+  local profile_path="$root/limitshift-profile.json"
   local queue_path="$root/queue.json"
+  echo '{"clis": {"claude": {"models": ["valid-model"]}}}' > "$profile_path"
+  local out exit_code
+
+  # 1) A model not in the profile fails under strict (exit 2).
   cat > "$queue_path" <<EOF
-{
-  "settings": { "modelValidation": "strictWhenDiscoverable" },
-  "tasks": [
-    { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "p", "model": "typo-model" }
-  ]
-}
+{ "settings": { "modelValidation": "strictWhenDiscoverable" },
+  "tasks": [ { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "p", "model": "typo-model" } ] }
 EOF
-
-  # Run validation
-  local out
-  out=$(bash "$SCRIPT" --validate-only --queue "$queue_path" 2>&1)
-  local exit_code=$?
-
-  rm limitshift-profile.json
-
-  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -q 'not available'; then
+  out=$(LIMITSHIFT_PROFILE_PATH="$profile_path" bash "$SCRIPT" --validate-only --queue "$queue_path" 2>&1)
+  exit_code=$?
+  if [ "$exit_code" -eq 2 ] && printf '%s' "$out" | grep -q 'not available for claude in profile'; then
     pass "$desc (strict fails typo)"
   else
     fail "$desc (strict fails typo)" "exit=$exit_code (wanted 2)
 $out"
   fi
-  
-  # Valid model
+
+  # 2) A declared model passes AND is reported validated (not skipped) - proves the profile was consulted.
   cat > "$queue_path" <<EOF
-{
-  "settings": { "modelValidation": "strictWhenDiscoverable" },
-  "tasks": [
-    { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "p", "model": "valid-model" }
-  ]
-}
+{ "settings": { "modelValidation": "strictWhenDiscoverable" },
+  "tasks": [ { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "p", "model": "valid-model" } ] }
 EOF
-  
-  out=$(bash "$SCRIPT" --validate-only --queue "$queue_path" 2>&1)
+  out=$(LIMITSHIFT_PROFILE_PATH="$profile_path" bash "$SCRIPT" --validate-only --queue "$queue_path" 2>&1)
   exit_code=$?
-  
-  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Config OK'; then
-    pass "$desc (strict passes valid)"
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Config OK' && ! printf '%s' "$out" | grep -q 'validation skipped'; then
+    pass "$desc (strict passes valid, consulted not skipped)"
   else
-    fail "$desc (strict passes valid)" "exit=$exit_code (wanted 0)
+    fail "$desc (strict passes valid, consulted not skipped)" "exit=$exit_code (wanted 0, no 'skipped')
+$out"
+  fi
+
+  # 3) With no profile configured, behavior matches 1.2.0 (claude non-discoverable -> skipped INFO).
+  cat > "$queue_path" <<EOF
+{ "settings": { "modelValidation": "strictWhenDiscoverable" },
+  "tasks": [ { "name": "t", "cli": "claude", "projectPath": "$root/project", "prompt": "p", "model": "anything" } ] }
+EOF
+  out=$(LIMITSHIFT_PROFILE_PATH="$root/no-such-profile.json" bash "$SCRIPT" --validate-only --queue "$queue_path" 2>&1)
+  exit_code=$?
+  if [ "$exit_code" -eq 0 ] && printf '%s' "$out" | grep -q 'Config OK' && printf '%s' "$out" | grep -q 'validation skipped'; then
+    pass "$desc (no profile -> unchanged)"
+  else
+    fail "$desc (no profile -> unchanged)" "exit=$exit_code (wanted 0, 'skipped' present)
 $out"
   fi
 }
