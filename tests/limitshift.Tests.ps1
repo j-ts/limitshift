@@ -111,11 +111,13 @@ exit 0
             $script:ForceColor | Should -BeFalse
         }
 
-        It 'does not use null as a sentinel for the typed background color' {
+        It 'draws the footer inline and never pins it to an absolute buffer row' {
+            # Regression guard: an earlier version pinned the hint at [Console]::WindowHeight - 1,
+            # ignoring WindowTop, so once the console scrolled the "Ctrl+C stop now..." line was
+            # stranded across the scrollback (appearing twice). The footer must redraw inline only.
             $functionText = ${function:Write-EphemeralFooter}.ToString()
-
-            $functionText | Should -Not -Match '\$BackgroundColor\s*=\s*\$null'
-            $functionText | Should -Match '\$setBackgroundColor'
+            $functionText | Should -Not -Match 'SetCursorPosition'
+            $functionText | Should -Not -Match 'WindowHeight'
         }
     }
 

@@ -461,7 +461,8 @@ function Invoke-UiSpinner {
             $armed = Test-StopRequested
             $hint = Get-StopHint -Armed:$armed
             $hintColor = if ($armed) { [System.ConsoleColor]::Yellow } else { [System.ConsoleColor]::DarkGray }
-            Write-EphemeralFooter -Text ("   " + $hint) -ForegroundColor $hintColor
+            # Pad to the active hint's width so the shorter armed hint leaves no leftover characters.
+            Write-EphemeralFooter -Text ("   " + $hint.PadRight($script:StopHintActive.Length)) -ForegroundColor $hintColor
 
             $pos += $dir
             if ($pos -ge ($track - 1) -or $pos -le 0) { $dir = -$dir }
@@ -478,70 +479,38 @@ function Invoke-UiSpinner {
 function Write-EphemeralFooter {
     param(
         [string]$Text,
-        [ConsoleColor]$ForegroundColor = 'DarkGray',
-        [ConsoleColor]$BackgroundColor = 'Black'
+        [ConsoleColor]$ForegroundColor = 'DarkGray'
     )
-    if (-not (Test-UiAnimatable)) {
-        return
-    }
+    if (-not (Test-UiAnimatable)) { return }
 
-    # Avoid explicitly setting the system-default background so terminal background rules still apply.
-    $setBackgroundColor = $script:ForceColor -or $Host.UI.RawUI.BackgroundColor -ne $BackgroundColor
-
-    $originalCursorLeft = [Console]::CursorLeft
-    $originalCursorTop = [Console]::CursorTop
-
-    $footerLine = [Console]::WindowHeight - 1
-    if ($footerLine -lt 0) { $footerLine = 0 } # Handle very small windows
-
-    # Move cursor to the footer line, clear it, write text, then restore cursor.
+    # Draw the hint INLINE - right after whatever is already on the current line (the spinner / rest
+    # countdown) - using [Console]::Write so it never reaches the transcript. The hint is transient:
+    # the caller rewrites the whole line from column 0 every tick, and Clear-EphemeralFooter (plus the
+    # PowerShell.Exiting handler) wipe it on teardown.
+    #
+    # We deliberately do NOT pin the footer to a fixed buffer row near the window bottom. An earlier
+    # version did exactly that and ignored the window's scroll offset, so once the console scrolled the
+    # stale "Ctrl+C stop now..." footer was stranded across the scrollback (appearing twice). Inline
+    # redraw is scroll-safe.
+    $prev = [Console]::ForegroundColor
     try {
-        [Console]::CursorVisible = $false
-        [Console]::SetCursorPosition(0, $footerLine)
-        [Console]::Write(' ' * [Console]::WindowWidth) # Clear the line
-        [Console]::SetCursorPosition(0, $footerLine) # Move back to start of line
-
-        # Store original colors to restore later
-        $originalFg = [Console]::ForegroundColor
-        $originalBg = [Console]::BackgroundColor
-
         [Console]::ForegroundColor = $ForegroundColor
-        if ($setBackgroundColor) {
-            [Console]::BackgroundColor = $BackgroundColor
-        }
         [Console]::Write($Text)
-
-        # Restore original colors and cursor position
-        [Console]::ForegroundColor = $originalFg
-        [Console]::BackgroundColor = $originalBg
     }
-    finally {
-        [Console]::SetCursorPosition($originalCursorLeft, $originalCursorTop)
-        [Console]::CursorVisible = $true
-    }
+    finally { [Console]::ForegroundColor = $prev }
 }
 
 function Clear-EphemeralFooter {
-    if (-not (Test-UiAnimatable)) {
-        return
-    }
+    if (-not (Test-UiAnimatable)) { return }
 
-    # Clear the footer line by overwriting it with spaces.
-    $originalCursorLeft = [Console]::CursorLeft
-    $originalCursorTop = [Console]::CursorTop
-
-    $footerLine = [Console]::WindowHeight - 1
-    if ($footerLine -lt 0) { $footerLine = 0 } # Handle very small windows
-
+    # Wipe the current line (spinner/countdown + hint) in place. Safe from any teardown path: normal
+    # end, graceful stop, Ctrl+C, error, or the PowerShell.Exiting handler.
     try {
-        [Console]::CursorVisible = $false
-        [Console]::SetCursorPosition(0, $footerLine)
-        [Console]::Write(' ' * [Console]::WindowWidth) # Clear the line
+        $cr = [string][char]13
+        $w = [Math]::Max(60, [Console]::WindowWidth - 1)
+        [Console]::Write($cr + (' ' * $w) + $cr)
     }
-    finally {
-        [Console]::SetCursorPosition($originalCursorLeft, $originalCursorTop)
-        [Console]::CursorVisible = $true
-    }
+    catch {}
 }
 Register-EngineEvent -SourceIdentifier 'PowerShell.Exiting' -Action { Clear-EphemeralFooter }
 
@@ -651,10 +620,8 @@ function Invoke-UiRest {
             $armed = Test-StopRequested
             $hint = Get-StopHint -Armed:$armed
             $hintColor = if ($armed) { [System.ConsoleColor]::Yellow } else { [System.ConsoleColor]::DarkGray }
-            Write-EphemeralFooter -Text ("   " + $hint) -ForegroundColor $hintColor
-            if ($armed) { # Clear the active hint when armed - this is probably redundant, as the Write-EphemeralFooter should overwrite it.
-                # I'll keep it as a safeguard, it won't hurt.
-            }
+            # Pad to the active hint's width so the shorter armed hint leaves no leftover characters.
+            Write-EphemeralFooter -Text ("   " + $hint.PadRight($script:StopHintActive.Length)) -ForegroundColor $hintColor
             if (Test-StopRequested) { break }
             $mi++
             Start-Sleep -Milliseconds 1000
