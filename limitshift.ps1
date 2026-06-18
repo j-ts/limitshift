@@ -1819,6 +1819,8 @@ exit `$LASTEXITCODE
     $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("limitshift-stderr-" + [guid]::NewGuid() + ".txt")
     $stdinPath = $null
     $processTimer = $null
+    $agyOutTask = $null
+    $agyErrTask = $null
 
     try {
         # When animating the working indicator we must NOT block on Start-Process; we launch and
@@ -1833,9 +1835,6 @@ exit `$LASTEXITCODE
             PassThru               = $true
             RedirectStandardOutput = $stdoutPath
             RedirectStandardError  = $stderrPath
-        }
-        if ((Get-Command Start-Process).Parameters.ContainsKey('CreateNoWindow')) {
-            $startProcessParams['CreateNoWindow'] = ($Cli -eq 'agy')
         }
         if (-not $animate) { $startProcessParams['Wait'] = $true }
 
@@ -1856,7 +1855,36 @@ exit `$LASTEXITCODE
         }
 
         $processTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        $process = Start-Process @startProcessParams
+        if ($Cli -eq 'agy') {
+            # agy paints its live "thinking" onto the controlling console. Start-Process can deny it a
+            # console only on PowerShell 7 (-CreateNoWindow); Windows PowerShell 5.1 has no such switch,
+            # so agy would inherit the console and spam the terminal. Launch agy through .NET with
+            # CreateNoWindow=$true (a true no-console launch that works on 5.1) so its chatter can never
+            # reach the screen - the real reply is recovered from agy's transcript. POSIX uses `setsid`.
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $launcherPath
+            if (-not [string]::IsNullOrEmpty($launcherArguments)) { $psi.Arguments = $launcherArguments }
+            $psi.WorkingDirectory = $WorkingDirectory
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.RedirectStandardInput = $true
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $psi
+            [void]$process.Start()
+            # agy reads its prompt from -p, not stdin; hand it an immediate EOF.
+            try {
+                if ($null -ne $StdinText -and $StdinText.Length -gt 0) { $process.StandardInput.Write($StdinText) }
+                $process.StandardInput.Close()
+            } catch {}
+            # Drain both streams concurrently so a full pipe buffer can never block agy.
+            $agyOutTask = $process.StandardOutput.ReadToEndAsync()
+            $agyErrTask = $process.StandardError.ReadToEndAsync()
+        }
+        else {
+            $process = Start-Process @startProcessParams
+        }
 
         if ($animate) {
             # Cache the process handle so .ExitCode survives after a non-blocking (-PassThru, no -Wait)
@@ -1867,6 +1895,17 @@ exit `$LASTEXITCODE
         }
         # Make sure the process has fully exited and its redirected files are flushed before reading.
         try { $process.WaitForExit() } catch {}
+
+        # agy's windowless launch captured stdout/stderr in-process; persist them to the same files the
+        # shared read path below expects (agy's stdout is normally empty - the reply lives in the transcript).
+        if ($Cli -eq 'agy') {
+            $capturedOut = ''
+            $capturedErr = ''
+            try { if ($null -ne $agyOutTask) { $capturedOut = [string]$agyOutTask.Result } } catch {}
+            try { if ($null -ne $agyErrTask) { $capturedErr = [string]$agyErrTask.Result } } catch {}
+            try { [System.IO.File]::WriteAllText($stdoutPath, $capturedOut) } catch {}
+            try { [System.IO.File]::WriteAllText($stderrPath, $capturedErr) } catch {}
+        }
         if ($null -ne $processTimer) {
             $processTimer.Stop()
             Add-UiSessionTotalTime -Span $processTimer.Elapsed
@@ -2417,14 +2456,10 @@ function Invoke-CliTaskRun {
         Command = $exe;
         Arguments = $arguments;
         WorkingDirectory = $Task.ProjectPath;
-        Spinner = if ($Task.Cli -eq 'agy') { $false } else { $true } # Disable spinner for agy
+        Spinner = $true   # agy now runs windowless (no console chatter), so the spinner is safe again
     }
     $invokeParams['StdinText'] = if ($Task.Cli -eq 'agy' -or $Task.Cli -eq 'copilot') { '' } else { $prompt }
 
-    # If agy, show a static "agy working..." message instead of the animated spinner.
-    if ($Task.Cli -eq 'agy' -and -not $Quiet) {
-        Write-Host ("  " + $script:GlyphStar + " agy working...") -ForegroundColor $script:UiAccentColor
-    }
     $processResult = Invoke-NativeProcess @invokeParams
     $exitCode = $processResult.ExitCode
     $outputText = $processResult.OutputText
