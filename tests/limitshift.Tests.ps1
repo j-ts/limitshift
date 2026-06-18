@@ -110,6 +110,13 @@ exit 0
             { $null = $script:ForceColor } | Should -Not -Throw
             $script:ForceColor | Should -BeFalse
         }
+
+        It 'does not use null as a sentinel for the typed background color' {
+            $functionText = ${function:Write-EphemeralFooter}.ToString()
+
+            $functionText | Should -Not -Match '\$BackgroundColor\s*=\s*\$null'
+            $functionText | Should -Match '\$setBackgroundColor'
+        }
     }
 
     Context 'Session total time' {

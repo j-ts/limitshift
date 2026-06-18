@@ -485,10 +485,8 @@ function Write-EphemeralFooter {
         return
     }
 
-    if (-not $script:ForceColor -and $Host.UI.RawUI.BackgroundColor -eq $BackgroundColor) {
-        # Avoid explicit background color when it's the system default to let `term-background` rules apply.
-        $BackgroundColor = $null
-    }
+    # Avoid explicitly setting the system-default background so terminal background rules still apply.
+    $setBackgroundColor = $script:ForceColor -or $Host.UI.RawUI.BackgroundColor -ne $BackgroundColor
 
     $originalCursorLeft = [Console]::CursorLeft
     $originalCursorTop = [Console]::CursorTop
@@ -508,7 +506,7 @@ function Write-EphemeralFooter {
         $originalBg = [Console]::BackgroundColor
 
         [Console]::ForegroundColor = $ForegroundColor
-        if ($null -ne $BackgroundColor) {
+        if ($setBackgroundColor) {
             [Console]::BackgroundColor = $BackgroundColor
         }
         [Console]::Write($Text)
