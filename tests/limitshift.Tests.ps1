@@ -105,6 +105,13 @@ exit 0
         }
     }
 
+    Context 'Ephemeral footer' {
+        It 'initializes the force-color flag used under strict mode' {
+            { $null = $script:ForceColor } | Should -Not -Throw
+            $script:ForceColor | Should -BeFalse
+        }
+    }
+
     Context 'Session total time' {
         It 'prints a total time line for a fixed number of seconds' {
             $script:UiSessionTotalSeconds = 3661

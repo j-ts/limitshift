@@ -95,6 +95,7 @@ $TaskBlockedMarker  = "[[TASK_BLOCKED]]"
 $script:UiAccentColor = [System.ConsoleColor]::Magenta
 $script:UiTaskTotal   = 0
 $script:UiTaskStart   = $null
+$script:ForceColor    = $false
 
 $script:GlyphStar = [char]0x2726   # four-pointed star
 $script:GlyphTask  = [char]0x25B8   # small right triangle
