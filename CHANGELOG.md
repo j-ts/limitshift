@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-06-19
 
 ### Added
 - **Personal agent preference profile.** Added agent-facing `limitshift-profile.json` support for per-CLI model lists, limit-bucket topology, and routing preferences, shipped a committed `limitshift-profile.example.json`, documented the onboarding protocol in `AGENTS.md`, and taught `--validate-only` to perform an offline cross-check of queue model choices against the profile.
